@@ -1,0 +1,10 @@
+# 构建上下文收紧（0.4 落码后生效）：排除一切非构建必需文件，避免 /mnt/c 上下文传输拖慢构建
+.git
+.gitignore
+node_modules
+dist
+.vite
+.idea
+.vscode
+*.log
+npm-debug.log*

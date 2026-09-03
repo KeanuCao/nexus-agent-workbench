@@ -1,0 +1,197 @@
+# =============================================================================
+# nexus 基础设施编排（task.1 / 0.1 交付物）
+#
+# 关键约定（与 docs/design/00-环境与部署.md §2 严格一致）：
+#   1. 镜像加速：image: 直写 docker.m.daocloud.io 前缀（官方镜像走 /library/ 路径），
+#      严禁修改 /etc/docker/daemon.json —— 加速配置随仓库走、任何干净机器可复现。
+#   2. 仅在 WSL 发行版 nexus-agent-workbench 内的 docker/compose 执行。
+#   3. 宿主端口全部经 .env 变量化（改一处生效）；容器内端口固定，
+#      健康检查与 nginx 反代不随宿主端口漂移。
+#   4. builder 走 profiles: ["build"]，不进默认 up -d 服务图 —— 运行期不常驻，
+#      按需 `docker compose run --rm builder <命令>`（0.2 起兼任 db-patch 迁移执行器）。
+#   5. 数据一律命名卷（WSL ext4），不用 bind mount 映射 /mnt/c 数据目录（9p 性能/权限风险）。
+#
+# 用法（0.3 由 scripts/up.sh 封装，现阶段人工执行）：
+#   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose up -d"
+#   （compose 自动发现同目录 .env；从仓库根目录调用时加 -f docker-compose/docker-compose.yml）
+# =============================================================================
+name: nexus
+
+services:
+  # ─────────────────────────── 基础设施 ───────────────────────────
+  postgres:
+    image: docker.m.daocloud.io/pgvector/pgvector:pg16
+    container_name: nexus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-nexus}
+      POSTGRES_USER: ${PG_USER:-nexus}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nexus123}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-nexus} -d ${PG_DB:-nexus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - nexus-net
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    container_name: nexus-redis
+    restart: unless-stopped
+    # dev 不设密码：仅容器内网 + 本机端口映射；生产需 requirepass（取舍记录见设计文档 §2.1）
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - nexus-net
+
+  ollama:
+    image: docker.m.daocloud.io/ollama/ollama:${OLLAMA_TAG:-latest}
+    container_name: nexus-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # CPU 推理（2026-09-03 已确定）。GPU 直通预留（需 nvidia-container-toolkit + 驱动）：
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - nexus-net
+
+  # 一次性模型拉取：复用 ollama 镜像客户端模式（服务与 CLI 同镜像），
+  # 脚本先 ollama list 判存在则跳过 —— 重复 up -d 幂等、不重复下载（设计文档 §2.5）。
+  ollama-init:
+    image: docker.m.daocloud.io/ollama/ollama:${OLLAMA_TAG:-latest}
+    container_name: nexus-ollama-init
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for model in qwen2.5:7b nomic-embed-text; do
+          if ollama list | awk '{print $$1}' | grep -qx "$${model}"; then
+            echo "[ollama-init] 模型 $${model} 已存在，跳过"
+          else
+            echo "[ollama-init] 开始拉取模型 $${model} ..."
+            ollama pull "$${model}"
+          fi
+        done
+        echo "[ollama-init] 模型就绪：qwen2.5:7b / nomic-embed-text"
+    networks:
+      - nexus-net
+
+  # ─────────────────────────── 打包容器（运行期不常驻） ───────────────────────────
+  # 专门的 nexus-builder：git + mvn 3.9/JDK17 + node 20 + postgresql-client（见 builder/Dockerfile）。
+  # profiles 隔离：不进默认 up -d 服务图；按需 docker compose run --rm builder <命令>。
+  # 0.2 起：挂载 /db-patch 连 nexus-net 内 postgres 执行补丁迁移；0.4 起：前后端镜像共用构建阶段。
+  builder:
+    image: nexus-builder:dev
+    profiles: ["build"]
+    build:
+      context: ./builder
+      dockerfile: Dockerfile
+    container_name: nexus-builder
+    networks:
+      - nexus-net
+
+  # ─────────────────────────── 应用容器（0.4 落码后可构建） ───────────────────────────
+  nexus-backend:
+    image: nexus-backend:dev
+    build:
+      # 构建上下文为 backend 工程目录（Dockerfile 位于 docker-compose/backend/，
+      # 由 BuildKit 支持 Dockerfile 位于上下文之外；旧版 classic builder 不支持此写法）。
+      context: ../backend
+      dockerfile: ./backend/Dockerfile
+    container_name: nexus-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8089}:8089"
+    environment:
+      # 容器内端口固定 8089（与健康检查/nginx 反代一致）；改宿主端口只动 .env 的 BACKEND_PORT
+      SERVER_PORT: "8089"
+      # 0.4 落码后按需补充 SPRING_DATASOURCE_*/SPRING_DATA_REDIS_* 环境变量（凭据同 .env 来源）
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /actuator/health：Spring Boot Actuator 探活（0.4 落地，业务接口为 /api/health）
+      test: ["CMD-SHELL", "wget -qO- localhost:8089/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks:
+      - nexus-net
+
+  nexus-frontend:
+    image: nexus-frontend:dev
+    build:
+      # 构建上下文为 frontend 工程目录；nginx.conf 与 Dockerfile 同处 docker-compose/frontend/，
+      # 经 additional_contexts 命名上下文引入镜像（COPY --from=nginx-conf）。
+      context: ../frontend
+      dockerfile: ./frontend/Dockerfile
+      additional_contexts:
+        nginx-conf: ./frontend
+    container_name: nexus-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8088}:80"
+    depends_on:
+      nexus-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - nexus-net
+
+# ─────────────────────────── 网络与命名卷 ───────────────────────────
+# 单一自定义 bridge：容器间用服务名互访，不依赖宿主 DNS（设计文档 §2.1）
+networks:
+  nexus-net:
+    name: nexus-net
+    driver: bridge
+
+# 命名卷落在 WSL ext4（避开 /mnt/c 9p 性能坑）；name 固定，避免随项目名/目录漂移
+volumes:
+  pg-data:
+    name: pg-data
+  redis-data:
+    name: redis-data
+  ollama-models:
+    name: ollama-models
