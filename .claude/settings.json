@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-archive-check.js\"",
+            "timeout": 30,
+            "statusMessage": "检查子代理任务留档"
+          }
+        ]
+      }
+    ]
+  }
+}
