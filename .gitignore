@@ -1,0 +1,46 @@
+# ── 环境变量（含密钥，严禁提交）──
+.env
+.env.local
+.env.*.local
+# 例外：docker-compose/.env 为 dev 演示默认值（无敏感信息），随仓库提交
+!docker-compose/.env
+
+# ── Claude Code 本地配置 ──
+# settings.local.json 含 API Token / 本地权限，严禁提交
+.claude/settings.local.json
+# settings.json 仅含团队共享 hooks（无密钥），随仓库提交
+!.claude/settings.json
+
+# ── Java / Maven ──
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ── Node / Vite ──
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── IDE ──
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+
+# ── 日志 ──
+logs/
+*.log
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Docker 本地数据卷 ──
+docker-compose/data/
