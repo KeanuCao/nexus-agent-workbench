@@ -38,6 +38,7 @@
 > | 2026-09-03 | 模型下载不走镜像加速 | 直连 registry.ollama.ai，24MB/s ≈2min/5GB |
 > | 2026-09-03 | 双层 shell `$var` 展开丢失 | 用显式命令或传脚本体，不用内层变量 |
 > | 2026-09-03 | `docker inspect -f` 模板取空值 | 验证状态统一用 `docker compose ps` |
+> | 2026-09-11 | Node 版本漂移（Windows v24.16.0 / builder Node 20） | 不构成风险：依赖 engines 兼容范围兜住；EBADENGINE 仅告警、不中断安装 |
 
 ### 3.1 DaoCloud 镜像前缀可用性（`docker.m.daocloud.io`）
 
@@ -80,6 +81,28 @@
 - **日志/证据**：检查点 H 实测时 `-f '{{...}}'` 模板输出为空；改用 `docker compose ps`（或去掉 `-f` 的普通 inspect）后信息完整。
 - **官方文档出处**：Docker CLI 参考（docs.docker.com 的 `docker inspect --format` Go 模板语法）；空值问题属本环境双层 shell 叠加所致，以实测为准。
 - **结论**：验证容器/健康状态统一用 `docker compose ps`；确需 `-f` 模板时经脚本文件执行，避免内层 `'{{...}}'` 引号被剥。
+
+### 3.7 Node 版本漂移：Windows 本地 v24.16.0 vs builder 容器 Node 20（不构成风险）
+
+- **现象**：前端 `package-lock.json` 在 Windows 本地（Node **v24.16.0**）生成，容器内由 Node 20 的 builder 执行 `npm ci` 消费 —— 两端**跨大版本**，与设计文档 §5.2 原写"与 Windows 侧本地开发用同一大版本，避免行为漂移"的意图相悖（该表述已于 2026-09-11 修订）。待确认：容器构建会不会因引擎不匹配而失败、Windows 生成的 lock 在 Linux 容器里会不会缺原生依赖。2026-09-12 复核后记入本手册。
+- **日志/证据**：
+  - 本地 `node --version` → `v24.16.0`；builder 镜像经 nodesource `setup_20.x` 安装 Node 20（`docker-compose/builder/Dockerfile`）。
+  - `frontend/package-lock.json` 为 `"lockfileVersion": 3`；关键包 `engines` 实测值（2026-09-12 从 lock 内逐条读出）：
+
+    | 包 | 版本 | `engines.node` | 覆盖 Node 20 |
+    |----|------|----------------|-------------|
+    | vite | 5.4.21 | `^18.0.0 \|\| >=20.0.0` | 是 |
+    | rollup | 4.63.1 | `>=18.0.0` | 是 |
+    | @vitejs/plugin-vue | 5.2.4 | `^18.0.0 \|\| >=20.0.0` | 是 |
+
+    主链路三个包均覆盖 Node 20，无引擎冲突。
+  - lock 内含 **Linux 平台二进制**（均 `optional: true`）：`@rollup/rollup-linux-x64-gnu@4.63.1`、`@esbuild/linux-x64@0.21.5` → Windows 生成的 lock 在容器内不缺原生依赖（与 agent-log `20260911-frontend骨架.md` 的 `npm ci --dry-run` = `up to date in 334ms` 互证）。
+  - **唯一引擎不匹配的包**：`@napi-rs/lzma-linux-x64-gnu@1.5.1`，engines 为 `^22.20 || ^24.12 || >=25`（**不含 Node 20**）。它不是项目直接依赖 —— 全 lock 内唯一引用处是 **rollup 的 `optionalDependencies`**。
+    - 本机最小复现（npm 11.13.0）：临时包声明不匹配的 engines → 默认（`engine-strict=false`；本仓库无 `.npmrc` 覆盖）`npm install --dry-run` 输出 `npm warn EBADENGINE ...`，**exit 0**（安装继续）；显式 `--engine-strict=true` 才 `npm error notsup`、exit 1。
+    - 反向取证：rollup 4.63.1 的**运行时产物**（`dist/rollup.js`、`dist/native.js`、`dist/shared/index.js`）中**没有任何对 `@napi-rs/lzma` 的引用**（全文只出现一个名为 `lzma` 的**文件扩展名字符串**）；其包内 `comments` 字段自述该条目服务于 rollup 自身的交叉编译工具链（`napi build --use-napi-cross`）。即便该 optional 依赖被跳过，rollup 运行时也不受影响。
+  - ⚠️ 未闭合项：容器内 `npm ci` 的**实际日志尚未留档**（Node 20 自带的 npm 为 10.x，与上面复现所用本地 npm 11.13.0 非同版本）；完全闭合应在下次容器构建时确认日志中**无 error 级 EBADENGINE**。
+- **官方文档出处**：npm 文档（docs.npmjs.com：`package.json` 的 `engines` 字段、`engine-strict` 配置项）；Node.js 官方 Release 日程表（github.com/nodejs/Release）。本机无外网（docs.docker.com / github.com 均超时）**未在线复核** —— "engine-strict 默认 false、EBADENGINE 仅告警"已用**本机最小复现**代替在线文档取证。
+- **结论**：**不构成风险**，两层兜底：① 依赖锁定的 engines 兼容范围覆盖 Node 20（主链路全绿）；② 唯一不匹配者只是 rollup 的可选依赖且运行时零引用。**关键：不是靠"版本对齐"** —— 排查构建问题不要往这条使劲。附 watch item：**Node 20 的官方维护期已于 2026-04-30 结束**（演示项目不阻塞；将来升级只需改 `builder/Dockerfile` 一处）。
 
 ## 4. 常见问题预案（占位，遇到实际问题后填充）
 
