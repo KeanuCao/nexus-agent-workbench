@@ -1,0 +1,240 @@
+# =============================================================================
+# nexus 后端 API 契约（OpenAPI 3.0.3）
+#
+# 来源：docs/design/00-环境与部署.md §5.3（已确认设计，契约逐字对齐）
+# 面向：frontend-engineer（src/api/*.ts 的类型定义以本文件为准）
+#
+# 约定速记：
+#   - 所有接口返回统一响应体 Result<T>：{ code, msg, data }，code === 0 为成功；
+#   - 业务异常走 HTTP 200 + code≠0（前端拦截器按 code 判定并弹出 msg）；
+#   - HTTP 状态码只用于传输/可用性语义：404 路径不存在、500 系统异常、503 依赖不可用；
+#   - 本阶段（阶段0）无鉴权、无请求体、无查询参数；token 注入在阶段1 接通。
+# =============================================================================
+openapi: 3.0.3
+
+info:
+  title: nexus 统一 AI 网关 —— API 契约
+  version: 0.1.0
+  description: |
+    演示项目后端接口契约。阶段0 仅暴露系统级接口（健康检查）。
+
+    ## 统一响应体约定
+    所有接口（含错误）一律返回 `Result<T>`：
+
+    ```json
+    { "code": 0, "msg": "success", "data": { /* 各接口自定义 */ } }
+    ```
+
+    - `code === 0`：成功，`data` 为业务数据（`Result.data` 的类型见各接口 schema）；
+    - `code !== 0`：失败，`msg` 是可直接展示给前端的文案，`data` 通常为 `null`
+      （例外：健康检查 503 时 `data` 仍返回完整报告，便于前端定位故障依赖）。
+
+    ## 错误码（阶段0 已落地部分）
+    | code | 常量 | HTTP | 含义 |
+    | --- | --- | --- | --- |
+    | 0 | SUCCESS | 200 | 成功 |
+    | 10000 | BUSINESS_ERROR | 200 | 通用业务失败（`BusinessException` 默认码） |
+    | 20000 | SERVICE_UNAVAILABLE | 503 | 依赖服务不可用（健康检查探活失败） |
+    | 40400 | NOT_FOUND | 404 | 请求的路径/资源不存在 |
+    | 50000 | SYSTEM_ERROR | 500 | 系统异常（详情仅进服务端日志，不返回给前端） |
+
+    阶段1 起按模块细分业务码，编码分段：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+
+    ## 前端解包路径（对齐 frontend/src/api/request.ts）
+    axios 实例 `baseURL = '/api'`，故 `url: '/health'` 即本文件的 `GET /api/health`。
+    响应拦截器已把 `Result<T>` 解包为 `data`，业务代码直接拿到 `HealthData`；
+    非 0 业务码 / 4xx / 5xx 走 reject 分支，`error.response.data.msg` 可用于提示。
+servers:
+  - url: http://localhost:8089
+    description: 直连后端（WSL 内容器端口映射到宿主机 8089，端口可经 docker-compose/.env 的 BACKEND_PORT 调整）
+  - url: /
+    description: 同源相对路径（前端 dev 由 vite.config.ts 代理 /api → localhost:8089；生产由 nginx 反代 /api → nexus-backend:8089）
+
+tags:
+  - name: System
+    description: 系统级接口（健康检查、运行信息），无需鉴权
+
+paths:
+  /api/health:
+    get:
+      tags:
+        - System
+      operationId: getHealth
+      summary: 健康检查（依赖真实连通性探测）
+      description: |
+        对各依赖做**真实**连通性探测（设计文档 §5.3：不造假 —— 这是面试演示链路的第一步）：
+
+        | 依赖 | 探测方式 |
+        | --- | --- |
+        | postgres | 取一次 JDBC 连接并执行 `SELECT 1` |
+        | redis | 发送 `PING`，比对响应是否为 `PONG` |
+        | ollama | 请求 `GET /api/version`，有响应体即视为可用（不校验模型是否已拉取） |
+
+        语义说明：
+        - **HTTP 200**：三个依赖全部 UP，`data.status = UP`；
+        - **HTTP 503**：任一依赖 DOWN，`data.status = DOWN`，响应体结构不变 ——
+          `msg` 提示"依赖服务不可用：postgres"（可展示），`data.checks` 保留完整探测结果，
+          前端既可直接弹 `msg`，也可从 `data.checks` 定位具体故障依赖；
+        - 依赖不可用**不会导致后端启动失败**（Hikari 池不做初始连接尝试），
+          因此容器起来后本接口仍是可用入口，只是返回 503。
+
+        请求约定：无请求体、无查询参数、无鉴权要求（`security: []`）。
+        另有容器级探活入口 `GET /actuator/health`（Spring Boot Actuator，返回格式非 `Result`，
+        仅供 docker-compose healthcheck 与运维使用，前端**不要**调用）。
+      security: []
+      parameters: []
+      responses:
+        '200':
+          description: 全部依赖可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultHealthReport'
+              examples:
+                allUp:
+                  summary: 依赖全部可用
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      status: UP
+                      service: nexus-start
+                      version: 0.1.0
+                      timestamp: '2026-09-03T10:00:00+08:00'
+                      checks:
+                        postgres: UP
+                        redis: UP
+                        ollama: UP
+        '503':
+          description: 依赖探活失败（任一 checks 为 DOWN）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultHealthReport'
+              examples:
+                postgresDown:
+                  summary: postgres 不可达，redis / ollama 正常
+                  value:
+                    code: 20000
+                    msg: 依赖服务不可用：postgres
+                    data:
+                      status: DOWN
+                      service: nexus-start
+                      version: 0.1.0
+                      timestamp: '2026-09-03T10:00:00+08:00'
+                      checks:
+                        postgres: DOWN
+                        redis: UP
+                        ollama: UP
+                allDown:
+                  summary: 依赖全部不可达（如未执行 up.sh 时的空环境）
+                  value:
+                    code: 20000
+                    msg: 依赖服务不可用：postgres、redis、ollama
+                    data:
+                      status: DOWN
+                      service: nexus-start
+                      version: 0.1.0
+                      timestamp: '2026-09-03T10:00:00+00:00'
+                      checks:
+                        postgres: DOWN
+                        redis: DOWN
+                        ollama: DOWN
+
+components:
+  schemas:
+
+    # ── 统一响应体外壳（泛型 Result<T> 的通用部分）──
+    Result:
+      type: object
+      description: 统一响应体外壳，所有接口共用；`data` 的具体结构由各接口定义
+      required:
+        - code
+        - msg
+      properties:
+        code:
+          type: integer
+          format: int32
+          description: 响应码：0 = 成功，非 0 = 失败（错误码表见 info.description）
+          example: 0
+        msg:
+          type: string
+          description: 提示信息：成功固定为 `success`；失败为可直接展示给前端的文案
+          example: success
+        data:
+          description: 业务数据；失败且无数据时为 `null`
+          nullable: true
+
+    # ── GET /api/health 的 data 定义（前端 HealthData）──
+    ResultHealthReport:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/HealthReport'
+
+    HealthReport:
+      type: object
+      description: |
+        健康检查报告 —— 即 `Result.data`（设计文档 §5.3 契约，字段顺序固定）。
+        对应前端 `frontend/src/api/health.ts` 的 `HealthData`。
+      required:
+        - status
+        - service
+        - version
+        - timestamp
+        - checks
+      properties:
+        status:
+          allOf:
+            - $ref: '#/components/schemas/DependencyStatus'
+          description: 总体状态：三个依赖全部 UP 才是 UP，任一 DOWN 即为 DOWN
+        service:
+          type: string
+          description: 服务名，取自配置 `nexus.health.service-name`
+          example: nexus-start
+        version:
+          type: string
+          description: 服务版本号，取自 `nexus.health.version`（构建期由 Maven 资源过滤注入 pom 版本）
+          example: 0.1.0
+        timestamp:
+          type: string
+          format: date-time
+          description: |
+            生成时刻，ISO-8601 带时区偏移，格式固定为 `yyyy-MM-dd'T'HH:mm:ssXXX`
+            （秒级精度、无小数秒）。偏移量取服务端默认时区 —— 容器内通常为 `+00:00`，
+            Windows 本地直跑为 `+08:00`。前端按字符串展示即可，需要 Date 对象时可 `new Date(timestamp)`。
+          example: '2026-09-03T10:00:00+08:00'
+        checks:
+          $ref: '#/components/schemas/HealthChecks'
+
+    HealthChecks:
+      type: object
+      description: 各依赖的真实连通性探测结果；取值只有 `UP` / `DOWN`
+      required:
+        - postgres
+        - redis
+        - ollama
+      properties:
+        postgres:
+          allOf:
+            - $ref: '#/components/schemas/DependencyStatus'
+          description: Postgres 探活：取 JDBC 连接执行 `SELECT 1`
+        redis:
+          allOf:
+            - $ref: '#/components/schemas/DependencyStatus'
+          description: Redis 探活：`PING` 得到 `PONG`
+        ollama:
+          allOf:
+            - $ref: '#/components/schemas/DependencyStatus'
+          description: Ollama 探活：`GET /api/version` 返回响应体
+
+    DependencyStatus:
+      type: string
+      description: 探活状态。枚举名即 JSON 取值，与前端 `HealthStatus = 'UP' | 'DOWN'` 一致
+      enum:
+        - UP
+        - DOWN

@@ -1,0 +1,111 @@
+# =============================================================================
+# nexus-start 应用配置（task.1 / 0.4 交付物）
+#
+# 约定（与 docs/design/00-环境与部署.md §2.1 / §5.3 一致）：
+#   1. 容器内端口固定 8089 —— 与 docker-compose/backend/Dockerfile 的 EXPOSE、
+#      docker-compose.yml 的健康检查与 nginx 反代保持一致；宿主端口由 .env 的
+#      BACKEND_PORT 控制，容器内不变。
+#   2. 数据源 / Redis 默认指向 compose 网络内的服务名（postgres / redis），
+#      本地（Windows 宿主机）开发时用环境变量覆盖为 localhost，无需改本文件。
+#   3. `${...:默认值}` 由 Spring 解析，不会被 Maven 资源过滤（spring-boot-starter-parent
+#      已配置 resource.delimiter=@ 且 useDefaultDelimiters=false，见其 POM）；
+#      而 `@project.version@` 正是 Maven 过滤占位符，打包时替换为 pom 中的版本号。
+#   4. 依赖不可达不得阻塞启动：Hikari initialization-fail-timeout=-1（池不做初始连接尝试），
+#      各探活超时兜底 —— 探测失败只体现为 /api/health 的 checks 标 DOWN + HTTP 503。
+# =============================================================================
+server:
+  port: ${SERVER_PORT:8089}
+  # 优雅停机：容器 stop 时先摘流量再退，避免正在处理的请求被硬断（配合下面的 lifecycle 超时）
+  shutdown: graceful
+
+spring:
+  application:
+    name: nexus-start
+
+  # ── 数据源（PostgreSQL 16 + pgvector，容器内服务名 postgres）──
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:postgres}:${POSTGRES_PORT:5432}/${POSTGRES_DB:nexus}
+    username: ${POSTGRES_USER:nexus}
+    password: ${POSTGRES_PASSWORD:nexus123}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: nexus-hikari-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      # 获取连接的最长等待：健康检查探活靠它兜底，不可设得比探活超时更长
+      connection-timeout: 3000
+      validation-timeout: 2000
+      # 关键：< 0 表示池启动时不做初始连接尝试（Hikari 语义），
+      # 数据库不可达时应用照常启动 —— "探活失败 ≠ 启动失败"的技术落点
+      initialization-fail-timeout: -1
+
+  # ── Redis 7（容器内服务名 redis；dev 不设密码，见设计文档 §2.1 取舍记录）──
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      database: 0
+      connect-timeout: 2000ms
+      timeout: 2000ms
+      lettuce:
+        shutdown-timeout: 100ms
+
+  lifecycle:
+    # 优雅停机的等待上限，超时强制退出（容器 stop 默认 10s 宽限期，故取更小的 20s 上限亦安全）
+    timeout-per-shutdown-phase: 20s
+
+# ── MyBatis-Plus：阶段0 只接入依赖、不写 Mapper；多租户拦截器 / 分页 / 主键策略在阶段1 按设计文档补充 ──
+mybatis-plus:
+  global-config:
+    # 关闭 MP 启动横幅，保持日志干净（面试演示时日志里只留业务链路）
+    banner: false
+  configuration:
+    # 下划线列名 → 驼峰属性名（t_xxx 表字段风格统一，阶段1 起大量使用）
+    map-underscore-to-camel-case: true
+
+# ── Actuator：容器健康检查入口（docker-compose healthcheck 调 /actuator/health）──
+management:
+  endpoints:
+    web:
+      exposure:
+        # 只暴露 health / info：演示项目也不该把 env、beans 等内部信息敞开
+        include: health,info
+  endpoint:
+    health:
+      # 演示项目：展示各 health indicator 明细（db / redis / diskSpace 等），
+      # 便于面试时讲解"容器级健康 vs 业务级健康"两层探活的区别
+      show-details: always
+
+info:
+  app:
+    name: ${spring.application.name}
+    # 引号原因同上：YAML 保留字符 '@' 不能作为未加引号标量的首字符
+    version: "@project.version@"
+    description: nexus 统一 AI 网关演示项目 —— 启动模块
+
+# info.* 属性默认不对外暴露（Boot 2.6+ 安全默认值），显式打开，让 /actuator/info 可读
+management.info.env.enabled: true
+
+# ── 业务自定义配置 ──
+nexus:
+  health:
+    # 响应体 data.service / data.version（契约：docs/design/00-环境与部署.md §5.3）
+    service-name: nexus-start
+    # Maven 资源过滤注入 pom 版本号：版本号单一来源，避免硬编码漂移。
+    # 必须加引号 —— YAML 中 '@' 是保留字符，不能作为未加引号标量的首字符，
+    # 否则 SnakeYAML 直接报 "found character '@' that cannot start any token"
+    version: "@project.version@"
+    # 单个依赖探活超时（毫秒）：HTTP 连接/读取超时、JDBC statement 超时均由此换算
+    probe-timeout-ms: 2000
+    ollama:
+      # 容器内服务名；Windows 本地开发用 OLLAMA_BASE_URL=http://localhost:11434 覆盖
+      base-url: ${OLLAMA_BASE_URL:http://ollama:11434}
+      # Ollama 版本接口：能返回即证明进程可用（不校验模型是否已拉取，那是 up.sh 的职责）
+      version-path: /api/version
+
+# ── 日志 ──
+logging:
+  level:
+    root: info
+    # 本项目包统一 info：关键流程（探活、向量入库、大模型调用）按宪法要求打 log.info
+    com.nexus: info

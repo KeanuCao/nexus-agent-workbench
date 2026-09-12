@@ -3,7 +3,7 @@ name: backend-engineer
 description: Java / Spring Boot 后端开发专家。擅长编写服务端业务代码、数据库迁移脚本（DB Patches）、API 契约文档。不打包、不部署、不进行端到端验证。
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
-maxTurns: 40
+maxTurns: 100
 memory: project
 color: blue
 ---

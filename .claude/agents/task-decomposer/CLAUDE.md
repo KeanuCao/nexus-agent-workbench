@@ -3,7 +3,7 @@ name: task-decomposer
 description: 项目任务分解与工作流编排专家。将 L1 阶段级任务拆解为原子级可执行任务，明确依赖、交付物、验收标准和推荐执行角色
 tools: Read, Glob, Grep, Write, Edit
 model: sonnet
-maxTurns: 30
+maxTurns: 100
 memory: project
 color: yellow
 ---

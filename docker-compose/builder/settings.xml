@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  =============================================================================
+  nexus-builder 的 Maven 源配置（国内网络可达性）
+
+  为什么需要它：这是本项目唯一没有"lock 等价物"的依赖下载环节 —— npm 侧靠
+  package-lock.json 里固化的 resolved URL（实测 148/148 指向 npmmirror）已经安全，
+  而 Maven 每次构建都要重新解析，首次下载 Spring Boot 全家桶 + MyBatis-Plus 达 150MB+，
+  走境外源（repo.maven.apache.org）极易超时。
+
+  注入方式：builder/Dockerfile 里 `COPY settings.xml /root/.m2/settings.xml`，
+  即 Maven 的用户级配置位（${user.home}/.m2/settings.xml），优先级高于全局配置。
+
+  ⚠️ mirrorOf 只写 central，不写 *：
+     本项目依赖全部来自 Maven Central（Spring Boot 3.3.13 稳定版 + MyBatis-Plus 3.5.9）。
+     写 * 会在将来引入任何非 central 仓库的依赖时被全部拦截，制造难以排查的解析失败。
+     真要放开时逐个补 <mirrorOf> 的逗号分隔列表，不要图省事写 *。
+
+  ⚠️ 生效验证（配了源 ≠ 生效）：
+     构建日志里必须出现 `Downloading from aliyun-central: https://maven.aliyun.com/...`。
+     若仍是 `Downloading from central: https://repo.maven.apache.org/...`，说明本文件被遮蔽
+     —— 检查应用侧 Dockerfile 的 cache mount 是否挂在了 /root/.m2（见 backend/Dockerfile）。
+  =============================================================================
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              https://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <mirrors>
+    <mirror>
+      <id>aliyun-central</id>
+      <name>Aliyun Maven Central Mirror</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+
+</settings>

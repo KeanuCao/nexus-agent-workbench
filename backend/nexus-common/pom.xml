@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus-common —— 公共模块：统一响应体 Result<T> / 异常体系 / 通用工具
+
+  依赖约束（设计文档 §5.1）：零第三方依赖，只用 JDK + 必要注解。
+  这是全项目的"最稳底座"：任何模块都能依赖它，而它不依赖任何模块 ——
+  一旦这里引入 Spring / Jackson / Lombok，底座就不再稳定，同时会把框架版本
+  被动带到所有上层模块。工具类按需追加，禁止提前塞入"以后可能用得上"的依赖。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nexus</groupId>
+        <artifactId>nexus-parent</artifactId>
+        <version>0.1.0</version>
+    </parent>
+
+    <artifactId>nexus-common</artifactId>
+    <packaging>jar</packaging>
+
+    <name>nexus-common</name>
+    <description>公共模块：统一响应体 Result、异常体系、通用工具（零第三方依赖）</description>
+</project>
