@@ -98,8 +98,15 @@ services:
     command:
       - |
         set -e
+        # 幂等判断（2026-09-12 修正）：
+        #   ollama list 的 NAME 列对**未指定 tag** 的模型显示为 `name:latest`
+        #   （如 nomic-embed-text:latest），而 model 变量不带 tag
+        #   → 原写法 `awk '{print $1}' | grep -qx "${model}"` 要求整行相等，**必然匹配不上**
+        #   → 跳过分支对第二个模型永久失效，每次 up -d 都会重新 pull（外网依赖 + 假失败风险）。
+        #   修法：在列表侧剥离 :latest 再比；NR>1 顺带跳过表头。sub 有则剥、无则不动，
+        #   对自带 tag 的 qwen2.5:7b 无影响，两种显示格式都能命中。
         for model in qwen2.5:7b nomic-embed-text; do
-          if ollama list | awk '{print $$1}' | grep -qx "$${model}"; then
+          if ollama list | awk 'NR>1 {sub(/:latest$$/, "", $$1); print $$1}' | grep -qx "$${model}"; then
             echo "[ollama-init] 模型 $${model} 已存在，跳过"
           else
             echo "[ollama-init] 开始拉取模型 $${model} ..."
@@ -128,10 +135,17 @@ services:
   nexus-backend:
     image: nexus-backend:dev
     build:
-      # 构建上下文为 backend 工程目录（Dockerfile 位于 docker-compose/backend/，
-      # 由 BuildKit 支持 Dockerfile 位于上下文之外；旧版 classic builder 不支持此写法）。
+      # 构建上下文为 backend 工程目录。
+      # ⚠️ 路径基准（2026-09-11 实测 compose v5.1.4）：
+      #   context    → 相对【本 compose 文件所在目录】→ <repo>/backend
+      #   dockerfile → 相对【已解析的 context】，不是 compose 目录！'..' 会被归一化：
+      #                <repo>/backend + ../docker-compose/backend/Dockerfile
+      #                = <repo>/docker-compose/backend/Dockerfile ✅
+      #   （原写 ./backend/Dockerfile 会拼成 <repo>/backend/backend/Dockerfile，
+      #     报 `resolve : lstat ... no such file or directory`）
+      # 注：Dockerfile 位于构建上下文之外，需 BuildKit 支持（旧版 classic builder 不支持）。
       context: ../backend
-      dockerfile: ./backend/Dockerfile
+      dockerfile: ../docker-compose/backend/Dockerfile
     container_name: nexus-backend
     restart: unless-stopped
     ports:
@@ -158,10 +172,17 @@ services:
   nexus-frontend:
     image: nexus-frontend:dev
     build:
-      # 构建上下文为 frontend 工程目录；nginx.conf 与 Dockerfile 同处 docker-compose/frontend/，
-      # 经 additional_contexts 命名上下文引入镜像（COPY --from=nginx-conf）。
+      # 构建上下文为 frontend 工程目录。
+      # ⚠️ 三个路径字段的解析基准【各不相同】（2026-09-11 实测 compose v5.1.4）：
+      #   context             → 相对【本 compose 文件所在目录】→ <repo>/frontend
+      #   dockerfile          → 相对【已解析的 context】→ 故写 ../docker-compose/frontend/Dockerfile
+      #   additional_contexts → 又回到相对【本 compose 文件所在目录】→ <repo>/docker-compose/frontend
+      # 三者写法形似但基准不同，是本站踩过的坑；改动前务必用
+      # `docker compose build --print` 核对拼装结果。
       context: ../frontend
-      dockerfile: ./frontend/Dockerfile
+      dockerfile: ../docker-compose/frontend/Dockerfile
+      # nginx.conf 与 Dockerfile 同处 docker-compose/frontend/，
+      # 经命名上下文引入镜像（COPY --from=nginx-conf）
       additional_contexts:
         nginx-conf: ./frontend
     container_name: nexus-frontend
@@ -172,7 +193,12 @@ services:
       nexus-backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- localhost"]
+      # ⚠️ 必须写 127.0.0.1，不能写 localhost（2026-09-12 修正）：
+      #    容器内 localhost 优先解析到 ::1(IPv6)，而 nginx 默认只监听 IPv4
+      #    → Connection refused → 容器**恒 unhealthy**（实测 FailingStreak 已达 184）。
+      #    容器内实测对照：wget -qO- localhost → exit=1；wget -qO- 127.0.0.1 → exit=0。
+      #    这是**假故障**：服务本身完全正常（宿主 curl :8088 与反代 /api/health 均 200）。
+      test: ["CMD-SHELL", "wget -qO- 127.0.0.1"]
       interval: 10s
       timeout: 5s
       retries: 6
