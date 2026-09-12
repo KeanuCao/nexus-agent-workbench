@@ -226,14 +226,20 @@
   - [ ] 0.3.1 `check-env.sh`（启动前置自检）—— 已实现、已实跑；**待补负路径验证**
   - [ ] 0.3.2 `up.sh`（一键拉起，九步）—— 已实现；**端到端未实跑**
   - [ ] 0.3.3 `check-health.sh`（运行期巡检，失败仅报告、不中止任何流程）—— 已实现、已实跑；待前端修复生效后复跑
-  - [ ] 0.3.4 `wsl.abc.md`（已交付） + README 一键启动章节（**未开工**）
+  - [x] 0.3.4 `wsl.abc.md` + README 一键启动章节 —— **已完成（2026-09-12）**
+    - `wsl.abc.md`：四段式齐备，7 条实测记录（含 2026-09-12 追加的「Node 版本漂移」§3.7）
+    - `README.md`：已建，含 Windows 侧一键触发命令、前后端本地启动命令、三脚本定位对照表、服务与端口表、常用验证命令
+    - 两条验收标准（「`wsl.abc.md` 四段式齐备」「README 含一键触发与前后端启动命令」）均已逐项核对通过
   - [ ] 0.3.5 `scripts/lib/probe.sh`（探针共享函数，0.3.2 / 0.3.3 共同依赖）—— 已实现；命名偏差已用对照表消解
 - [ ] 0.4 前后端项目骨架 —— 🚧 **代码已交付（2026-09-11），待实机验收**
-  - 已验证：`docker compose config` 静态校验通过；契约前后端逐字段核对一致（`checks.{postgres,redis,ollama}` / `UP|DOWN`）
+  - **已验证**（2026-09-12 实测补充）：
+    1. ✅ `mvn clean install -DskipTests` 通过 —— 以 `nexus-backend:dev` 镜像构建成功为证（在 builder 容器内执行；首次因传输截断失败一次，重跑通过）
+    2. ✅ `nexus-start/target/*.jar` 只命中一个文件 —— 构建成功即证明（该 COPY 通配命中 0 个或 ≥2 个都会让构建失败）
+    3. ✅ `curl localhost:8089/api/health` 返回 §5.3 契约 JSON，`checks` 三项全 UP（"不造假"已验证）
+    4. ✅ `data.version` = `0.1.0`（**非**字面量 `@project.version@`）—— `spring-boot-starter-parent` 的资源过滤确实生效
+    5. ✅ `npm run type-check` 通过（exit 0，零诊断）—— 由主会话独立复跑确认
+    6. ✅ 经 nginx 反代的 `localhost:8088/api/health` 同样返回 200 + 完整 Result
+    7. ✅ 契约前后端逐字段核对一致（`checks.{postgres,redis,ollama}` / `UP|DOWN`）
   - **未验证**（勾选前必须补）：
-    1. `mvn clean install -DskipTests` 退出码 0（须在 builder 容器内执行）
-    2. `nexus-start/target/*.jar` 只命中一个文件（Dockerfile 的 `COPY` 通配前提）
-    3. `npm run dev` 可启动且能经 Vite 代理调通 `/api/health`
-    4. `npm run type-check` 通过（前端红线禁 build，该脚本从未跑过）
-    5. `curl localhost:8089/api/health` 返回契约 JSON；停掉 ollama 后返回 503 且 `checks.ollama=DOWN`
-    6. `data.version` 是否为 `0.1.0` 而非字面量 `@project.version@`（资源过滤机制未实机验证）
+    1. `npm run dev` 可启动且能经 Vite 代理调通 `/api/health`（需 Windows 侧手工跑，两个 agent 均被禁止启动 dev server）
+    2. 停掉 ollama 后 `check-health.sh` 能否 `[FAIL]` 并点名 ollama（真实 503 路径未在真机验过）
