@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus-infrastructure —— 基础设施：MyBatis-Plus 多租户 / JWT / db-patch 引擎
+
+  阶段0 定位：可编译的骨架 + 数据层依赖就位（不写业务代码）。
+  依赖说明：
+    - mybatis-plus-spring-boot3-starter：Boot 3 专用 starter，版本由父 POM 统一管理；
+    - spring-boot-starter-jdbc：显式声明（JDBC 与连接池 HikariCP 的实际归属模块，
+      MyBatis-Plus starter 只是间接带入，本模块作为"数据库配置"归属方显式持有）；
+    - org.postgresql:postgresql（runtime）：JDBC 驱动仅运行期需要，版本由 Boot BOM 管理。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nexus</groupId>
+        <artifactId>nexus-parent</artifactId>
+        <version>0.1.0</version>
+    </parent>
+
+    <artifactId>nexus-infrastructure</artifactId>
+    <packaging>jar</packaging>
+
+    <name>nexus-infrastructure</name>
+    <description>基础设施模块：MyBatis-Plus 多租户、JWT、db-patch 引擎</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-common</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+</project>

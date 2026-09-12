@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus-module-ai —— AI 核心模块：统一网关 / RAG / Agent 编排（阶段2-4 填充）
+
+  阶段0 为空壳模块：与 nexus-module-system 同理，先保证依赖链路可编译。
+  注意：AI 集成（Spring AI 或 OkHttp + 策略模式）的依赖在阶段2 进入本模块时再添加，
+  阶段0 不预置 HTTP 客户端 / 模型 SDK，避免版本臆测与无关依赖。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nexus</groupId>
+        <artifactId>nexus-parent</artifactId>
+        <version>0.1.0</version>
+    </parent>
+
+    <artifactId>nexus-module-ai</artifactId>
+    <packaging>jar</packaging>
+
+    <name>nexus-module-ai</name>
+    <description>AI 核心模块：统一 AI 网关、RAG 知识库、Agent 编排（阶段2-4 填充）</description>
+
+    <dependencies>
+        <!-- 依赖方向（设计文档 §5.1）：module-ai → common + infrastructure -->
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-infrastructure</artifactId>
+        </dependency>
+    </dependencies>
+</project>

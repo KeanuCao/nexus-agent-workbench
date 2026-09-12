@@ -1,0 +1,466 @@
+# 后端 API 契约（阶段0）
+
+> 面向 `frontend-engineer`（§1~§3）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
+> 机器可读版本：[`openapi.yaml`](./openapi.yaml)（OpenAPI 3.0.3）。
+> 契约来源：`docs/design/00-环境与部署.md` §5.3（已确认设计）；实现：`backend/nexus-start`。
+> 更新纪律：协议变更**先改本文件**再改代码，前后端以本文件为唯一事实源。
+
+## 0. 文件说明
+
+| 文件 | 用途 |
+| --- | --- |
+| `openapi.yaml` | OpenAPI 3.0.3 规范，可直接导入 Apifox / Postman / 生成 TS 类型 |
+| `README.md` | 本文件：人工速查版（字段表、示例、错误码、常见坑）<br>§4 = 健康检查判据（0.3 的 `check-env.sh` / `check-health.sh` 照此写） |
+
+阶段0 只有系统级接口：`GET /api/health`。业务接口随阶段1（认证）、阶段2（AI 网关）等逐步补充。
+
+---
+
+## 1. 全局约定
+
+### 1.1 统一响应体 `Result<T>`
+
+所有接口（含各类错误出口）都返回下面这个外层结构，HTTP 响应体的 JSON 只有这三个字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `code` | integer | 是 | `0` = 成功；非 0 = 失败，见 §1.3 错误码表 |
+| `msg` | string | 是 | 成功固定为 `success`；失败时是**可直接展示**给用户的文案 |
+| `data` | object \| null | 是（可为 `null`） | 业务数据；失败且无数据时为 `null` |
+
+### 1.2 HTTP 状态码的使用策略（**前后端必须一致**）
+
+| 场景 | HTTP | 响应体 `code` | 前端处理分支 |
+| --- | --- | --- | --- |
+| 成功 | 200 | 0 | axios 成功分支，拦截器已解包为 `data` |
+| **业务失败**（参数不合法、业务规则拒绝等） | **200** | 非 0（如 10000） | axios **成功**分支，拦截器判 `code !== 0` → 弹 `msg` + reject `BusinessError` |
+| 路径不存在 | 404 | 40400 | axios 失败分支，弹 `error.response.data.msg` |
+| 系统异常 | 500 | 50000 | 同上（`msg` 是通用话术，不含堆栈） |
+| **依赖不可用**（健康检查探活失败） | **503** | 20000 | 同上；但 `data` 仍带完整报告，可定位故障依赖 |
+
+设计理由：HTTP 状态码只承载**传输/可用性**语义（404/500/503），业务成败由 `code` 判定 ——
+这样业务失败不会污染 axios 的失败分支，异常提示统一由拦截器负责，调用点只关心 `data`。
+
+### 1.3 错误码表（阶段0 已落地）
+
+| code | 常量（后端 `ResultCode`） | 配套 HTTP | `msg` 示例 |
+| --- | --- | --- | --- |
+| 0 | `SUCCESS` | 200 | `success` |
+| 10000 | `BUSINESS_ERROR` | 200 | 业务处理失败（`BusinessException` 默认码） |
+| 20000 | `SERVICE_UNAVAILABLE` | 503 | `依赖服务不可用：postgres、ollama` |
+| 40400 | `NOT_FOUND` | 404 | 请求的资源不存在 |
+| 50000 | `SYSTEM_ERROR` | 500 | 系统繁忙，请稍后重试 |
+
+编码分段（阶段1 起按模块细分，**不复用**上表已有值）：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+
+### 1.4 通用请求头
+
+| Header | 阶段0 | 说明 |
+| --- | --- | --- |
+| `Content-Type: application/json` | 仅带请求体的接口需要 | 健康检查是 GET，无请求体 |
+| `Accept: application/json` | 可选 | 后端已用 `produces = application/json` 声明 |
+| `Authorization: Bearer <token>` | **阶段0 不需要** | 阶段1 登录接口接通后由 `request.ts` 拦截器统一注入 |
+
+---
+
+## 2. `GET /api/health` —— 健康检查
+
+### 2.1 请求
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/health`（前端 `baseURL='/api'` + `url='/health'`） |
+| Method | `GET` |
+| Query 参数 | 无 |
+| Request Body | **无**（不要发送 body） |
+| 请求头 | 无必需头 |
+| 鉴权 | 无（`security: []`） |
+| 响应 `Content-Type` | `application/json` |
+
+前端可直接复用 `frontend/src/api/health.ts` 的 `getHealth()`。
+
+### 2.2 响应 200（依赖全部可用）
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "status": "UP",
+    "service": "nexus-start",
+    "version": "0.1.0",
+    "timestamp": "2026-09-03T10:00:00+08:00",
+    "checks": { "postgres": "UP", "redis": "UP", "ollama": "UP" }
+  }
+}
+```
+
+#### `data` 字段完整定义（`HealthReport`）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `data.status` | `"UP" \| "DOWN"` | 是 | 总体状态：三个依赖全 UP 才是 `UP` |
+| `data.service` | string | 是 | 服务名，固定 `nexus-start` |
+| `data.version` | string | 是 | 服务版本，如 `0.1.0`（构建期由 pom 版本注入） |
+| `data.timestamp` | string (`date-time`) | 是 | ISO-8601 带时区偏移，格式固定 `yyyy-MM-dd'T'HH:mm:ssXXX`（**秒级、无小数秒**）。偏移量 = 服务端默认时区：容器内通常 `+00:00`，Windows 本地直跑 `+08:00` |
+| `data.checks` | object | 是 | 各依赖探测结果，见下 |
+
+#### `data.checks` 字段定义（`HealthChecks`）
+
+| 字段 | 类型 | 必填 | 探测方式（真实连通性，非配置判断） |
+| --- | --- | --- | --- |
+| `data.checks.postgres` | `"UP" \| "DOWN"` | 是 | 取 JDBC 连接执行 `SELECT 1` |
+| `data.checks.redis` | `"UP" \| "DOWN"` | 是 | 发 `PING`，期望 `PONG` |
+| `data.checks.ollama` | `"UP" \| "DOWN"` | 是 | 请求 `GET /api/version`，有响应体即 UP（**不**校验模型是否已拉取） |
+
+> `timestamp` 与 `checks` 的取值严格限定为 `UP` / `DOWN` 两种 —— 后端刻意不使用 Spring `HealthStatus`
+> （其取值含 `OUT_OF_SERVICE` / `UNKNOWN`），避免前端出现未定义分支。
+
+### 2.3 响应 503（任一依赖不可用）
+
+**响应体结构完全不变**（仍是 `Result<HealthReport>`），只有 `code` / `msg` 与 HTTP 状态不同：
+
+```json
+{
+  "code": 20000,
+  "msg": "依赖服务不可用：postgres",
+  "data": {
+    "status": "DOWN",
+    "service": "nexus-start",
+    "version": "0.1.0",
+    "timestamp": "2026-09-03T10:00:00+08:00",
+    "checks": { "postgres": "DOWN", "redis": "UP", "ollama": "UP" }
+  }
+}
+```
+
+- `msg` 已把故障依赖拼进文案（多个依赖用 `、` 连接），可直接 `ElMessage.error(msg)`；
+- 若要在页面上逐项标红，可在 `catch` 分支读取 `error.response.data.data.checks`
+  （`request.ts` 的失败分支里 `error.response.data` 即完整 `Result`）。
+
+### 2.4 前端对接示例（TS，对齐现有 `request.ts`）
+
+```ts
+// 成功路径：拦截器已解包，直接拿 data
+const health = await getHealth()        // HealthData
+console.log(health.checks.postgres)     // 'UP' | 'DOWN'
+
+// 失败路径：503 / 4xx / 5xx 走 reject，error.response.data 是完整 Result
+try {
+  await getHealth()
+} catch (error) {
+  const result = (error as AxiosError<Result<HealthData>>).response?.data
+  ElMessage.error(result?.msg ?? '健康检查失败')
+  result?.data?.checks  // 可选：逐项展示 DOWN 的依赖
+}
+```
+
+### 2.5 容器级探活（前端**不要**调用）
+
+`GET /actuator/health` 由 Spring Boot Actuator 提供，供 `docker-compose.yml` 的 healthcheck 使用。
+它与 `/api/health` 的区别：
+
+| 维度 | `GET /api/health` | `GET /actuator/health` |
+| --- | --- | --- |
+| 使用者 | 前端页面 / 演示链路 | 容器编排 / 运维 |
+| 响应体 | 统一 `Result<T>` | Actuator 自有格式（`{"status":"UP",...}`） |
+| 探测范围 | postgres + redis + ollama（含 AI 依赖） | db / redis / diskSpace 等容器自身依赖（**不含 ollama**） |
+| 设计取舍 | 应用"业务可用性" | 容器"是否需要重启" |
+
+取舍理由：Ollama 模型拉取耗时长，若纳入容器健康判据，会让后端容器被编排判为不健康并阻塞前端启动 ——
+故 AI 依赖只在业务级健康检查中体现。
+
+---
+
+## 3. 已知行为（联调时先看这里）
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 页面刚打开时 `/api/health` 返回 503，`checks.ollama = DOWN` | Ollama 容器已起但模型（约 5GB）仍在拉取，或 Ollama 尚未就绪 | 属预期：`up.sh` 会轮询 `/api/tags` 等模型就绪；Ollama 只要进程可响应即 UP |
+| **三个 checks 全 DOWN**，但后端进程正常 | 后端未接入 compose 网络，或本地直跑时数据源/Redis 地址仍指向容器服务名 | Windows 本地直跑请设置 `POSTGRES_HOST=localhost`、`REDIS_HOST=localhost`、`OLLAMA_BASE_URL=http://localhost:11434` |
+| `timestamp` 偏移是 `+00:00` 而不是 `+08:00` | 容器时区为 UTC，契约只要求"ISO-8601 带偏移"，偏移量随服务端时区 | 前端格式化展示即可；不改契约 |
+| 依赖全挂时后端仍能启动 | 有意为之：Hikari `initialization-fail-timeout=-1`，启动不依赖外部服务 | 便于"先起后端、再逐个拉起依赖"的调试顺序 |
+
+---
+
+## 4. 健康检查判据（`scripts/check-env.sh` / `scripts/check-health.sh` 的唯一判据来源）
+
+> **本节面向 `devops-engineer`**：0.3 的脚本以本节为判据来源，**不要**从 `openapi.yaml` 反推规则，
+> **不要**直接沿用 `docs/drafts/环境检查脚本.md` 的检查方式（该草稿有多处探活/模型就绪判据已核实有误，逐条见 §4.6）。
+> 本节取值与 `backend/nexus-start` 实现逐行核对（`HealthController` / `HealthServiceImpl` / 三个 Probe / `application.yml` /
+> `docker-compose/docker-compose.yml`）。**凡推断而非实测的条目均显式标注**，落地时以实机为准。
+
+### 4.1 两个探活口的分工（**先看这节，混用是最大坑源**）
+
+同一份"健康"，后端有两个出口，**覆盖面不同，不能互相替代**：
+
+| 维度 | `GET /actuator/health` | `GET /api/health` |
+| --- | --- | --- |
+| 谁在用 | compose 里 `nexus-backend` 的 healthcheck（容器内 `wget -qO- localhost:8089/actuator/health`）、运维 | 脚本（0.3）、前端页面、演示链路 |
+| 实现 | Spring Boot Actuator 内建 indicators | 自研 `HealthService`，**真实连通性探测** |
+| 覆盖的依赖 | **db / redis / diskSpace**（Boot 自动装配；实际组件以响应 `components` 为准，**勿硬编码**） | **postgres / redis / ollama** 三项 |
+| 是否含 ollama | **不含**（后端没为它写 indicator） | **含**（`data.checks.ollama`） |
+| 响应体 | `{"status":"UP","components":{...}}`（`show-details: always`），**非** `Result` | `Result<HealthReport>` |
+| 状态取值域 | Spring `HealthStatus`：`UP` / `DOWN` / `OUT_OF_SERVICE` / `UNKNOWN` | **只有** `UP` / `DOWN` |
+| HTTP 语义 | `UP`→200；`DOWN`/`OUT_OF_SERVICE`→503（Boot 默认映射） | 三项全 UP→200；任一 DOWN→**503** |
+| 宿主访问 | `http://localhost:${BACKEND_PORT:-8089}/actuator/health` | `http://localhost:${BACKEND_PORT:-8089}/api/health` |
+
+#### 三条必须写进脚本的结论
+
+**① 容器 healthy ≠ 依赖全通。** 两个方向都成立：
+
+- `docker compose stop ollama` → `nexus-backend` **仍然 healthy**（actuator 根本不看 ollama），
+  但 `/api/health` 立刻变 503、`checks.ollama = DOWN`。
+  → **只查容器状态的脚本会完全漏掉 AI 依赖故障**，这是"两级都要查"最硬的证据。
+- `docker compose stop postgres`（或 redis）→ backend 容器在约 2 分钟后转 `unhealthy`
+  （推算：12 次重试 × 10s 间隔，另加每次 5s 超时；**未实测**），但 **unhealthy 不触发重启**
+  —— `restart: unless-stopped` 只响应进程退出，容器仍是 `running` + `unhealthy`；
+  而且 unhealthy 这个状态**不告诉你挂的是哪个依赖** → 仍要读 `/api/health` 的 `data.checks`。
+
+**② 脚本必须三级都查**（0.3 的验收判据）：
+
+| 级别 | 查什么 | 判据 | 回答的问题 |
+| --- | --- | --- | --- |
+| L1 容器级 | `docker compose ps` | `nexus-backend` 是否 `running` / `healthy` | 进程起没起来、要不要重启 |
+| L2 业务级 | `GET /api/health` | HTTP + `code` + `data.checks`（§4.2） | 三个依赖**此刻**是否真的通 |
+| L3 模型级 | `GET /api/tags` | `qwen2.5:7b` 与 `nomic-embed-text` 是否都在（§4.5） | AI 能力是否真的可用 |
+
+L2 是**唯一**同时覆盖 postgres / redis / ollama 的入口 —— 依赖判据一律以它为准。
+
+**③ 判"后端进程起来了吗"不要看状态码，看"能不能拿到 HTTP 响应"。**
+`/api/health` 与 `/actuator/health` 在依赖挂掉时都会返回 **503**，但服务本身是正常的。
+只有 `curl` 连不上（exit code 7 / `Connection refused`）才代表进程没起。
+把 503 当成"后端没起来"是新手脚本最常见的误判。
+
+> 脚本编排建议：用 `/actuator/health`（Boot 内建、通常 <1s、不探 ollama）做**第一道闸门**快速判断"进程活了没"，
+> 再用 `/api/health`（串行真实探测，最坏约 7s，见 §4.3）做**完整依赖判定**。顺序反了会白等。
+
+### 4.2 `GET /api/health` 判定规则表
+
+#### 4.2.1 HTTP 状态码 + `code` 语义（穷举）
+
+| HTTP | `code` | `msg` | 脚本动作 |
+| --- | --- | --- | --- |
+| **200** | `0` | `success` | 通过 → 继续做 §4.2.2 的字段校验 |
+| **503** | `20000` | `依赖服务不可用：<DOWN 的依赖名>` | **依赖不可用**（正常契约响应，不是"接口挂了"）→ 用 `data.checks` 定位 |
+| 404 | `40400` | `请求的资源不存在` | 路径写错 / 版本不匹配 |
+| 500 | `50000` | `系统繁忙，请稍后重试` | 后端内部异常 → 看 `docker logs --tail 100 nexus-backend` |
+| 000（curl exit 7） | 无响应体 | — | 后端未启动 / 端口不对（`BACKEND_PORT` 与 `.env` 不一致） |
+| **200 但 body 是 HTML** | — | — | 打到了 nginx 的 SPA 回退（`try_files → /index.html`）。**假通过**，见 §4.6 |
+
+**关键实现细节**：503 的响应体是**完整、可解析的 `Result<HealthReport>` JSON**（`data` 不为 null）。
+所以取数命令必须是 `curl -s`（**不加 `-f`**）——
+`curl -f` 在 503 时会丢 body 并返回非 0，等于把"能定位故障依赖"的信息扔掉。
+
+#### 4.2.2 `data` 字段逐项判据
+
+| 字段 | 期望值 | 判据 / 备注 |
+| --- | --- | --- |
+| `data.status` | `"UP"` | 与 HTTP 200 同真同假。若 `status=UP` 但 HTTP=503（或反之）→ **契约被破坏，报后端 bug** |
+| `data.service` | `"nexus-start"` | 固定值（配置 `nexus.health.service-name`）。不匹配 → 打到别的服务了 |
+| `data.version` | `"0.1.0"` | **专条见下** |
+| `data.timestamp` | 正则 `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$` | 秒级、**无小数秒**。**不要断言时区**：容器内 `+00:00`、Windows 本地直跑 `+08:00`，两者都合法 |
+| `data.checks.postgres` / `.redis` / `.ollama` | 三项均 `"UP"` | **取值域只有 `UP` / `DOWN`**（后端刻意不复用 Spring `HealthStatus`，就没有 `OUT_OF_SERVICE`/`UNKNOWN`）。出现第三值 → 契约破坏，脚本应报错而非通过 |
+| `data.checks` 的键数 | **恰好 3 个** | 多出未知键 → 契约已变更，报告而非静默通过 |
+
+**`data.version` 专条（脚本最容易漏的判据）**
+
+- 期望 `0.1.0` —— 来源是 `backend/pom.xml` 的 `<version>`，构建期由 Maven 资源过滤替换
+  `application.yml` 里的 `@project.version@` 占位符。
+- **必须 FAIL 的取值**：字面量 `@project.version@`（= 资源过滤失效）、或空串。
+  这是**构建层缺陷**，不是环境问题 —— 脚本要给出"检查 `maven-resources-plugin` 过滤是否生效"的提示，
+  别让用户以为是容器没起好。
+- **建议判据写法**：不要硬编码 `0.1.0`，而是断言 `^[0-9]+\.[0-9]+\.[0-9]+$` 且显式拒绝 `^@.*@$`
+  —— pom 版本升级时脚本不用改，仍能抓到过滤失效。
+- **交叉验证**：同一个占位符还出现在 `/actuator/info` → `info.app.version`（值为 `0.1.0`）。
+  两个出口都查一遍，可确认是"同一处坏掉"还是只有一处。
+
+#### 4.2.3 取数与解析示例（WSL 内、仓库根目录执行）
+
+> 端口一律从 `docker-compose/.env` 读（`BACKEND_PORT=8089`），**不要硬编码** —— `.env` 是端口唯一真源。
+
+```bash
+BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
+
+# -s 静默、--max-time 见 §4.3、不加 -f（503 也要 body）
+# 用 \n%{http_code} 把状态码追加到 body 末尾，一次请求同时拿到两者
+RESP=$(curl -s --max-time 10 -w '\n%{http_code}' "http://localhost:${BACKEND_PORT}/api/health")
+HTTP=$(printf '%s' "$RESP" | tail -n1)
+JSON=$(printf '%s' "$RESP" | sed '$d')
+```
+
+解析方式二选一：
+
+- **有 `jq`（优先；先探测 `command -v jq`，WSL 宿主是否预装未核实）**：
+  ```bash
+  printf '%s' "$JSON" | jq -r '.code, .data.status, .data.checks.postgres, .data.checks.redis, .data.checks.ollama'
+  ```
+- **无 `jq` 的兜底（后端 Jackson 默认非美化输出、无多余空白，子串匹配可用）**：
+  ```bash
+  case "$JSON" in
+    *'"checks":{"postgres":"UP","redis":"UP","ollama":"UP"}'*) echo 'checks: all UP' ;;
+    *) echo "checks: NOT all UP -> $JSON" ;;
+  esac
+  ```
+  这种子串匹配对字段顺序/空格敏感（**脆弱但够用**）；注意 `ollama` 排在最后这个顺序来自
+  `HealthChecks` record 的组件声明顺序（postgres → redis → ollama），是有意固定并可断言的契约顺序。
+
+### 4.3 轮询策略（超时 / 间隔 / 通过判据）
+
+| 参数 | 建议值 | 依据 |
+| --- | --- | --- |
+| 单次超时 —— `/actuator/health` | `--max-time 5` | Boot 内建 indicator，通常 < 1s |
+| 单次超时 —— `/api/health` | **`--max-time 10`** | 三个探测**串行**执行：postgres 受 Hikari `connection-timeout: 3000ms` 约束（`nexus.health.probe-timeout-ms: 2000` 只映射到 SQL 的 `setQueryTimeout`，连接获取另算）+ redis 2s + ollama 2s（连接/读取各 2s）≈ 最坏 7s |
+| 单次超时 —— `/api/tags`（模型） | `--max-time 5` | Ollama 本地接口，秒回 |
+| 轮询间隔 —— 依赖探活 | 前 30s 用 **2s**，之后 **5s** | `/api/health` 每次都会真实打三个依赖；< 1s 的高频轮询既无意义，又会在 PG 侧堆连接 |
+| 轮询间隔 —— 模型拉取 | **10s** | 5GB 级别下载，频繁轮询无收益 |
+| **通过判据** | **连续 2 次 HTTP 200 且 `code=0`，间隔 5s** | 见下 |
+| 总超时 —— 依赖探活 | ≥ 180s | 与容器 `start_period` / `retries` 量级匹配 |
+| 总超时 —— 模型拉取 | 30 min（可配） | 与设计文档 §4.3 第 7 步一致 |
+
+**`/api/health` 的单次超时不要设 2~3s**：依赖全挂时后端本来就要 7s 左右才应答，
+3s 超时会把"依赖挂了的正常 503"误报成"接口超时"——两者处置完全不同（前者查依赖，后者查后端进程）。
+
+**为什么"一次 200 就通过"不够**（务必按连续 2 次实现）：
+
+1. **探活是瞬时快照。** `docker compose start redis` 之后，Redis 刚恢复、后端连接池还在重建
+   （`stop` 期间失效的连接要被淘汰重建），"一个 200 紧跟一个 503"的抖动是常见现象；
+   单次判据会把"还在抖"读成"已就绪"。
+2. **启动期有窗口。** backend 容器 `start_period: 60s`（依赖容器同理，`pg_isready` 通过 ≠ PG 完成恢复），
+   `/api/health` 完全可能先 503 再 200。一次采样落在窗口内就会误判。
+3. **成本极低。** 连续 2 次 + 间隔 5s 只多花 5 秒，换来对抖动的免疫，性价比最高。
+4. **失败时不要立刻退出。** 应跑完全部检查项、最后汇总失败清单（草稿里"继续跑完 + 汇总表"的思路是对的，可保留），
+   并打印**最后一次 `/api/health` 的 `data.checks`** —— 那是定位故障依赖的唯一可靠信息。
+
+### 4.4 503 场景的可复现造法（脚本自测 / 阶段验收用例）
+
+```bash
+# 在 WSL 的 distro nexus-agent-workbench 内执行；compose 目录含 .env
+cd /mnt/c/wp/nexus-agent-workbench/docker-compose
+BACKEND_PORT=$(grep -E '^BACKEND_PORT=' .env | cut -d= -f2)   # 下面的 8089 只是默认值，脚本里一律用变量
+
+# ① 基线：三项全 UP
+curl -s --max-time 10 http://localhost:8089/api/health
+# → {"code":0,"msg":"success","data":{"status":"UP","service":"nexus-start","version":"0.1.0",
+#     "timestamp":"...","checks":{"postgres":"UP","redis":"UP","ollama":"UP"}}}
+
+# ② 制造故障：停 redis
+docker compose stop redis
+curl -s --max-time 10 -o /tmp/h.json -w '%{http_code}\n' http://localhost:8089/api/health
+# → 503
+cat /tmp/h.json
+# → {"code":20000,"msg":"依赖服务不可用：redis","data":{"status":"DOWN","service":"nexus-start",
+#     "version":"0.1.0","timestamp":"...","checks":{"postgres":"UP","redis":"DOWN","ollama":"UP"}}}
+
+# ③ 恢复
+docker compose start redis
+curl -s --max-time 10 http://localhost:8089/api/health
+# → 应回到 200；若首次仍是 503，等待数秒重试（连接池需重建，属预期，非缺陷）
+```
+
+断言清单（自测脚本时逐条对）：
+
+- [ ] HTTP = **503**（不是 500，也不是 200）
+- [ ] `code` = **20000**
+- [ ] `msg` = `依赖服务不可用：redis`（**全角冒号 `：`**；多个依赖用**顿号 `、`** 连接，顺序固定 postgres → redis → ollama，
+      例：`依赖服务不可用：postgres、redis、ollama`）
+- [ ] `data.status` = `DOWN`，且 `data` **不为 null**（仍是完整报告）
+- [ ] `data.checks.redis` = `DOWN`，另两项仍 `UP`（能精确定位到单个依赖）
+- [ ] 容器层面：`nexus-backend` **不退出**（仍 `running`）；约 2 分钟后可能转 `unhealthy`（见 §4.1 结论 ①）
+
+等价用例（换一个依赖，判据相同）：
+
+- `docker compose stop postgres` → `msg` = `依赖服务不可用：postgres`
+- `docker compose stop ollama` → `/api/health` 503 + `checks.ollama=DOWN`，
+  **但 `nexus-backend` 容器保持 `healthy`** —— 这一条正是"两级都要查"的活教材。
+
+### 4.5 模型就绪的独立判据（**ollama 健康 ≠ 模型就绪**）
+
+> **这是本次审查暴露出的最大盲区，务必按本节实现。**
+
+已核实的事实（不是推测）：
+
+- compose 里 `nexus-ollama` 的 healthcheck 是 `["CMD", "ollama", "list"]`；
+  而**零模型时 `ollama list` 的退出码也是 0**（`docs/agent-log/20260911-ollama-init诊断.md` 已记录）
+  → 容器 `healthy` 与"模型是否已拉取"**完全无关**。
+- 后端 `/api/health` 的 `checks.ollama` 打的是 `GET /api/version`
+  （见 `backend/nexus-start/src/main/java/com/nexus/start/probe/OllamaProbe.java`）
+  → **进程活着就 UP，不校验模型**。
+- 结论：**两个探活口同时绿灯时，`qwen2.5:7b` 与 `nomic-embed-text` 可能一个都没拉下来。**
+  故障会推迟到阶段2/3 的 AI 调用时以深层 500 暴露 —— 比启动期报错更难排查（agent-log 有先例）。
+
+**模型就绪的唯一判据：`GET /api/tags` 的 `models[].name`**
+
+```bash
+OLLAMA_PORT=$(grep -E '^OLLAMA_PORT=' docker-compose/.env | cut -d= -f2)   # 默认 11434
+curl -s --max-time 5 "http://localhost:${OLLAMA_PORT}/api/tags"
+# → {"models":[{"name":"qwen2.5:7b","model":"qwen2.5:7b","size":...},
+#              {"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","size":...}]}
+```
+
+- **就绪**：`models` 数组里**同时**存在 `qwen2.5:7b` 和 `nomic-embed-text` 两项。
+- **未就绪**：`{"models":[]}` 或 `models` 字段缺失 → WARN + 继续（或按 30 min 轮询等待），
+  **不要报成"ollama 挂了"**，两者处置完全不同。
+- 期望模型名的唯一来源：`docker-compose/docker-compose.yml` 的 `ollama-init` 命令
+  （`for model in qwen2.5:7b nomic-embed-text`）。改模型清单要同步改脚本。
+- **`:latest` 归一化陷阱（已出过真实事故）**：无 tag 拉取的模型在 `/api/tags` 与 `ollama list` 中显示为
+  `nomic-embed-text:latest`。用 `grep -qx "nomic-embed-text"` 这类**整字段精确匹配会永不命中**
+  （agent-log 记录的正是这个 bug）。正确写法二选一：
+  - 归一化后比较（推荐）：`jq -r '.models[].name' | sed 's/:latest$//'`，再逐个 `grep -qx`；
+  - 子串匹配（够用但不严谨）：`grep -q 'nomic-embed-text'`。
+- 手动补拉（提示用户时的命令）：`docker exec nexus-ollama ollama pull qwen2.5:7b`。
+- 轮询间隔 10s、总超时 30 min（§4.3）；脚本应在这条超时时给出**断点续拉指引**，而不是笼统报错。
+
+### 4.6 现阶段不可用 / 不可信的检查项（避坑清单）
+
+> 来源：草稿 `docs/drafts/环境检查脚本.md` 逐项复核。以下各条**按现状实现会得到错误结论**，须按下表改写。
+
+| 草稿里的检查项 | 现状（已核实） | 脚本应如何处理 |
+| --- | --- | --- |
+| `pg_extension` 查 pgvector 已安装 | `db-patch/` 目录**尚不存在**（0.2 未开工），代码库内**没有任何 `CREATE EXTENSION vector`**；镜像 `pgvector/pgvector:pg16` 只保证扩展**可加载**，不等于已安装 | **现阶段必然 FAIL，不要写成 PASS 判据**。改用一条同时覆盖现在与未来的查询：`SELECT installed_version FROM pg_available_extensions WHERE name='vector'` —— 有行 = 扩展可用（PASS），`installed_version IS NOT NULL` 才算已安装（阶段3 RAG 落地后才作为硬判据） |
+| `t_db_patch` 记录数 | 该表由 PatchCli 在执行迁移时 `CREATE TABLE IF NOT EXISTS` 引导创建；0.2 未开工 → **表不存在**，直查会报 `relation "t_db_patch" does not exist`（极易被误读成"迁移失败"） | 先探存在性：`SELECT to_regclass('public.t_db_patch') IS NOT NULL`；为 false → **SKIP（不计失败）**；为 true 才查记录数与文件名/checksum 一致性 |
+| 业务表 `tenant_id` 字段 | 阶段1（多租户）未开工，**目前没有任何业务表** | SKIP（或直接从清单移除），阶段1 后再补 |
+| `/api/ai/ping`、AI 网关接口 | **不存在**（阶段2 才实现）。当前业务接口只有 `GET /api/health` 一个 | 删除该项；AI 链路可用性现阶段用 §4.5 的模型就绪 + `checks.ollama` 覆盖 |
+| 前端反代 `curl localhost:8088/api/actuator/health` | nginx 只反代 `location /api/`，`/api/actuator/health` 会原样转到后端 → 后端无此映射 → **404 + `code:40400`**；而 `/actuator/health`（不带 `/api`）会命中 `location /` 的 `try_files $uri $uri/ /index.html` → **200 但返回的是 HTML** | 前端反代检查固定用 `http://localhost:${FRONTEND_PORT}/api/health`，并校验拿到的是完整 `Result` JSON（**不要**用 `/actuator/*` 走前端端口） |
+| `nexus-frontend` 没有 healthcheck（草稿问题 2） | **已过时**：`docker-compose.yml` 已给 `nexus-frontend` 配了 `test: ["CMD-SHELL", "wget -qO- localhost"]` | 无需补；`docker inspect` 查它的 `Health.Status` 即可。前端容器另有 `depends_on: nexus-backend: service_healthy` 门控 |
+| Redis 持久化 `config get appendonly` | 当前以默认配置启动（compose 未挂 `redis.conf`、未传 `--appendonly`），**AOF 默认关闭** | 若要断言，先确定预期值（现阶段预期就是 `no`）；**不要**写成"必须 yes"的失败判据 |
+| Ollama GPU / `nvidia-smi` | 已定 CPU 推理（compose 中 GPU 直通为注释态） | 删除或标 N/A，否则在目标机器上恒 FAIL |
+| 内存 `free -h`（< 8GB 警告）；Docker daemon / compose 插件 / 端口占用 / `docker compose config --quiet` | 可用 | 保留 |
+
+**另外两条环境事实**（写脚本时会用到）：
+
+- `nexus-backend` 运行镜像是 `eclipse-temurin:17-jre-alpine`（Dockerfile 只装了非 root 用户，无额外工具），
+  **没有 `curl`**，只有 BusyBox `wget` —— 这正是 compose healthcheck 写 `wget -qO-` 的原因。
+  要在该容器内探测请一律用 `wget -qO-`。
+  已知 `nexus-builder` 镜像（Ubuntu 基底）装有 `curl`；其余镜像**不要假设**有 curl，脚本里先 `command -v curl` 探测。
+- 宿主端口唯一真源是 `docker-compose/.env`（`PG_PORT=5432` / `REDIS_PORT=6379` / `OLLAMA_PORT=11434` /
+  `BACKEND_PORT=8089` / `FRONTEND_PORT=8088`）—— 脚本一律读它，不要硬编码。
+
+### 4.7 复核发现的偏差（如实记录，未修改任何实现）
+
+1. **`/api/health` 的最坏耗时与注释不符。** `HealthServiceImpl` 类注释写"单次探测超时上限 2s，
+   三个依赖最坏耗时 6s"，但 `application.yml` 里 Hikari `connection-timeout: 3000ms` 管的是**连接获取**，
+   `nexus.health.probe-timeout-ms: 2000` 只映射到 PG 的 `Statement.setQueryTimeout` ——
+   postgres 单项最坏 3s（连接）+ 2s（查询），三项串行最坏约 **7s**。
+   对脚本的影响已按 §4.3 的 `--max-time 10` 兜住；注释与实现的偏差记在此处备查（改注释属 0.4 代码范畴，本次不动）。
+2. **"Ollama 健康检查只打 `/api/version`"这句要写准。** 实际是两个不同入口、两套机制：
+   compose 的 `nexus-ollama` healthcheck 是容器内 `ollama list`（CLI，退出码判据），
+   后端的 `checks.ollama` 才是 `GET /api/version`（HTTP）。**两者都不校验模型**，
+   §4.5 的结论（模型就绪必须单独查 `/api/tags`）不受影响，但引用出处别写错。
+3. **`.env` 的库凭据目前只喂给 postgres 容器，没喂给 backend 容器。**
+   compose 的 `nexus-postgres` 用 `${PG_USER:-nexus}` / `${PG_PASSWORD:-nexus123}` / `${PG_DB:-nexus}`，
+   而 `nexus-backend` 的环境变量块里**还没有** `POSTGRES_*` / `REDIS_*`（compose 内注释已标注"0.4 落码后按需补充"），
+   后端走的是 `application.yml` 的默认值（恰好相同，所以此刻能连上）。
+   → **若 check-env 提示用户改 `.env` 里的 `PG_PASSWORD`，后端会连不上、`checks.postgres` 变 DOWN。**
+   `check-env.sh` 若要校验凭据一致性，须把这条不对等关系考虑进去（或提示"改凭据需同时给 backend 容器补环境变量"）。
+4. **`openapi.yaml` 与本文件一致**，本轮复核未发现二者与实现之间的字段级出入：
+   字段名 / 取值域（`UP`|`DOWN`）/ 503 保留 `data` / 错误码 `20000` 均逐项对齐。
+
+---
+
+## 5. 变更记录
+
+| 日期 | 变更 | 说明 |
+| --- | --- | --- |
+| 2026-09-11 | 首版（阶段0 / 子任务 0.4） | `GET /api/health` + 统一响应体 + 错误码表 + 状态码策略 |
+| 2026-09-11 | 追加 §4 健康检查判据（面向 0.3 脚本） | 两个探活口分工、判定规则表、轮询策略、503 造法、模型就绪独立判据、不可用检查项、复核偏差 |

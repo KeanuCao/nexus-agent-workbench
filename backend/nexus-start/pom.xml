@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus-start —— 启动模块：Application 主类 + application.yml + 健康检查
+
+  本模块是全项目唯一产出可执行 fat jar 的模块（打包约定见父 POM 与设计文档 §5.1）。
+  可执行产物落点：nexus-start/target/nexus-start-<version>.jar
+    —— docker-compose/backend/Dockerfile 以 `/build/nexus-start/target/*.jar` 通配拷贝，
+       该目录下必须只有一个 *.jar（repackage 产生的 *.jar.original 不命中通配，无害）；
+       故本模块禁止启用 maven-source-plugin / maven-javadoc-plugin（会产生 -sources.jar）。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nexus</groupId>
+        <artifactId>nexus-parent</artifactId>
+        <version>0.1.0</version>
+    </parent>
+
+    <artifactId>nexus-start</artifactId>
+    <packaging>jar</packaging>
+
+    <name>nexus-start</name>
+    <description>启动模块：Application 主类、全局配置、健康检查接口</description>
+
+    <properties>
+        <!--
+          显式声明启动类：spring-boot-starter-parent 的 maven-jar-plugin 配置引用了 ${start-class}
+          （<mainClass>${start-class}</mainClass>），显式赋值可避免该占位符在清单中悬空，
+          同时让 spring-boot-maven-plugin 的 repackage 无需扫描推断。
+        -->
+        <start-class>com.nexus.start.NexusApplication</start-class>
+    </properties>
+
+    <dependencies>
+        <!-- ── 本项目模块（依赖方向见父 POM；版本由父 POM 统一管理）── -->
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-module-system</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-module-ai</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-infrastructure</artifactId>
+        </dependency>
+
+        <!-- ── Web 层：@RestController / 内嵌 Tomcat（健康检查接口）── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- ── Actuator：容器健康检查探活 /actuator/health（docker-compose healthcheck）── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!--
+          ── Redis 客户端：健康检查的 checks.redis 真实 ping 探活需要 RedisConnectionFactory ──
+          显式声明（不依赖间接传递）：本模块直接使用 Spring Data Redis 的类型。
+          Lettuce 为 Boot 默认客户端，连接池实现内置于 starter。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- ── 测试：版本由 Boot BOM 管理；测试代码由 qa-engineer 按 TC 用例填充 ── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              唯一的可执行 jar 出口：repackage 将普通 jar 重写为 fat jar
+              （Main-Class=JarLauncher，Start-Class=${start-class}），原始 jar 保留为 *.jar.original。
+              spring-boot-starter-parent 已在 pluginManagement 中绑定 repackage 执行，
+              此处只需声明插件坐标 + 启动类。
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>${start-class}</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

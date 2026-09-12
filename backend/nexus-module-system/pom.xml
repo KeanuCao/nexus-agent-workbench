@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus-module-system —— 系统模块：用户 / 角色 / 菜单（阶段1 填充）
+
+  阶段0 为空壳模块：只保证包结构与依赖链路可编译，
+  目的是让 `mvn clean install -DskipTests` 的全模块链路先跑通，
+  业务代码在阶段1（task.2 多租户认证）填入。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nexus</groupId>
+        <artifactId>nexus-parent</artifactId>
+        <version>0.1.0</version>
+    </parent>
+
+    <artifactId>nexus-module-system</artifactId>
+    <packaging>jar</packaging>
+
+    <name>nexus-module-system</name>
+    <description>系统模块：用户、角色、菜单（阶段1 填充）</description>
+
+    <dependencies>
+        <!-- 依赖方向（设计文档 §5.1）：module-system → common + infrastructure -->
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.nexus</groupId>
+            <artifactId>nexus-infrastructure</artifactId>
+        </dependency>
+    </dependencies>
+</project>

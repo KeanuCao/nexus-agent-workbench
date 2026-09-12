@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus 统一 AI 网关演示项目 —— Maven 多模块父 POM（task.1 / 0.4 交付物）
+
+  设计依据：docs/design/00-环境与部署.md §5.1 / §5.2
+
+  模块依赖规则（硬约束，只允许上层依赖下层，禁止反向/平级互依）：
+      nexus-common          ← 最底层：Result / 异常体系（零第三方依赖）
+      nexus-infrastructure  ← common（MyBatis-Plus 多租户 / JWT / db-patch 引擎）
+      nexus-module-system   ← common + infrastructure（用户/角色/菜单，阶段1 填充）
+      nexus-module-ai       ← common + infrastructure（网关/RAG/Agent，阶段2-4 填充）
+      nexus-start           ← module-system + module-ai + infrastructure（Application 主类）
+
+  打包约定（硬约束）：
+      仅 nexus-start 声明 spring-boot-maven-plugin 产出可执行 fat jar，其余模块为普通 jar；
+      原因之一见 docker-compose/backend/Dockerfile：
+      其运行镜像阶段以 Docker COPY 通配 `/build/nexus-start/target/*.jar` 拷贝为 /app/app.jar，
+      该通配必须只匹配到一个文件 —— 故本项目不启用 maven-source-plugin / maven-javadoc-plugin
+      （spring-boot-starter-parent 亦未绑定这两个插件，已核对 3.3.13 版本 POM 确认）。
+
+  版本策略：Spring Boot 生态版本全部由 spring-boot-starter-parent → spring-boot-dependencies(BOM)
+  统一管理；BOM 未覆盖的第三方（MyBatis-Plus）在本文件集中声明，子模块引用时禁止再写 <version>。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.13</version>
+        <!-- 空 relativePath：父 POM 为已发布构件，一律从仓库解析（不找上级目录） -->
+        <relativePath/>
+    </parent>
+
+    <groupId>com.nexus</groupId>
+    <artifactId>nexus-parent</artifactId>
+    <version>0.1.0</version>
+    <packaging>pom</packaging>
+
+    <name>nexus-parent</name>
+    <description>nexus 统一 AI 网关演示项目 —— Maven 多模块父 POM</description>
+
+    <modules>
+        <module>nexus-common</module>
+        <module>nexus-infrastructure</module>
+        <module>nexus-module-system</module>
+        <module>nexus-module-ai</module>
+        <module>nexus-start</module>
+    </modules>
+
+    <properties>
+        <!-- Java 17：与构建镜像 maven:3.9-eclipse-temurin-17、运行镜像 eclipse-temurin:17-jre-alpine 一致 -->
+        <java.version>17</java.version>
+        <!--
+          MyBatis-Plus 版本选型依据（以 Maven Central 实际存在版本为准，已核对各版本 POM）：
+            3.5.9    → 内置 spring-boot-dependencies 3.3.4  ← 与本项目 Boot 3.3.x 同一代，选定
+            3.5.10.1 ~ 3.5.15 → 内置 3.4.1
+            3.5.16 / 3.5.17   → 内置 3.5.9
+          本项目锁定 Spring Boot 3.3.x（CLAUDE.md 宪法），故取 era 对齐的 3.5.9，避免跨代 API 差异。
+        -->
+        <mybatis-plus.version>3.5.9</mybatis-plus.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- ── 本项目模块：版本集中在此，子模块引用不写 <version> ── -->
+            <dependency>
+                <groupId>com.nexus</groupId>
+                <artifactId>nexus-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.nexus</groupId>
+                <artifactId>nexus-infrastructure</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.nexus</groupId>
+                <artifactId>nexus-module-system</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.nexus</groupId>
+                <artifactId>nexus-module-ai</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- ── BOM 未覆盖的第三方 ── -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <!--
+              预声明：MyBatis-Plus 自 3.5.9 起将 JSqlParser 拆分为独立模块，
+              分页插件 PaginationInnerInterceptor（阶段1 列表查询用）需显式引入本依赖。
+              阶段0 未使用，仅统一版本，不产生任何构建影响。
+            -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-jsqlparser</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <!--
+          说明：此处刻意不绑定任何插件 —— 编译参数（含 -parameters 保留方法参数名）、
+          资源过滤（application*.yml 使用 @..@ 分隔符）等已由 spring-boot-starter-parent 提供。
+          打包插件由 nexus-start 单独声明，保证其余模块产物为普通 jar。
+        -->
+    </build>
+</project>
