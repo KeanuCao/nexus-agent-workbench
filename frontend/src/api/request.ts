@@ -122,18 +122,66 @@ export function resolveHttpStatus(error: unknown): number | null {
   return null
 }
 
-// ── Request 拦截器：鉴权头注入（阶段1 启用，当前仅留结构）──
+// ── Request 拦截器：鉴权头注入（阶段1）──
 service.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
-    // TODO(阶段1 · 多租户认证)：登录态接通后从 store 取 token 注入鉴权头
-    //   const userStore = useUserStore()
-    //   if (userStore.token) {
-    //     config.headers.Authorization = `Bearer ${userStore.token}`
-    //   }
+  async (config: InternalAxiosRequestConfig) => {
+    // 鉴权头（docs/api/README.md §1.4）：除白名单（/api/auth/login、/api/health、/actuator/**）外一律必需。
+    // 前缀取后端返回的 `data.tokenType`，不硬编码 `Bearer`（§5.2 明确要求前端据此拼接）。
+    //
+    // ⚠️ 这里刻意用**动态 import** 取 store，而不是在文件顶层 import（设计 §7 的循环依赖约定）：
+    //   request.ts → stores/user.ts → api/auth.ts → request.ts 是一个真环，顶部静态 import 会让它在
+    //   模块初始化期闭合；动态 import 把求值推迟到"确有请求发出"时 —— 此时 main.ts 已 app.use(pinia)，
+    //   useUserStore 依赖的 activePinia 也已就位（模块顶层调用才是那个会炸的写法）。
+    //   下方 401 分支对 @/router 的引用出于同一考虑。
+    const { useUserStore } = await import('@/stores/user')
+    const userStore = useUserStore()
+    if (userStore.token) {
+      config.headers.Authorization = `${userStore.tokenType} ${userStore.token}`
+    }
     return config
   },
   (error: AxiosError) => Promise.reject(error)
 )
+
+/**
+ * 401 统一处置：清本地登录态 + 跳登录页（docs/api/README.md §1.2 / §5.1 第 4 条）。
+ *
+ * 防抖策略 —— **一次 401 风暴只跳一次**，用"标志位 + 落地路径判定"两道闸：
+ *   · `redirectingToLogin`：覆盖"同一批并发请求在同一跳转落地之前陆续失败"
+ *     （典型是页面加载时多个受保护请求同时 401），跳转结束由 finally 复位；
+ *   · `currentRoute.path === '/login'`：覆盖"跳转已落地之后的余波"，此时再 push 只会产生一条
+ *     重复导航，并可能把 redirect 覆盖成本次失败请求所在页。
+ * 两者叠加保证了复位之后（用户重新登录、再次过期）仍能正常触发新的跳转，不会一锤子失效。
+ */
+let redirectingToLogin = false
+
+async function handleUnauthorized(): Promise<void> {
+  // 与请求拦截器同理：不在模块顶层 import，避免环在初始化期闭合
+  const { useUserStore } = await import('@/stores/user')
+  const { default: router } = await import('@/router')
+
+  if (redirectingToLogin || router.currentRoute.value.path === '/login') {
+    return
+  }
+  redirectingToLogin = true
+
+  // 只清本地登录态，**不能**调 store.logout()：那会再发一次 POST /api/auth/logout，
+  // 而此刻 token 已被服务端判为失效 → 又是 401 → 递归
+  useUserStore().clear()
+
+  try {
+    // redirect 带上当前路径，重新登录后可回到原页面（与路由守卫的写法保持一致）
+    await router.push({
+      path: '/login',
+      query: { redirect: router.currentRoute.value.fullPath }
+    })
+  } catch (error) {
+    // 跳转被中止（如守卫返回 false）不应影响本次请求的错误传播：本函数只是"尽力而为"的副作用
+    console.warn('[request] 401 后跳转登录页未完成', error)
+  } finally {
+    redirectingToLogin = false
+  }
+}
 
 // ── Response 拦截器：统一解包 Result<T> ──
 service.interceptors.response.use(
@@ -166,10 +214,10 @@ service.interceptors.response.use(
     const result = error.response?.data
 
     if (status === 401) {
-      // TODO(阶段1 · 多租户认证)：401 视为登录态失效 —— 清空 store 中的 token 并跳转 /login
-      //   const userStore = useUserStore()
-      //   userStore.logout()
-      //   router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+      // 登录态失效（40100 未带 token / 40101 无效或被登出 / 40102 过期，§1.3）：
+      // 清 token + 跳登录页。具体处置与并发防抖见 handleUnauthorized。
+      // 这里不 await：跳转是副作用，不能拖住本次请求的错误传播（下面照常 reject 成 BusinessError）
+      void handleUnauthorized()
     }
 
     // 后端返回的仍是完整 Result —— 典型就是健康检查降级：HTTP 503 + code 20000，

@@ -61,6 +61,15 @@
           本项目锁定 Spring Boot 3.3.x（CLAUDE.md 宪法），故取 era 对齐的 3.5.9，避免跨代 API 差异。
         -->
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <!--
+          jjwt 版本选型依据（docs/design/01-多租户与认证.md §10 风险 6「jjwt 版本臆测」的落地处置）：
+            以 Maven Central 的 io.jsonwebtoken:jjwt-api 实际存在的版本为准（已查 maven-metadata.xml，
+            0.12.x 序列存在 0.12.0 ~ 0.12.7，另有 0.13.0）。
+          取 0.12.6 而非 0.12.7 / 0.13.0：0.12.x 是「builder/parser 现代 API」这一代，
+          0.12.6 与该代文档、示例完全一致；0.13.0 是 2025-08 发布的新次版本，跨代 API 差异
+          需另行核对，本阶段不引入无收益的核对成本。三个坐标（api/impl/jackson）必须同版本。
+        -->
+        <jjwt.version>0.12.6</jjwt.version>
     </properties>
 
     <dependencyManagement>
@@ -102,6 +111,30 @@
                 <groupId>com.baomidou</groupId>
                 <artifactId>mybatis-plus-jsqlparser</artifactId>
                 <version>${mybatis-plus.version}</version>
+            </dependency>
+
+            <!--
+              JWT（jjwt）：Spring Boot BOM 不覆盖 io.jsonwebtoken，故在此集中锁版本。
+              三个坐标的分工（缺一即在运行期报 "Unable to find an implementation"）：
+                jjwt-api     —— 编译期接口（Jwts / Claims / JwtException），本模块直接 import；
+                jjwt-impl    —— 运行期实现（runtime，代码不直接 import）；
+                jjwt-jackson —— 运行期 JSON 序列化实现（runtime）。
+              版本选型依据见上方 properties 中的注释。
+            -->
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-api</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-impl</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

@@ -1,10 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  nexus-module-system —— 系统模块：用户 / 角色 / 菜单（阶段1 填充）
+  nexus-module-system —— 系统模块：用户 / 角色 / 菜单
 
-  阶段0 为空壳模块：只保证包结构与依赖链路可编译，
-  目的是让 `mvn clean install -DskipTests` 的全模块链路先跑通，
-  业务代码在阶段1（task.2 多租户认证）填入。
+  阶段1 落地内容（设计依据：docs/design/01-多租户与认证.md §6.1）：
+    entity（Tenant/User）+ mapper（TenantMapper/UserMapper）+ dto（Login* / UserInfoVO）
+    + service（AuthService/impl，登录·登出·取当前用户）+ controller（/api/auth/*）
+    + config（BCryptPasswordEncoder 装配）。
+
+  阶段1 新增的依赖（**每一个都对应被直接 import 的类**）：
+    - spring-security-crypto ★：BCryptPasswordEncoder（决策 D5）。
+      **只引这一个**，不引 spring-boot-starter-security —— 后者会接管整条请求链
+      （默认全拦截），与本项目"自研 JWT 过滤器"的方案冲突。版本由 Boot BOM 管理；
+    - spring-web ★：@RestController / @PostMapping / MediaType / @RequestBody 的来源。
+      与 nexus-infrastructure 同一取舍：**只要这几个类型，不要内嵌 Tomcat、不要整条 MVC 链**
+      （Spring MVC 的运行期实现在 nexus-start 的 spring-boot-starter-web 里）；
+    - spring-boot-starter-test（test）：AuthServiceTest（JUnit 5 + Mockito）。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -21,7 +31,7 @@
     <packaging>jar</packaging>
 
     <name>nexus-module-system</name>
-    <description>系统模块：用户、角色、菜单（阶段1 填充）</description>
+    <description>系统模块：用户、角色、菜单（阶段1 落地认证链路）</description>
 
     <dependencies>
         <!-- 依赖方向（设计文档 §5.1）：module-system → common + infrastructure -->
@@ -32,6 +42,25 @@
         <dependency>
             <groupId>com.nexus</groupId>
             <artifactId>nexus-infrastructure</artifactId>
+        </dependency>
+
+        <!-- BCryptPasswordEncoder：只取口令哈希这一个能力 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+
+        <!-- @RestController / MediaType（运行期的 MVC 实现在 nexus-start） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+
+        <!-- AuthServiceTest：JUnit 5 + Mockito -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

@@ -1,9 +1,14 @@
-# 后端 API 契约（阶段0）
+# 后端 API 契约（阶段0 + 阶段1）
 
-> 面向 `frontend-engineer`（§1~§3）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
+> 面向 `frontend-engineer`（§1~§3 + **§5 认证接口**）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
 > 机器可读版本：[`openapi.yaml`](./openapi.yaml)（OpenAPI 3.0.3）。
-> 契约来源：`docs/design/00-环境与部署.md` §5.3（已确认设计）；实现：`backend/nexus-start`。
+> 契约来源：`docs/design/00-环境与部署.md` §5.3 + `docs/design/01-多租户与认证.md` §5（已确认设计）；
+> 实现：`backend/nexus-start`（健康检查）+ `backend/nexus-module-system`（认证）。
 > 更新纪律：协议变更**先改本文件**再改代码，前后端以本文件为唯一事实源。
+> ⚠️ **本文件若自相矛盾，以"字段说明"为准、"代码示例"次之，但必须上报矛盾点**（并发起修正），
+> 不得默不作声地挑一条照做 —— 实例：§5.2 的 `data.tokenType` 曾同时写着"固定 `Bearer`"与"不要硬编码"。
+> ⚠️ 章节编号约定：**§4（健康检查判据）被 `scripts/` 的三个脚本按编号引用，编号不得变动** ——
+> 阶段1 的新增章节因此追加在 §4 之后（§5 认证接口），而不是插在它前面。
 
 ## 0. 文件说明
 
@@ -34,32 +39,66 @@
 | --- | --- | --- | --- |
 | 成功 | 200 | 0 | axios 成功分支，拦截器已解包为 `data` |
 | **业务失败**（参数不合法、业务规则拒绝等） | **200** | 非 0（如 10000） | axios **成功**分支，拦截器判 `code !== 0` → 弹 `msg` + reject `BusinessError` |
+| **未登录 / 登录态失效**（阶段1 起） | **401** | 40100 / 40101 / 40102 | axios 失败分支的 401 专用处理：清 token + 跳 `/login`（见 §1.4 与 §5.1） |
 | 路径不存在 | 404 | 40400 | axios 失败分支，弹 `error.response.data.msg` |
 | 系统异常 | 500 | 50000 | 同上（`msg` 是通用话术，不含堆栈） |
 | **依赖不可用**（健康检查探活失败） | **503** | 20000 | 同上；但 `data` 仍带完整报告，可定位故障依赖 |
 
-设计理由：HTTP 状态码只承载**传输/可用性**语义（404/500/503），业务成败由 `code` 判定 ——
+设计理由：HTTP 状态码只承载**传输/可用性**语义（401/404/500/503），业务成败由 `code` 判定 ——
 这样业务失败不会污染 axios 的失败分支，异常提示统一由拦截器负责，调用点只关心 `data`。
 
-### 1.3 错误码表（阶段0 已落地）
+**401 为什么必须用 HTTP 状态码、而不是塞进 200 + 业务码**：前端的"清 token + 跳登录"这条路
+（`request.ts` 里已预留的 `if (status === 401)` 分支）是**传输层**语义。若把登录态失效做成
+200 + 非 0 业务码，它会落进成功分支，与"业务失败弹个提示"混淆 —— 两者处置完全不同
+（前者要跳登录，后者只是提示）。取舍记录见设计决策 D6。
+
+### 1.3 错误码表（阶段0 + 阶段1 已落地）
 
 | code | 常量（后端 `ResultCode`） | 配套 HTTP | `msg` 示例 |
 | --- | --- | --- | --- |
 | 0 | `SUCCESS` | 200 | `success` |
 | 10000 | `BUSINESS_ERROR` | 200 | 业务处理失败（`BusinessException` 默认码） |
+| **10100** | `LOGIN_FAILED` | 200 | 用户名或密码错误 |
+| **10101** | `ACCOUNT_DISABLED` | 200 | 账号已停用，请联系管理员 |
+| **10102** | `TENANT_DISABLED` | 200 | 租户已停用，请联系管理员 |
 | 20000 | `SERVICE_UNAVAILABLE` | 503 | `依赖服务不可用：postgres、ollama` |
 | 40400 | `NOT_FOUND` | 404 | 请求的资源不存在 |
+| **40100** | `UNAUTHENTICATED` | 401 | 未登录，请先登录 |
+| **40101** | `TOKEN_INVALID` | 401 | 登录状态无效，请重新登录 |
+| **40102** | `TOKEN_EXPIRED` | 401 | 登录已过期，请重新登录 |
 | 50000 | `SYSTEM_ERROR` | 500 | 系统繁忙，请稍后重试 |
 
-编码分段（阶段1 起按模块细分，**不复用**上表已有值）：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+编码分段（按模块细分，**不复用**上表已有值）：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+
+三条 401 分开的理由：**处置动作不同** —— `40100` 是客户端压根没带 token（接入问题）；
+`40102` 过期，重新登录即可；`40101` 是"token 签名不对"或"Redis 白名单里已无此 jti（已登出/被清）"，
+属异常信号（有人在动 token）。前端文案与排查方向都不同，故不合并。
+
+`10100` 对"用户名不存在"与"密码错误"**统一回同一文案**（防账号枚举）：
+前端**不得**依据 `msg` 做分支判断（设计 §5.1）。
 
 ### 1.4 通用请求头
 
-| Header | 阶段0 | 说明 |
+| Header | 阶段1 | 说明 |
 | --- | --- | --- |
-| `Content-Type: application/json` | 仅带请求体的接口需要 | 健康检查是 GET，无请求体 |
+| `Content-Type: application/json` | 仅带请求体的接口需要 | 健康检查是 GET、登出无请求体，都不需要 |
 | `Accept: application/json` | 可选 | 后端已用 `produces = application/json` 声明 |
-| `Authorization: Bearer <token>` | **阶段0 不需要** | 阶段1 登录接口接通后由 `request.ts` 拦截器统一注入 |
+| `Authorization: Bearer <token>` | **除白名单外一律必需** | 值取自 `POST /api/auth/login` 的 `data.token`；由 `request.ts` 请求拦截器统一注入 |
+
+白名单（`nexus.security.whitelist`，见 `application.yml`，**除下列路径外一律需要 token**）：
+
+| 白名单路径 | 为什么免鉴权 |
+| --- | --- |
+| `/api/auth/login` | 登录本身不能要求先登录 |
+| `/api/health` | 容器与 `scripts/` 三个脚本的探活口（加了鉴权会让 0.3 验收全线 FAIL） |
+| `/actuator/**` | `docker-compose` 中 `nexus-backend` 的 healthcheck 探活口 |
+
+两点前端要记住：
+
+1. **本地有 token ≠ 服务端仍认**：登录态以 Redis 白名单为准，可能在别处登出、或 Redis 被清。
+   刷新页面后调一次 `GET /api/auth/me` 做真实校验（这也是"假登录态"的第二道闸）。
+2. **Redis 不可用会表现为全员 401**（`40101`）—— 这是**有意**的 fail-closed：宁可让所有人重新登录，
+   也不放过无法验证的凭据。遇到"谁都登不进"，排查顺序先看 `/api/health` 的 `checks.redis`。
 
 ---
 
@@ -458,9 +497,167 @@ curl -s --max-time 5 "http://localhost:${OLLAMA_PORT}/api/tags"
 
 ---
 
-## 5. 变更记录
+## 5. 认证接口（阶段1）
+
+> 契约来源：`docs/design/01-多租户与认证.md` §5；实现：`backend/nexus-module-system`
+> （`AuthController` / `AuthServiceImpl` / `JwtAuthenticationFilter`）。
+> 三个接口的鉴权要求**不同**：`login` 免鉴权（白名单），`logout` 与 `me` 需要 `Authorization: Bearer <token>`。
+
+### 5.1 认证机制（前端必读的一句话版）
+
+1. 登录成功 → `data.token`（JWT，有效期 `data.expiresIn` 秒，默认 7200）；
+2. 之后每个请求带上 `Authorization: Bearer <token>`；
+3. 服务端每次请求做三步校验：**JWT 签名与有效期** → **Redis 白名单里该 `jti` 是否还在** →
+   用 token 里的 `tenantId` 建立本次请求的租户上下文（后续所有 SQL 自动带 `tenant_id` 条件）；
+4. 任一步失败 → HTTP **401** + 统一 `Result`（`code` = 40100 / 40101 / 40102），
+   前端处置：**清 token → 跳 `/login?redirect=<当前路径>`**；
+5. **登出 = 服务端删掉 Redis 里那条记录** → 同一个 token **立刻**失效（不必等它自然过期）。
+   这是"纯 JWT 做不到登出"的补丁，也是为什么登录态依赖 Redis。
+
+### 5.2 `POST /api/auth/login` —— 登录
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/auth/login` |
+| Method | `POST` |
+| 请求头 | `Content-Type: application/json`（必需）；无鉴权 |
+| Request Body | `{"username":"...","password":"..."}`（两个字段都必填） |
+| 成功 | HTTP 200 + `code=0`，`data` 见下 |
+| 失败 | HTTP **200** + `code=10100`（用户名或密码错误）/ `10101`（账号停用）/ `10102`（租户停用） |
+
+请求体字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `username` | string | 是 | 登录名，**全局唯一**（登录只收用户名，不收租户编码：先查出用户，才知道它属于哪个租户） |
+| `password` | string | 是 | 明文口令（服务端只做 BCrypt 比对；空值按 `10100` 处理） |
+
+响应 200：
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiJ9...",
+    "tokenType": "Bearer",
+    "expiresIn": 7200,
+    "user": {
+      "userId": 1,
+      "username": "admin",
+      "nickname": "默认租户管理员",
+      "tenantId": 1,
+      "tenantCode": "default",
+      "tenantName": "默认租户"
+    }
+  }
+}
+```
+
+`data` 字段定义（`LoginResponse`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `data.token` | string | 是 | JWS 紧凑序列化串 |
+| `data.tokenType` | string | 是 | 固定 `Bearer`。前端拼 `Authorization: ${tokenType} ${token}`（用返回值而非硬编码，行为等价但更贴合 RFC 6750 的语义；后端目前只签发这一种） |
+| `data.expiresIn` | integer | 是 | 有效期（秒），与 Redis 白名单 TTL 一致 |
+| `data.user` | object | 是 | 当前用户信息，见下 |
+
+`data.user` 字段定义（`UserInfoVO`，与 `GET /api/auth/me` 的 `data` **同构**）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `userId` | integer | 是 | 用户 ID |
+| `username` | string | 是 | 登录名 |
+| `nickname` | string \| null | 是（可为 null） | 展示名 |
+| `tenantId` | integer | 是 | 租户 ID |
+| `tenantCode` | string | 是 | 租户编码（`default` / `demo`） |
+| `tenantName` | string | 是 | 租户名称（前端展示用） |
+
+失败响应示例（HTTP **200**，业务码非 0）：
+
+```json
+{ "code": 10100, "msg": "用户名或密码错误", "data": null }
+```
+
+> ⚠️ 前端**不要**按 `msg` 或 `code` 去区分"用户不存在"与"密码错误" —— 服务端刻意不区分（防账号枚举），
+> 两者的响应完全一致。`10101`（账号停用）只在**口令正确**之后才可能返回。
+
+### 5.3 `POST /api/auth/logout` —— 登出
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/auth/logout` |
+| Method | `POST` |
+| Request Body | **无**（不要发 body，也**不要**设 `Content-Type: application/json` —— 接口未声明 consumes，带了也无害） |
+| 请求头 | `Authorization: Bearer <token>`（必需） |
+| 成功 | HTTP 200 + `code=0`、`data=null`（Redis 中该 `jti` 立即失效） |
+| 失败 | 无 token / 已失效 → HTTP **401** + `40100` / `40101` |
+
+```json
+{ "code": 0, "msg": "success", "data": null }
+```
+
+登出后**用同一个 token** 再调任何受保护接口都会得到 401 —— 这是验收项 1.2-3 的判据。
+
+### 5.4 `GET /api/auth/me` —— 取当前用户
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/auth/me` |
+| Method | `GET` |
+| 请求头 | `Authorization: Bearer <token>`（必需） |
+| 成功 | HTTP 200 + `code=0`，`data` = §5.2 的 `user` 对象 |
+| 失败 | 无 token / 已失效 / 已过期 → HTTP **401** + `40100` / `40101` / `40102` |
+
+**为什么需要它**（不是"多余的一个接口"）：登录态以 Redis 白名单为准，本地存着 token
+不代表服务端仍认（可能在别处登出、或 Redis 被清）。前端刷新页面后调它做一次真实校验，
+避免"假登录态"。它也是除 401 之外的第二道闸：
+若 token 里的租户与用户实际所属租户不一致，查询会自动带 `tenant_id` 条件 → 查不到 → 401。
+
+### 5.5 开发态演示账号（**仅限 dev 环境**）
+
+种子数据由 `db-patch/202609131010_初始化用户表.sql` 落库：
+
+| 用户名 | 明文口令 | 所属租户 | 昵称 |
+| --- | --- | --- | --- |
+| `admin` | `admin123` | `default`（默认租户） | 默认租户管理员 |
+| `demo` | `demo123` | `demo`（演示租户） | 演示租户用户 |
+
+- 口令哈希由 BCrypt 生成（`$2a$10$...`，10 轮、随机盐），与 Spring `BCryptPasswordEncoder` 的默认参数一致；
+  生成方式见补丁文件头部注释（可复现）。
+- **哈希是否正确的最终判据是"登录接口实跑成功"**，不是"看起来像 BCrypt"。
+- 两个租户各一个账号，是为了现场演示**租户隔离**：用 A 的 token 查不到 B 的数据。
+- ⚠️ 这是**随仓库公开的演示凭据**，仅用于本地/演示环境；任何真实环境都必须换掉
+  （连同 `nexus.jwt.secret`，见 `application.yml` 注释）。
+
+### 5.6 前端对接示例（TS，对齐现有 `request.ts`）
+
+```ts
+// 登录：拦截器已解包 Result，拿到的是 data
+const data = await login({ username, password })   // LoginData
+setToken(data.token)                                // 存进 Pinia store（手写 localStorage，见 D7）
+
+// 之后每个请求由请求拦截器统一注入。
+// 两点与 request.ts 的实际实现对齐（改动前请同步改那边）：
+//   ① 在拦截器函数体内**动态 import** 取 store —— request.ts → stores/user.ts → api/auth.ts → request.ts
+//      是一个真环，顶层静态 import 会让它在模块初始化期闭合；
+//   ② 前缀取 data.tokenType，不硬编码 Bearer（见 §5.2 的字段说明）。
+config.headers.Authorization = `${userStore.tokenType} ${userStore.token}`
+
+// 401：清 token + 跳登录（并发多请求同时 401 时只跳一次 —— 需防抖）
+if (status === 401) {
+  userStore.clear()
+  router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+}
+```
+
+---
+
+## 6. 变更记录
 
 | 日期 | 变更 | 说明 |
 | --- | --- | --- |
 | 2026-09-11 | 首版（阶段0 / 子任务 0.4） | `GET /api/health` + 统一响应体 + 错误码表 + 状态码策略 |
 | 2026-09-11 | 追加 §4 健康检查判据（面向 0.3 脚本） | 两个探活口分工、判定规则表、轮询策略、503 造法、模型就绪独立判据、不可用检查项、复核偏差 |
+| 2026-09-13 | 追加 §5 认证接口（阶段1） | `login` / `logout` / `me` 三个接口 + 6 个错误码（10100~10102、40100~40102）+ 401 状态码语义 + 演示账号；§1.4 的 `Authorization` 由"不需要"改为"除白名单外必需"。**§4 编号保持不变**（`scripts/` 三个脚本按编号引用），新章节追加在其后 |

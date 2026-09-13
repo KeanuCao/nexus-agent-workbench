@@ -1,14 +1,16 @@
 # =============================================================================
 # nexus 后端 API 契约（OpenAPI 3.0.3）
 #
-# 来源：docs/design/00-环境与部署.md §5.3（已确认设计，契约逐字对齐）
+# 来源：docs/design/00-环境与部署.md §5.3 + docs/design/01-多租户与认证.md §5（已确认设计，契约逐字对齐）
 # 面向：frontend-engineer（src/api/*.ts 的类型定义以本文件为准）
 #
 # 约定速记：
 #   - 所有接口返回统一响应体 Result<T>：{ code, msg, data }，code === 0 为成功；
 #   - 业务异常走 HTTP 200 + code≠0（前端拦截器按 code 判定并弹出 msg）；
-#   - HTTP 状态码只用于传输/可用性语义：404 路径不存在、500 系统异常、503 依赖不可用；
-#   - 本阶段（阶段0）无鉴权、无请求体、无查询参数；token 注入在阶段1 接通。
+#   - HTTP 状态码只用于传输/可用性语义：401 登录态缺失/失效、404 路径不存在、
+#     500 系统异常、503 依赖不可用；
+#   - 阶段1 起除白名单（/api/auth/login、/api/health、/actuator/**）外一律需要
+#     `Authorization: Bearer <token>`（全局 security 见文件末尾的 securitySchemes）。
 # =============================================================================
 openapi: 3.0.3
 
@@ -16,7 +18,7 @@ info:
   title: nexus 统一 AI 网关 —— API 契约
   version: 0.2.0
   description: |
-    演示项目后端接口契约。阶段0 仅暴露系统级接口（健康检查）。
+    演示项目后端接口契约。阶段0：健康检查；阶段1：多租户 + 认证（登录/登出/取当前用户）。
 
     ## 统一响应体约定
     所有接口（含错误）一律返回 `Result<T>`：
@@ -29,32 +31,191 @@ info:
     - `code !== 0`：失败，`msg` 是可直接展示给前端的文案，`data` 通常为 `null`
       （例外：健康检查 503 时 `data` 仍返回完整报告，便于前端定位故障依赖）。
 
-    ## 错误码（阶段0 已落地部分）
+    ## 错误码（阶段0 + 阶段1 已落地）
     | code | 常量 | HTTP | 含义 |
     | --- | --- | --- | --- |
     | 0 | SUCCESS | 200 | 成功 |
     | 10000 | BUSINESS_ERROR | 200 | 通用业务失败（`BusinessException` 默认码） |
+    | 10100 | LOGIN_FAILED | 200 | 用户名或密码错误（**刻意不区分**二者，防账号枚举） |
+    | 10101 | ACCOUNT_DISABLED | 200 | 账号已停用（口令正确后才可能返回） |
+    | 10102 | TENANT_DISABLED | 200 | 租户已停用 |
     | 20000 | SERVICE_UNAVAILABLE | 503 | 依赖服务不可用（健康检查探活失败） |
+    | 40100 | UNAUTHENTICATED | 401 | 未携带 token |
+    | 40101 | TOKEN_INVALID | 401 | 登录状态无效（伪造 / 签名错 / Redis 白名单已无该 jti） |
+    | 40102 | TOKEN_EXPIRED | 401 | 登录已过期（重新登录即可） |
     | 40400 | NOT_FOUND | 404 | 请求的路径/资源不存在 |
     | 50000 | SYSTEM_ERROR | 500 | 系统异常（详情仅进服务端日志，不返回给前端） |
 
-    阶段1 起按模块细分业务码，编码分段：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+    编码分段：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+
+    ## 认证机制（阶段1）
+    1. `POST /api/auth/login` 换取 `data.token`（JWT，有效期 `data.expiresIn` 秒）；
+    2. 除白名单（`/api/auth/login`、`/api/health`、`/actuator/**`）外，所有接口都要带
+       `Authorization: Bearer <token>`；
+    3. 每次请求服务端校验三件事：JWT 签名与有效期 → Redis 白名单里该 `jti` 是否还在 →
+       用 token 里的 `tenantId` 建立租户上下文（后续 SQL 自动带 `tenant_id` 条件）；
+    4. 任一步失败 → HTTP **401** + 统一 `Result`，前端应清 token 并跳 `/login`；
+    5. `POST /api/auth/logout` 会删掉 Redis 中该 `jti` → **同一个 token 立刻失效**。
+    6. **Redis 不可用时全员 401**（fail-closed，有意为之）：排查先看 `/api/health` 的 `checks.redis`。
 
     ## 前端解包路径（对齐 frontend/src/api/request.ts）
     axios 实例 `baseURL = '/api'`，故 `url: '/health'` 即本文件的 `GET /api/health`。
     响应拦截器已把 `Result<T>` 解包为 `data`，业务代码直接拿到 `HealthData`；
-    非 0 业务码 / 4xx / 5xx 走 reject 分支，`error.response.data.msg` 可用于提示。
+    非 0 业务码 / 4xx / 5xx 走 reject 分支，`error.response.data.msg` 可用于提示；
+    **401 有专门分支**（清 token + 跳登录），不要与普通业务失败混用同一段处理逻辑。
 servers:
   - url: http://localhost:8089
     description: 直连后端（WSL 内容器端口映射到宿主机 8089，端口可经 docker-compose/.env 的 BACKEND_PORT 调整）
   - url: /
     description: 同源相对路径（前端 dev 由 vite.config.ts 代理 /api → localhost:8089；生产由 nginx 反代 /api → nexus-backend:8089）
 
+security:
+  # 全局默认：需要 Bearer token（阶段1 起"默认拒绝"）
+  # 白名单路径（/api/health、/api/auth/login、/actuator/**）在各自的 operation 上覆盖为 security: []
+  - bearerAuth: []
+
 tags:
+  - name: Auth
+    description: 认证接口（阶段1）：登录换 token、登出使 token 立刻失效、取当前用户
   - name: System
     description: 系统级接口（健康检查、运行信息），无需鉴权
 
 paths:
+  /api/auth/login:
+    post:
+      tags:
+        - Auth
+      operationId: login
+      summary: 登录（换取 JWT）
+      description: |
+        校验 `username` + `password`，成功后签发 JWT 并把该 token 的 `jti` 写入 Redis 白名单
+        （TTL 与 token 有效期一致），使"登出即失效"成为可能。
+
+        **失败一律返回 HTTP 200 + 非 0 业务码**（与全局约定一致，见 `docs/api/README.md` §1.2）：
+        - `10100` 用户名或密码错误 —— **刻意不区分**"用户不存在"与"密码错"，防账号枚举，
+          前端不得据文案做分支；
+        - `10101` 账号已停用（只在口令正确后才可能返回）；
+        - `10102` 租户已停用。
+
+        本接口**免鉴权**（登录取不到 token，白名单见 `docs/api/README.md` §1.4）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              admin:
+                summary: 默认租户管理员
+                value:
+                  username: admin
+                  password: admin123
+      responses:
+        '200':
+          description: 成功（`code=0`）或业务失败（`code=10100/10101/10102`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultLoginResponse'
+              examples:
+                success:
+                  summary: 登录成功
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIiwianRpIjoiM2Yx...
+                      tokenType: Bearer
+                      expiresIn: 7200
+                      user:
+                        userId: 1
+                        username: admin
+                        nickname: 默认租户管理员
+                        tenantId: 1
+                        tenantCode: default
+                        tenantName: 默认租户
+                loginFailed:
+                  summary: 用户名或密码错误（HTTP 200 + 业务码）
+                  value:
+                    code: 10100
+                    msg: 用户名或密码错误
+                    data: null
+                tenantDisabled:
+                  summary: 租户已停用
+                  value:
+                    code: 10102
+                    msg: 租户已停用，请联系管理员
+                    data: null
+
+  /api/auth/logout:
+    post:
+      tags:
+        - Auth
+      operationId: logout
+      summary: 登出（使当前 token 立刻失效）
+      description: |
+        删除 Redis 白名单中**当前 token** 的 `jti`。删除后同一个 token 再调任何受保护接口都会 401
+        —— 这是"纯 JWT 无法登出"的补丁（JWT 本身签发即有效到过期）。
+
+        请求**无 body**（刻意不声明 `consumes`：声明了的话，不带 `Content-Type` 的合法请求会被判 415）。
+        幂等：重复登出结果相同（第二次会因 token 已失效而在过滤器处返回 401）。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: 登出成功（`data` 恒为 null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultVoid'
+              examples:
+                success:
+                  value:
+                    code: 0
+                    msg: success
+                    data: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/me:
+    get:
+      tags:
+        - Auth
+      operationId: getCurrentUser
+      summary: 取当前用户（服务端校验版）
+      description: |
+        返回当前 token 对应的用户与租户信息（与登录响应里的 `data.user` 同构）。
+
+        **存在的意义**：登录态以 Redis 白名单为准，"本地存着 token" ≠ "服务端仍认"
+        （可能在别处登出、或 Redis 被清）。前端刷新页面后调它做一次真实校验，避免"假登录态"。
+
+        内部还会顺带做一次租户隔离自检：查询自动带 `tenant_id` 条件，
+        若 token 里的租户与用户实际所属租户不一致 → 查不到 → 401。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: 当前用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultUserInfoVO'
+              examples:
+                success:
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      userId: 1
+                      username: admin
+                      nickname: 默认租户管理员
+                      tenantId: 1
+                      tenantCode: default
+                      tenantName: 默认租户
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/health:
     get:
       tags:
@@ -142,6 +303,62 @@ paths:
                         ollama: DOWN
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        登录接口返回的 `data.token`。用法：`Authorization: Bearer <token>`。
+        服务端每次请求校验 ①JWT 签名与有效期 ②Redis 白名单中该 `jti` 是否仍在
+        （登出/被清即为失效）。失败返回 HTTP 401 + `40100/40101/40102`。
+
+  parameters:
+    AuthorizationHeader:
+      name: Authorization
+      in: header
+      required: true
+      description: 形如 `Bearer <token>`（注意 Bearer 后有**一个空格**）
+      schema:
+        type: string
+      example: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123
+
+  responses:
+    Unauthorized:
+      description: |
+        登录态缺失或失效。**响应体仍是统一 `Result`**（HTTP 401 是给前端 401 分支用的传输层信号）：
+
+        | code | msg | 触发场景 |
+        | --- | --- | --- |
+        | 40100 | 未登录，请先登录 | 没带 `Authorization: Bearer` 头 |
+        | 40101 | 登录状态无效，请重新登录 | token 签名/格式非法，或 Redis 白名单里已无该 jti（已登出 / Redis 被清 / Redis 不可用） |
+        | 40102 | 登录已过期，请重新登录 | token 的 `exp` 已过 |
+
+        前端处置：清 store 中的 token → 跳 `/login?redirect=<当前路径>`（并发多请求同时 401 时只跳一次）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+          examples:
+            unauthenticated:
+              summary: 未携带 token（40100）
+              value:
+                code: 40100
+                msg: 未登录，请先登录
+                data: null
+            tokenInvalid:
+              summary: token 非法或已登出（40101）
+              value:
+                code: 40101
+                msg: 登录状态无效，请重新登录
+                data: null
+            tokenExpired:
+              summary: token 已过期（40102）
+              value:
+                code: 40102
+                msg: 登录已过期，请重新登录
+                data: null
+
   schemas:
 
     # ── 统一响应体外壳（泛型 Result<T> 的通用部分）──
