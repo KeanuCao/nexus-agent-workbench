@@ -88,7 +88,7 @@
   "data": {
     "status": "UP",
     "service": "nexus-start",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "timestamp": "2026-09-03T10:00:00+08:00",
     "checks": { "postgres": "UP", "redis": "UP", "ollama": "UP" }
   }
@@ -101,7 +101,7 @@
 | --- | --- | --- | --- |
 | `data.status` | `"UP" \| "DOWN"` | 是 | 总体状态：三个依赖全 UP 才是 `UP` |
 | `data.service` | string | 是 | 服务名，固定 `nexus-start` |
-| `data.version` | string | 是 | 服务版本，如 `0.1.0`（构建期由 pom 版本注入） |
+| `data.version` | string | 是 | 服务版本，如 `0.2.0`（构建期由 pom 版本注入） |
 | `data.timestamp` | string (`date-time`) | 是 | ISO-8601 带时区偏移，格式固定 `yyyy-MM-dd'T'HH:mm:ssXXX`（**秒级、无小数秒**）。偏移量 = 服务端默认时区：容器内通常 `+00:00`，Windows 本地直跑 `+08:00` |
 | `data.checks` | object | 是 | 各依赖探测结果，见下 |
 
@@ -127,7 +127,7 @@
   "data": {
     "status": "DOWN",
     "service": "nexus-start",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "timestamp": "2026-09-03T10:00:00+08:00",
     "checks": { "postgres": "DOWN", "redis": "UP", "ollama": "UP" }
   }
@@ -258,21 +258,21 @@ L2 是**唯一**同时覆盖 postgres / redis / ollama 的入口 —— 依赖�
 | --- | --- | --- |
 | `data.status` | `"UP"` | 与 HTTP 200 同真同假。若 `status=UP` 但 HTTP=503（或反之）→ **契约被破坏，报后端 bug** |
 | `data.service` | `"nexus-start"` | 固定值（配置 `nexus.health.service-name`）。不匹配 → 打到别的服务了 |
-| `data.version` | `"0.1.0"` | **专条见下** |
+| `data.version` | `"0.2.0"` | **专条见下** |
 | `data.timestamp` | 正则 `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$` | 秒级、**无小数秒**。**不要断言时区**：容器内 `+00:00`、Windows 本地直跑 `+08:00`，两者都合法 |
 | `data.checks.postgres` / `.redis` / `.ollama` | 三项均 `"UP"` | **取值域只有 `UP` / `DOWN`**（后端刻意不复用 Spring `HealthStatus`，就没有 `OUT_OF_SERVICE`/`UNKNOWN`）。出现第三值 → 契约破坏，脚本应报错而非通过 |
 | `data.checks` 的键数 | **恰好 3 个** | 多出未知键 → 契约已变更，报告而非静默通过 |
 
 **`data.version` 专条（脚本最容易漏的判据）**
 
-- 期望 `0.1.0` —— 来源是 `backend/pom.xml` 的 `<version>`，构建期由 Maven 资源过滤替换
+- 期望 `0.2.0` —— 来源是 `backend/pom.xml` 的 `<version>`，构建期由 Maven 资源过滤替换
   `application.yml` 里的 `@project.version@` 占位符。
 - **必须 FAIL 的取值**：字面量 `@project.version@`（= 资源过滤失效）、或空串。
   这是**构建层缺陷**，不是环境问题 —— 脚本要给出"检查 `maven-resources-plugin` 过滤是否生效"的提示，
   别让用户以为是容器没起好。
-- **建议判据写法**：不要硬编码 `0.1.0`，而是断言 `^[0-9]+\.[0-9]+\.[0-9]+$` 且显式拒绝 `^@.*@$`
+- **建议判据写法**：不要硬编码 `0.2.0`，而是断言 `^[0-9]+\.[0-9]+\.[0-9]+$` 且显式拒绝 `^@.*@$`
   —— pom 版本升级时脚本不用改，仍能抓到过滤失效。
-- **交叉验证**：同一个占位符还出现在 `/actuator/info` → `info.app.version`（值为 `0.1.0`）。
+- **交叉验证**：同一个占位符还出现在 `/actuator/info` → `info.app.version`（值为 `0.2.0`）。
   两个出口都查一遍，可确认是"同一处坏掉"还是只有一处。
 
 #### 4.2.3 取数与解析示例（WSL 内、仓库根目录执行）
@@ -341,7 +341,7 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' .env | cut -d= -f2)   # 下面的 8089 �
 
 # ① 基线：三项全 UP
 curl -s --max-time 10 http://localhost:8089/api/health
-# → {"code":0,"msg":"success","data":{"status":"UP","service":"nexus-start","version":"0.1.0",
+# → {"code":0,"msg":"success","data":{"status":"UP","service":"nexus-start","version":"0.2.0",
 #     "timestamp":"...","checks":{"postgres":"UP","redis":"UP","ollama":"UP"}}}
 
 # ② 制造故障：停 redis
@@ -350,7 +350,7 @@ curl -s --max-time 10 -o /tmp/h.json -w '%{http_code}\n' http://localhost:8089/a
 # → 503
 cat /tmp/h.json
 # → {"code":20000,"msg":"依赖服务不可用：redis","data":{"status":"DOWN","service":"nexus-start",
-#     "version":"0.1.0","timestamp":"...","checks":{"postgres":"UP","redis":"DOWN","ollama":"UP"}}}
+#     "version":"0.2.0","timestamp":"...","checks":{"postgres":"UP","redis":"DOWN","ollama":"UP"}}}
 
 # ③ 恢复
 docker compose start redis
