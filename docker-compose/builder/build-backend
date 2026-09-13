@@ -11,6 +11,10 @@
 #     只需 -pl nexus-infrastructure 就能独立解析依赖，不必依赖 reactor 会话。
 #     代价仅比 package 多一步拷贝。
 #
+# 为什么还要 clean（2026-09-13 补）：
+#     见下方 mvn 调用处的注释 —— 版本号变更会让新旧的 jar 在 target/ 里并存，
+#     直接打破"该目录下恰好一个 *.jar"的打包约定。
+#
 # 为什么产物要「先写临时名再 mv」：
 #     mv 在同一文件系统内是原子的。若直接覆盖 app.jar，而此刻后端容器正在重启
 #     并读取该文件，会读到写了一半的 jar —— 表现为莫名其妙的 zip/class 损坏错误。
@@ -23,15 +27,28 @@ OUT_DIR="${ARTIFACT_DIR}/backend"
 
 cd "${REPO_DIR}/backend"
 
-echo "[build-backend] mvn install -DskipTests（依赖走 builder-m2 卷缓存）"
-mvn -B -DskipTests install
+echo "[build-backend] mvn clean install -DskipTests（依赖走 builder-m2 卷缓存）"
+# 必须带 clean：maven **不会**清理 target/ 里的历史产物，而版本号一变（0.1.0 → 0.2.0）
+# 产物文件名随之改变，旧 jar 会与新 jar 并存，下面"恰好一个 *.jar"的约定当场被打破。
+# 这不是理论风险 —— 2026-09-13 升版本号后的第一次构建就撞上了：
+#     target/ 里 nexus-start-0.1.0.jar 与 nexus-start-0.2.0.jar 并存。
+# 代价是全量重编译（依赖仍有卷缓存，不重新下载），对本项目规模可以接受；
+# 换来的是"产物目录里绝不会有上一版本的东西"。
+mvn -B clean install -DskipTests
 
 # 打包约定（父 POM 硬约束）：只有 nexus-start 产出可执行 fat jar，
 # 且该目录下必须**恰好一个** *.jar（*.jar.original 不命中 glob）。命中数不对就是构建约定被破坏。
 set -- "${REPO_DIR}/backend/nexus-start/target/"*.jar
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
     echo "[build-backend] 失败：nexus-start/target 下应恰好有一个 *.jar，实际命中 $# 个" >&2
-    echo "[build-backend] 排查：是否误启用了 maven-source/javadoc 插件（会产生 -sources.jar）？" >&2
+    for jar in "$@"; do
+        # glob 未命中时 $1 是字面量，不是文件，跳过以免误导
+        [ -f "$jar" ] && echo "        $jar" >&2
+    done
+    echo "[build-backend] 排查方向（按可能性排序）：" >&2
+    echo "        1. 命中多个、且文件名里的版本号不同 → target/ 残留上一版本的 jar（本步已用 mvn clean 防范）" >&2
+    echo "        2. 命中 -sources.jar / -javadoc.jar → 误启用了 maven-source / maven-javadoc 插件" >&2
+    echo "        3. 命中 0 个 → 构建其实没产出可执行 jar，往上翻 mvn 的输出" >&2
     exit 1
 fi
 
