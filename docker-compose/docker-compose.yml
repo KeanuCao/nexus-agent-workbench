@@ -7,9 +7,16 @@
 #   2. 仅在 WSL 发行版 nexus-agent-workbench 内的 docker/compose 执行。
 #   3. 宿主端口全部经 .env 变量化（改一处生效）；容器内端口固定，
 #      健康检查与 nginx 反代不随宿主端口漂移。
-#   4. builder 走 profiles: ["build"]，不进默认 up -d 服务图 —— 运行期不常驻，
-#      按需 `docker compose run --rm builder <命令>`（0.2 起兼任 db-patch 迁移执行器）。
+#   4. builder 走 profiles: ["build"]，不进默认 up -d 服务图。它是**手工启停**的常驻容器：
+#        docker compose up -d builder      # 需要打包时启动
+#        docker compose exec builder <命令> # 在里面手工执行 git-sync / build-* / db-patch-migrate
+#        docker compose stop builder       # 用完停掉
+#      它自己 git pull 源码（不挂载宿主源码），仓库地址由 .env 的 NEXUS_REPO_URL/BRANCH 配置。
 #   5. 数据一律命名卷（WSL ext4），不用 bind mount 映射 /mnt/c 数据目录（9p 性能/权限风险）。
+#   6. **产物走共享卷**：builder 把 jar / 前端静态文件写到命名卷 build-artifacts，
+#      nexus-backend / nexus-frontend 只读挂载同一个卷。
+#      ⚠️ 后果：运行镜像**不再自包含** —— 产物还没生成时，前后端容器会启动失败。
+#         所以「裸 docker compose up -d」不再是可靠入口，请走 scripts/up.sh（它保证顺序）。
 #
 # 用法（0.3 由 scripts/up.sh 封装，现阶段人工执行）：
 #   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose up -d"
@@ -117,10 +124,17 @@ services:
     networks:
       - nexus-net
 
-  # ─────────────────────────── 打包容器（运行期不常驻） ───────────────────────────
-  # 专门的 nexus-builder：git + mvn 3.9/JDK17 + node 20 + postgresql-client（见 builder/Dockerfile）。
-  # profiles 隔离：不进默认 up -d 服务图；按需 docker compose run --rm builder <命令>。
-  # 0.2 起：挂载 /db-patch 连 nexus-net 内 postgres 执行补丁迁移；0.4 起：前后端镜像共用构建阶段。
+  # ─────────────────────────── 打包容器（手工启停的常驻容器） ───────────────────────────
+  # nexus-builder：git + mvn 3.9/JDK17 + node 20 + postgresql-client（见 builder/Dockerfile）。
+  # 2026-09-13 按新宪法重建：不再挂载宿主源码（容器内自己 git pull），不再作为前后端镜像的
+  # 构建阶段（产物改为落 build-artifacts 卷），从"用完即销毁"改为"手工启停"。
+  #
+  # profiles 隔离仍然保留 —— 作用是让**裸 `docker compose up -d` 不会拉起它**；
+  # 显式点名（`up -d builder`）照样会激活 profile（2026-09-11 已实测该行为）。
+  #
+  # 刻意**不写 depends_on: postgres**：只有 db-patch-migrate 需要数据库，
+  # 而 build-backend / build-frontend 不需要。绑上去会让"只想编译一下"也得先等 PG 就绪。
+  # 真去跑迁移而 PG 没起时，脚本会以明确的连接错误退出（fail-fast，不静默）。
   builder:
     image: nexus-builder:dev
     profiles: ["build"]
@@ -128,24 +142,49 @@ services:
       context: ./builder
       dockerfile: Dockerfile
     container_name: nexus-builder
+    restart: "no"
+    # 常驻但不干活，等着被 exec 进去执行命令（CLAUDE.md：手工启动、手工执行）
+    command: ["sleep", "infinity"]
+    environment:
+      # ── 源码同步（容器内 git 拉取；只能拿到【已 push】的提交）──
+      NEXUS_REPO_URL: ${NEXUS_REPO_URL:-https://github.com/KeanuCao/nexus-agent-workbench.git}
+      NEXUS_REPO_BRANCH: ${NEXUS_REPO_BRANCH:-main}
+      NEXUS_REPO_DIR: /workspace/repo
+      # ── 产物共享目录（与 nexus-backend / nexus-frontend 挂的是同一个卷）──
+      NEXUS_ARTIFACT_DIR: /artifacts
+      # ── db-patch 迁移连库参数 ──
+      # ⚠️ 这里是【容器内端口 5432】，不是 .env 的 PG_PORT（那是宿主映射端口）。
+      #    与「8088 是宿主端口 / 80 是容器内端口」同一类陷阱，写混了会连不上。
+      NEXUS_PG_HOST: postgres
+      NEXUS_PG_PORT: "5432"
+      NEXUS_PG_DB: ${PG_DB:-nexus}
+      NEXUS_PG_USER: ${PG_USER:-nexus}
+      NEXUS_PG_PASSWORD: ${PG_PASSWORD:-nexus123}
+    volumes:
+      # 容器内的 git 工作区。放命名卷（而不是让容器每次重 clone）是为了
+      # `docker compose down` 之后工作区仍在，增量 pull 与增量编译才有意义。
+      # 注意：这份 clone **只是构建副本**，宿主仓库仍是开发真源。
+      - builder-src:/workspace
+      # Maven 本地仓库：不缓存的话每次构建要重新下 150MB+ 依赖。
+      # ⚠️ 挂载点必须是 /root/.m2/repository —— 挂 /root/.m2 会遮蔽镜像层里的
+      #    settings.xml（阿里云源），Maven 便静默回落到境外中央仓库。
+      - builder-m2:/root/.m2/repository
+      # npm 全局缓存
+      - builder-npm:/root/.npm
+      # ★ 产物共享目录：本容器写，前后端容器只读挂
+      - build-artifacts:/artifacts
     networks:
       - nexus-net
 
-  # ─────────────────────────── 应用容器（0.4 落码后可构建） ───────────────────────────
+  # ─────────────────────────── 应用容器 ───────────────────────────
+  # 2026-09-13 起：镜像里**不再**包含应用产物（原先由 stage 1 的 mvn/npm 构建后 COPY 进来），
+  # 产物改为从共享卷 build-artifacts 读取。因此构建上下文只需 Dockerfile 一个文件，
+  # 构建是秒级的 —— 此处原本那套「dockerfile 相对 context 解析」的绕行写法也随之失去必要。
   nexus-backend:
     image: nexus-backend:dev
     build:
-      # 构建上下文为 backend 工程目录。
-      # ⚠️ 路径基准（2026-09-11 实测 compose v5.1.4）：
-      #   context    → 相对【本 compose 文件所在目录】→ <repo>/backend
-      #   dockerfile → 相对【已解析的 context】，不是 compose 目录！'..' 会被归一化：
-      #                <repo>/backend + ../docker-compose/backend/Dockerfile
-      #                = <repo>/docker-compose/backend/Dockerfile ✅
-      #   （原写 ./backend/Dockerfile 会拼成 <repo>/backend/backend/Dockerfile，
-      #     报 `resolve : lstat ... no such file or directory`）
-      # 注：Dockerfile 位于构建上下文之外，需 BuildKit 支持（旧版 classic builder 不支持）。
-      context: ../backend
-      dockerfile: ../docker-compose/backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: nexus-backend
     restart: unless-stopped
     ports:
@@ -153,7 +192,21 @@ services:
     environment:
       # 容器内端口固定 8089（与健康检查/nginx 反代一致）；改宿主端口只动 .env 的 BACKEND_PORT
       SERVER_PORT: "8089"
-      # 0.4 落码后按需补充 SPRING_DATASOURCE_*/SPRING_DATA_REDIS_* 环境变量（凭据同 .env 来源）
+      # ── 数据源 / Redis：地址与凭据全部来自 .env（唯一真源）──
+      # 补上这组变量的原因：此前它们只喂给 postgres 容器，后端走的是 application.yml
+      # 的默认值（恰好相同所以连得上）。一旦有人改 .env 里的 PG_PASSWORD，后端就会连不上、
+      # checks.postgres 变 DOWN —— 这笔债记在 docs/api/README.md §4.7 第 3 条。
+      # ⚠️ 端口用【容器内】端口 5432 / 6379，不是 .env 的 PG_PORT / REDIS_PORT（那是宿主映射端口）。
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${PG_DB:-nexus}
+      POSTGRES_USER: ${PG_USER:-nexus}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nexus123}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      # 只读挂载产物共享目录；jar 由 builder 容器写入（产物缺失时有可读报错，见 Dockerfile）
+      - build-artifacts:/artifacts:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -172,23 +225,19 @@ services:
   nexus-frontend:
     image: nexus-frontend:dev
     build:
-      # 构建上下文为 frontend 工程目录。
-      # ⚠️ 三个路径字段的解析基准【各不相同】（2026-09-11 实测 compose v5.1.4）：
-      #   context             → 相对【本 compose 文件所在目录】→ <repo>/frontend
-      #   dockerfile          → 相对【已解析的 context】→ 故写 ../docker-compose/frontend/Dockerfile
-      #   additional_contexts → 又回到相对【本 compose 文件所在目录】→ <repo>/docker-compose/frontend
-      # 三者写法形似但基准不同，是本站踩过的坑；改动前务必用
-      # `docker compose build --print` 核对拼装结果。
-      context: ../frontend
-      dockerfile: ../docker-compose/frontend/Dockerfile
-      # nginx.conf 与 Dockerfile 同处 docker-compose/frontend/，
-      # 经命名上下文引入镜像（COPY --from=nginx-conf）
-      additional_contexts:
-        nginx-conf: ./frontend
+      # 2026-09-13 起：镜像里不再包含前端产物（原先由 stage 1 的 npm build 后 COPY 进来），
+      # 静态文件改为从共享卷 build-artifacts 读取。
+      # 因为不需要再引入仓库里的 frontend/ 源码目录，additional_contexts 也一并去掉 ——
+      # nginx.conf 与 Dockerfile 同处本目录，直接 COPY 即可。
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: nexus-frontend
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-8088}:80"
+    volumes:
+      # 只读挂载产物共享目录；nginx 的 root 指向 /artifacts/frontend（见 nginx.conf）
+      - build-artifacts:/artifacts:ro
     depends_on:
       nexus-backend:
         condition: service_healthy
@@ -221,3 +270,17 @@ volumes:
     name: redis-data
   ollama-models:
     name: ollama-models
+  # ── builder 相关（2026-09-13 新增）──
+  # builder-src：容器内的 git 工作区（不是宿主源码的映射）
+  builder-src:
+    name: builder-src
+  # builder-m2 / builder-npm：依赖缓存，避免每次构建重新下载 150MB+ 依赖
+  builder-m2:
+    name: builder-m2
+  builder-npm:
+    name: builder-npm
+  # build-artifacts：★ 产物共享目录 —— builder 写，nexus-backend / nexus-frontend 只读挂
+  #   布局：/artifacts/backend/app.jar、/artifacts/frontend/**
+  #   想查看里面有什么：docker run --rm -v build-artifacts:/a alpine ls -lR /a
+  build-artifacts:
+    name: build-artifacts

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# =============================================================================
+# db-patch-migrate —— 执行数据库补丁迁移
+#
+# 引擎语义以 docs/design/00-环境与部署.md §3 为准：
+#   未执行过            → 单事务内执行 SQL + 写 t_db_patch 记录
+#   已执行、checksum 一致 → 静默跳过（重跑迁移的幂等行为）
+#   已执行、checksum 不一致 → 报错终止（历史补丁被篡改，严禁二次执行）
+#   文件名不符命名规则    → 警告并跳过
+#   时间戳早于已应用最大值 → 报错终止（乱序保护）
+#
+# 退出码契约：0 = 全部成功或全部幂等跳过；非 0 = 失败。
+#   up.sh 据此决定是否中止 —— 非 0 时后端不会被拉起。
+#   exec 让 java 的退出码直接成为本脚本的退出码，中间不经过任何包装。
+#
+# 与宿主仓库的关系：补丁目录来自容器内 clone 的工作区，故同样受
+#   「必须先 push」约束 —— 宿主新加的补丁文件不 push，这里扫不到。
+# =============================================================================
+set -euo pipefail
+
+REPO_DIR="${NEXUS_REPO_DIR:-/workspace/repo}"
+PATCH_DIR="${NEXUS_PATCH_DIR:-${REPO_DIR}/db-patch}"
+CP_FILE="/tmp/nexus-dbpatch-classpath.txt"
+
+if [ ! -d "${PATCH_DIR}" ]; then
+    echo "[db-patch] 失败：补丁目录不存在 ${PATCH_DIR}" >&2
+    exit 1
+fi
+
+cd "${REPO_DIR}/backend"
+
+# 装 parent / common / infrastructure 到本地仓库（走 builder-m2 卷，第二次起是秒级），
+# 使下一步可以不依赖 reactor 会话独立解析依赖。
+echo "[db-patch] 编译 nexus-infrastructure（含 nexus-common）"
+mvn -B -q -pl nexus-infrastructure -am -DskipTests install
+
+echo "[db-patch] 导出运行时 classpath"
+mvn -B -q -pl nexus-infrastructure dependency:build-classpath \
+    -Dmdep.outputFile="${CP_FILE}" \
+    -Dmdep.includeScope=runtime
+
+if [ ! -s "${CP_FILE}" ]; then
+    echo "[db-patch] 失败：classpath 文件为空 ${CP_FILE}" >&2
+    exit 1
+fi
+
+echo "[db-patch] 执行迁移：--patch-dir=${PATCH_DIR}"
+exec java -cp "${REPO_DIR}/backend/nexus-infrastructure/target/classes:$(cat "${CP_FILE}")" \
+     com.nexus.infrastructure.dbpatch.PatchCli --patch-dir="${PATCH_DIR}"

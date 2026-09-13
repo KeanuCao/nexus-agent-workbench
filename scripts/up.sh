@@ -9,23 +9,30 @@
 #
 # 九步（顺序即依赖关系，勿随意调整）：
 #   1 前置自检（check-env.sh）—— 任一 FAIL 即中止
-#   2 构建打包容器 builder       —— 运行期不常驻，只在构建/迁移时使用
+#   2 构建并启动打包容器 builder（手工启停的常驻容器）
 #   3 拉起基础设施 postgres/redis/ollama（显式点名）
-#   4 db-patch 迁移（**条件执行**：目录或命令不存在则 WARN 跳过）
-#   5 构建前后端镜像（多阶段，共用 builder 作为 stage 1）
-#   6 拉起应用容器 backend/frontend（同时启动一次性容器 ollama-init 拉模型）
-#   7 等模型就绪（/api/tags，超时默认 30min，**不中止**只告警）
-#   8 健康检查（容器级 / 业务级两层 + 前端与反代）
-#   9 打印服务清单与常用命令
+#   4 同步源码（容器内 git pull —— 只能拿到【已 push】的提交，见下方坑 ④）
+#   5 db-patch 迁移（由 builder 容器执行，失败即中止、后端不会被拉起）
+#   6 前后端打包 → 共享目录 build-artifacts
+#   7 构建运行镜像并拉起应用容器（含一次性容器 ollama-init 拉模型）
+#   8 等模型就绪（/api/tags，超时默认 30min，**不中止**只告警）
+#   9 健康检查（容器级 / 业务级两层 + 前端与反代）与服务清单
 #
-# 本脚本刻意避开的三条坑（每条都对应一次已核实的返工风险）：
-#   ① 【模型就绪不能当前置门禁】由 check-env.sh 判 WARN、本脚本第 7 步轮询。
+# 2026-09-13 重构说明（builder 从"多阶段构建的 stage 1"改为"手工启停 + 产物共享目录"）：
+#   原第 4/5/6 步是「db-patch 迁移 / 构建前后端镜像 / 拉起应用容器」，
+#   新架构下产物不再打进镜像，于是拆成「同步源码 → 迁移 → 打包 → 建镜像并拉起」四步。
+#   运行镜像（JRE / nginx）里已无应用产物，构建是秒级的 —— 这条链路的成败全在 builder 里。
+#
+# 本脚本刻意避开的四条坑（每条都对应一次已核实的返工风险）：
+#   ① 【模型就绪不能当前置门禁】由 check-env.sh 判 WARN、本脚本第 8 步轮询。
 #      若前置判 FAIL，干净机器第一次 up.sh 永远过不了门禁，与"由 ollama-init 在
 #      up 过程中拉模型"的设计自相矛盾。
-#   ② 【第 4 步必须条件执行】/db-patch 目录当前不存在、builder 内也没有 db-patch-migrate
-#      命令（0.2 未开工）—— 无条件执行会直接失败/卡死。
-#   ③ 【第 2 步必须显式点名服务】docker compose build builder。裸 `build` 会把
-#      nexus-backend / nexus-frontend 一起拉进构建（那时应用镜像还不可构建）。
+#   ② 【第 2 步必须显式点名服务】docker compose build builder。裸 `build` 会把
+#      nexus-backend / nexus-frontend 一起拉进构建。
+#   ③ 【第 5 步失败必须中止】迁移失败说明补丁有 SQL 错误或历史补丁被篡改；
+#      此时拉起后端只会让人看到一个"表不存在"的 500，远不如直接停在这里清楚。
+#   ④ 【先 push 才能构建】第 4 步容器内拉的是远端仓库，宿主未 push 的改动看不到。
+#      排查"我明明改了怎么没生效"时，第一件事就是确认 commit + push 了没有。
 #
 # 关于 set -e 的取舍：本脚本**不启用** set -e。九步里有"必须中止"（构建失败、
 # 依赖不健康）也有"只告警继续"（模型拉取超时）两类语义，全局 -e 会把后者也变成中止；
@@ -41,10 +48,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 nexus_load_env
 
 # ── 可调参数（环境变量覆盖）──────────────────────────────────────────────────
-MODEL_WAIT_TIMEOUT="${NEXUS_MODEL_WAIT_TIMEOUT:-1800}"   # 第 7 步：模型拉取总超时（30min）
-HEALTH_WAIT_TIMEOUT="${NEXUS_HEALTH_WAIT_TIMEOUT:-180}"  # 第 8 步：依赖探活总超时
+MODEL_WAIT_TIMEOUT="${NEXUS_MODEL_WAIT_TIMEOUT:-1800}"   # 第 8 步：模型拉取总超时（30min）
+HEALTH_WAIT_TIMEOUT="${NEXUS_HEALTH_WAIT_TIMEOUT:-180}"  # 第 9 步：依赖探活总超时
 INFRA_WAIT_TIMEOUT="${NEXUS_INFRA_WAIT_TIMEOUT:-240}"    # 第 3 步：基础设施 healthy 超时
-DB_PATCH_CMD="${NEXUS_DB_PATCH_CMD:-db-patch-migrate}"   # 第 4 步：迁移命令（0.2 交付物）
+DB_PATCH_CMD="${NEXUS_DB_PATCH_CMD:-db-patch-migrate}"   # 第 5 步：迁移命令（builder 镜像内的入口）
 # 注：db-patch 由 builder 容器执行（含 psql/工具链），**不在后端启动流程中执行** ——
 # 这样补丁失败时后端根本不会被拉起，比"启动后 503 门控"简单直接（设计文档 §3.2）。
 
@@ -86,14 +93,21 @@ else
 fi
 
 # ── 2/9 打包容器 ─────────────────────────────────────────────────────────────
-step "2/9" "构建打包容器 nexus-builder（git + mvn 3.9/JDK17 + node20 + psql）"
+step "2/9" "构建并启动打包容器 nexus-builder（git + mvn 3.9/JDK17 + node20 + psql）"
 info "显式点名服务 builder —— 裸 build 会把 nexus-backend/nexus-frontend 一起拉进构建"
 info "builder 在 profiles: [\"build\"] 下，显式点名即激活其 profile（2026-09-11 实测）"
-if compose build builder; then
-    ok "nexus-builder:dev 就绪（后续前后端镜像与 db-patch 迁移都由它承担）"
-else
-    die "builder 构建失败：看上面的构建日志（Dockerfile 在 docker-compose/builder/）"
+if ! compose build builder; then
+    die "builder 镜像构建失败：看上面的构建日志（Dockerfile 在 docker-compose/builder/）"
 fi
+info "启动常驻容器（新架构：容器内 git pull 拉源码，产物落共享卷 build-artifacts）"
+if ! compose up -d builder; then
+    die "builder 容器启动失败：docker compose up -d builder 退出码非 0"
+fi
+BUILDER_ST="$(nexus_container_status nexus-builder)"
+if [ "${BUILDER_ST%%|*}" != "running" ]; then
+    die "nexus-builder 未处于 running（实得 ${BUILDER_ST}）：docker logs --tail 50 nexus-builder"
+fi
+ok "nexus-builder 已就绪（源码同步 / 前后端打包 / db-patch 迁移都在它里面执行）"
 
 # ── 3/9 基础设施 ─────────────────────────────────────────────────────────────
 step "3/9" "拉起基础设施 postgres / redis / ollama（显式点名，不裸 up -d）"
@@ -108,44 +122,49 @@ for svc in nexus-postgres nexus-redis; do
         die "$svc 在 ${INFRA_WAIT_TIMEOUT}s 内未转为 healthy（证据：$(nexus_container_status "$svc")；日志：docker logs --tail 50 $svc）"
     fi
 done
-# ollama 不健康会让第 6 步卡住：ollama-init 的 depends_on 是 ollama(service_healthy)，
+# ollama 不健康会让第 7 步卡住：ollama-init 的 depends_on 是 ollama(service_healthy)，
 # 而 compose 等依赖健康是没有超时的 —— 与其在后面静默挂住，不如在这里明确失败。
 if wait_healthy nexus-ollama "$INFRA_WAIT_TIMEOUT"; then
     ok "nexus-ollama healthy"
 else
-    die "nexus-ollama 在 ${INFRA_WAIT_TIMEOUT}s 内未转为 healthy：ollama-init 依赖它，会卡在第 6 步 waiting（日志：docker logs --tail 50 nexus-ollama）"
+    die "nexus-ollama 在 ${INFRA_WAIT_TIMEOUT}s 内未转为 healthy：ollama-init 依赖它，会卡在第 7 步 waiting（日志：docker logs --tail 50 nexus-ollama）"
 fi
 
-# ── 4/9 db-patch 迁移（条件执行）─────────────────────────────────────────────
-step "4/9" "执行 db-patch 数据库补丁迁移（由 builder 容器执行，条件触发）"
-DB_PATCH_DIR="${NEXUS_REPO_ROOT}/db-patch"
-if [ ! -d "$DB_PATCH_DIR" ]; then
-    warn "跳过：补丁目录 ${DB_PATCH_DIR} 不存在"
-    info "→ 0.2（db-patch 工作流）尚未开工，属**预期状态**，不视为失败"
-    info "→ 设计：迁移由 builder 容器执行（PatchCli），不在后端启动流程中；0.2 交付后本步自动生效"
-elif ! compose run --rm -T --entrypoint sh builder -c "command -v ${DB_PATCH_CMD} >/dev/null 2>&1"; then
-    warn "跳过：builder 容器内找不到 '${DB_PATCH_CMD}' 命令（0.2 未交付）"
-    info "→ 补丁目录已存在但迁移入口未实现；仍按"存在才执行"处理，避免直接把 up.sh 卡死"
+# ── 4/9 同步源码（容器内 git pull）───────────────────────────────────────────
+step "4/9" "同步源码到 builder 容器（容器内 git pull，不挂载宿主源码）"
+info "仓库与分支：.env 的 NEXUS_REPO_URL / NEXUS_REPO_BRANCH（默认 main）"
+info "⚠️ 容器只能拿到【已 push 到远端】的提交 —— 宿主未推送的改动，这一步看不到"
+if compose exec -T builder git-sync; then
+    ok "源码已同步到容器内工作区 /workspace/repo"
 else
-    info "执行：docker compose run --rm builder ${DB_PATCH_CMD}"
-    if compose run --rm -T builder "$DB_PATCH_CMD"; then
-        ok "db-patch 迁移完成（未执行补丁按文件名排序应用；已执行补丁走 checksum 幂等）"
-    else
-        die "db-patch 迁移失败 → 迁移终止，后端不会启动（看上面的 PatchCli 输出：SQL 报错或历史补丁 checksum 不一致）"
-    fi
+    die "git-sync 失败 → 检查容器内能否访问 GitHub，以及 NEXUS_REPO_BRANCH 在远端是否存在"
 fi
 
-# ── 5/9 前后端镜像 ───────────────────────────────────────────────────────────
-step "5/9" "构建前后端镜像（多阶段；共用 nexus-builder 作为 stage 1，运行镜像各自瘦身）"
-info "backend → eclipse-temurin:17-jre-alpine；frontend → nginx:1.27-alpine"
-if compose build; then
-    ok "nexus-backend:dev / nexus-frontend:dev 构建完成"
+# ── 5/9 db-patch 迁移 ────────────────────────────────────────────────────────
+step "5/9" "执行 db-patch 数据库补丁迁移（由 builder 容器执行，失败即中止）"
+info "语义见 docs/design/00-环境与部署.md §3：checksum 幂等 + 篡改终止 + 乱序保护"
+if compose exec -T builder "$DB_PATCH_CMD"; then
+    ok "db-patch 迁移完成（未执行补丁按文件名排序应用；已执行补丁走 checksum 幂等）"
 else
-    die "镜像构建失败：看上面的构建日志（backend 依赖 target/*.jar 唯一命中；frontend 依赖 package-lock.json 与 dist 产物）"
+    die "db-patch 迁移失败 → 迁移终止，后端不会启动（看上面的 PatchCli 输出：SQL 报错或历史补丁 checksum 不一致）"
 fi
 
-# ── 6/9 应用容器 ─────────────────────────────────────────────────────────────
-step "6/9" "拉起应用容器 nexus-backend / nexus-frontend（并启动一次性容器 ollama-init 拉模型）"
+# ── 6/9 前后端打包 → 共享目录 ────────────────────────────────────────────────
+step "6/9" "前后端打包 → 共享目录 build-artifacts（由 builder 容器执行）"
+info "后端 mvn install → /artifacts/backend/app.jar；前端 npm ci + npm run build → /artifacts/frontend/"
+info "首次构建要下 Maven/npm 依赖（百 MB 级），之后走 builder-m2 / builder-npm 卷缓存，快很多"
+if compose exec -T builder build-all; then
+    ok "产物已就绪（前后端容器挂载同一卷，重启即取到最新包）"
+else
+    die "前后端打包失败 → 看上面 build-backend / build-frontend 的输出；产物不更新，后端容器将无法启动"
+fi
+
+# ── 7/9 运行镜像 + 应用容器 ──────────────────────────────────────────────────
+step "7/9" "构建运行镜像并拉起应用容器（含一次性容器 ollama-init 拉模型）"
+info "运行镜像已不含应用产物（只剩 JRE / nginx 两层），构建是秒级的"
+if ! compose build nexus-backend nexus-frontend; then
+    die "运行镜像构建失败：看上面的构建日志（Dockerfile 在 docker-compose/{backend,frontend}/）"
+fi
 info "前端容器 depends_on 后端 service_healthy —— 后端不健康，前端不会被拉起"
 if ! compose up -d; then
     die "应用容器启动失败：docker compose up -d 退出码非 0"
@@ -154,7 +173,7 @@ ok "容器已下发；进入等待阶段（模型拉取与依赖探活都是轮�
 
 # ── 7/9 模型就绪（超时只告警，不中止）────────────────────────────────────────
 EXPECTED_MODELS="$(nexus_expected_models)"
-step "7/9" "等待 Ollama 模型就绪（GET /api/tags，超时 ${MODEL_WAIT_TIMEOUT}s）"
+step "8/9" "等待 Ollama 模型就绪（GET /api/tags，超时 ${MODEL_WAIT_TIMEOUT}s）"
 info "判据：models[].name 同时存在 [${EXPECTED_MODELS}]（:latest 已归一化后比较）"
 info "为什么单独查 /api/tags：容器 healthy ≠ 模型就绪，后端 checks.ollama 只打 /api/version"
 nexus_wait_models_ready "$MODEL_WAIT_TIMEOUT" 10
@@ -176,7 +195,7 @@ case "$MODELS_RC" in
 esac
 
 # ── 8/9 健康检查（分两层，两个探活口不可混用）────────────────────────────────
-step "8/9" "健康检查（容器级 / 业务级两层；两个探活口不可混用）"
+step "9/9" "健康检查（容器级 / 业务级两层；两个探活口不可混用）"
 info "L1 容器级 = compose healthcheck → 后端打 /actuator/health（Boot 内建 db/redis/diskSpace，**不含 ollama**）"
 info "L2 业务级 = GET /api/health（覆盖 postgres/redis/ollama；任一 DOWN 返 503，用 data.checks 定位具体依赖）"
 
@@ -193,7 +212,7 @@ for c in $NEXUS_RESIDENT_CONTAINERS; do
                            info "   两份证据一起看：以 L2/L3 的**实际探活结果**为准；docker inspect $c 可看 healthcheck 的报错原文" ;;
                 *)        ok "$c running（该容器未配置 healthcheck）" ;;
             esac ;;
-        missing) upfail "$c 容器不存在（第 6 步的 docker compose up -d 没创建它？）" ;;
+        missing) upfail "$c 容器不存在（第 7 步的 docker compose up -d 没创建它？）" ;;
         *)       upfail "$c 状态异常：${s}（期望 running）" ;;
     esac
 done
@@ -203,13 +222,14 @@ for c in $NEXUS_ONESHOT_CONTAINERS; do
     case "$s" in
         exited)
             if [ "$ec" = "0" ]; then ok "$c 已退出(0)：模型拉取成功（一次性容器，退出码即权威判据）"
-            else warn "$c 已退出(${ec})：模型拉取失败（详见第 7 步指引；不阻断本次拉起）"; fi ;;
+            else warn "$c 已退出(${ec})：模型拉取失败（详见第 8 步指引；不阻断本次拉起）"; fi ;;
         running) warn "$c 仍在拉取模型（进行中）" ;;
         created) warn "$c 已创建未启动（依赖 ollama 健康；稍后重跑 up.sh 会带上它）" ;;
         *)       warn "$c 状态：${s:-未知}" ;;
     esac
 done
-info "注：nexus-builder 不纳入运行期检查（profiles 隔离、运行期不常驻，用完即走）"
+info "注：nexus-builder 不纳入运行期检查 —— 它是手工启停的构建容器，停着才是常态，"
+info "    拿它当健康判据会天天误报；要确认它是否在跑：docker compose ps -a | grep builder"
 
 printf '\n  L2 业务级（判据：连续 2 次 HTTP 200 且 code=0，间隔 5s —— 单次快照会误判抖动）：\n'
 if nexus_wait_api_health_up "$HEALTH_WAIT_TIMEOUT"; then
@@ -268,8 +288,8 @@ else
     fi
 fi
 
-# ── 9/9 服务清单 ─────────────────────────────────────────────────────────────
-step "9/9" "服务清单与常用命令"
+# ── 服务清单（随第 9 步一起打印）─────────────────────────────────────────────
+printf '\n  ── 服务清单与常用命令 ──\n'
 compose ps -a
 printf '\n  入口地址（宿主端口取自 .env，改端口只改一处）：\n'
 printf '    前端页面   http://localhost:%s\n' "$NEXUS_FRONTEND_PORT"
@@ -292,7 +312,7 @@ if [ "$UP_FAIL_N" -eq 0 ]; then
     exit 0
 else
     printf ' 结论：有 %d 项未通过，见上面的 [FAIL] 行\n' "$UP_FAIL_N"
-    printf '%s\n' " 提示：容器已起来时，单独重跑第 8 步的判据可看 ./scripts/check-env.sh；"
+    printf '%s\n' " 提示：容器已起来时，单独重跑健康判据用 ./scripts/check-health.sh（运行期巡检，只报告不中止）；"
     printf '%s\n' "       依赖故障恢复后直接重跑 ./scripts/up.sh 即可（全流程幂等）"
     exit 1
 fi

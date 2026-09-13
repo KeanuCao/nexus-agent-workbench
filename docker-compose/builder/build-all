@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# =============================================================================
+# build-all —— 依次构建前后端（up.sh 第 5 步的入口）
+#
+# 刻意**不包含** git-sync：同步是独立的一步，把「拉代码」和「编译」分开，
+# 才能在一次构建失败后只重跑失败的那半，而不必重新同步源码。
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "========== build-all：后端 =========="
+bash "${SCRIPT_DIR}/build-backend"
+
+echo
+echo "========== build-all：前端 =========="
+bash "${SCRIPT_DIR}/build-frontend"
+
+echo
+echo "========== build-all：完成，共享目录内容 =========="
+ls -lh "${NEXUS_ARTIFACT_DIR:-/artifacts}/backend/app.jar"
+echo "frontend: $(find "${NEXUS_ARTIFACT_DIR:-/artifacts}/frontend" -type f | wc -l) 个文件"

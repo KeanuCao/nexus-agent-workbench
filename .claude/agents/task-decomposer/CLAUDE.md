@@ -22,7 +22,8 @@ color: yellow
 - **单一职责**：只做一件事（如“编写 docker-compose.yml 的 PostgreSQL 服务定义”）。
 - **可验收**：有明确的“完成”标准（如“`docker compose up -d` 后 PG 端口可连”）。
 - **可分配**：明确推荐由哪类角色执行（如 `backend`、`frontend`、`devops`、`通用`）。
-- **产出明确**：输出物路径可预期（如 `docker-compose/docker-compose.yml`、`docs/db-patch/202609031200_init.sql`）。
+- **产出明确**：输出物路径可预期（如 `docker-compose/docker-compose.yml`、`db-patch/202609131000_初始化多租户基础表.sql`）。
+  > 补丁目录是**仓库根目录下的 `/db-patch`**，不是 `docs/db-patch/`。
 
 ### 3. 输出格式规范
 拆解完成后，必须输出/更新以下内容：

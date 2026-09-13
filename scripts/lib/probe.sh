@@ -58,7 +58,7 @@ NEXUS_COMPOSE_FILE="${NEXUS_COMPOSE_DIR}/docker-compose.yml"
 #   （除非 daemon 开了 ipv6）。走 127.0.0.1 结果确定，不会出现"有时通有时不通"。
 NEXUS_PROBE_HOST="127.0.0.1"
 
-# ── 常驻容器清单（与 docker-compose.yml 一一对应；builder 走 profiles 隔离，不在此列）──
+# ── 常驻容器清单（与 docker-compose.yml 一一对应；builder 为手工启停的构建容器，不在此列）──
 NEXUS_RESIDENT_CONTAINERS="nexus-postgres nexus-redis nexus-ollama nexus-backend nexus-frontend"
 # 一次性容器：退出码是"模型是否拉取成功"的唯一权威判据（§4.5）
 NEXUS_ONESHOT_CONTAINERS="nexus-ollama-init"

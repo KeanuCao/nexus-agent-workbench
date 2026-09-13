@@ -20,10 +20,15 @@ function readStdin() {
 function main() {
   const input = readStdin();
   const transcriptPath = input.transcript_path || '';
-  const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || '';
-  if (!transcriptPath || !cwd || !fs.existsSync(transcriptPath)) return;
+  // 状态文件必须锚定【项目根】，不能用 input.cwd。
+  // 原因：会话的工作目录会随 `cd` 变化（例如在 frontend/ 下跑 npm）。一旦漂移，
+  // 本 hook 会去读一个不存在的状态文件 → 状态为空 → 把已留档的任务全部重新
+  // 报一遍，并在该目录下误建 .claude/hooks/（2026-09-12 实际发生过一次）。
+  // CLAUDE_PROJECT_DIR 由 settings.json 的调用命令保证存在，恒为项目根。
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || input.cwd || '';
+  if (!transcriptPath || !projectDir || !fs.existsSync(transcriptPath)) return;
 
-  const stateFile = path.join(cwd, '.claude', 'hooks', 'agent-archive-state.json');
+  const stateFile = path.join(projectDir, '.claude', 'hooks', 'agent-archive-state.json');
   let state = { reminded: [] };
   try {
     state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
