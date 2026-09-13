@@ -31,8 +31,13 @@ cd "${REPO_DIR}/backend"
 
 # 装 parent / common / infrastructure 到本地仓库（走 builder-m2 卷，第二次起是秒级），
 # 使下一步可以不依赖 reactor 会话独立解析依赖。
+#
+# 带 clean 的理由与 build-backend 同源：mvn 不清理 target/ 的历史产物。
+# 对迁移而言这个风险更值得防 —— 引擎是从 target/classes 直接跑的，
+# 若某次上游删掉了源文件，残留的 .class 会被一起带上 classpath，
+# 于是"跑的是哪版引擎"变得说不清。宁可多花几秒重编译。
 echo "[db-patch] 编译 nexus-infrastructure（含 nexus-common）"
-mvn -B -q -pl nexus-infrastructure -am -DskipTests install
+mvn -B -q -pl nexus-infrastructure -am -DskipTests clean install
 
 echo "[db-patch] 导出运行时 classpath"
 mvn -B -q -pl nexus-infrastructure dependency:build-classpath \
