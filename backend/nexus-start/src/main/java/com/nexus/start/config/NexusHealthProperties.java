@@ -16,8 +16,15 @@ public class NexusHealthProperties {
     /** 响应体中 {@code data.service} 的取值（契约：docs/design/00-环境与部署.md §5.3）。 */
     private String serviceName = "nexus-start";
 
-    /** 响应体中 {@code data.version} 的取值；yml 中由 Maven 资源过滤注入 pom 版本号。 */
-    private String version = "0.1.0";
+    /**
+     * 响应体中 {@code data.version} 的取值；yml 中由 Maven 资源过滤注入 pom 版本号。
+     *
+     * <p>这里的字面量只是**兜底默认值** —— 实际运行时一律被 application.yml 的
+     * {@code nexus.health.version: "@project.version@"} 覆盖。保留它是因为
+     * {@code @ConfigurationProperties} 的字段需要一个初始值；但它不再有语义，
+     * 改 pom 版本时**不必**同步改这里（改了也只是让"万一漏配 yml"时的兜底值好看些）。
+     */
+    private String version = "0.2.0";
 
     /** 单个依赖探活的超时上限（毫秒），防止慢依赖把健康检查拖成"假死"。 */
     private int probeTimeoutMs = 2000;

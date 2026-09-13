@@ -14,7 +14,7 @@ openapi: 3.0.3
 
 info:
   title: nexus 统一 AI 网关 —— API 契约
-  version: 0.1.0
+  version: 0.2.0
   description: |
     演示项目后端接口契约。阶段0 仅暴露系统级接口（健康检查）。
 
@@ -99,7 +99,7 @@ paths:
                     data:
                       status: UP
                       service: nexus-start
-                      version: 0.1.0
+                      version: 0.2.0
                       timestamp: '2026-09-03T10:00:00+08:00'
                       checks:
                         postgres: UP
@@ -120,7 +120,7 @@ paths:
                     data:
                       status: DOWN
                       service: nexus-start
-                      version: 0.1.0
+                      version: 0.2.0
                       timestamp: '2026-09-03T10:00:00+08:00'
                       checks:
                         postgres: DOWN
@@ -134,7 +134,7 @@ paths:
                     data:
                       status: DOWN
                       service: nexus-start
-                      version: 0.1.0
+                      version: 0.2.0
                       timestamp: '2026-09-03T10:00:00+00:00'
                       checks:
                         postgres: DOWN
@@ -199,7 +199,7 @@ components:
         version:
           type: string
           description: 服务版本号，取自 `nexus.health.version`（构建期由 Maven 资源过滤注入 pom 版本）
-          example: 0.1.0
+          example: 0.2.0
         timestamp:
           type: string
           format: date-time

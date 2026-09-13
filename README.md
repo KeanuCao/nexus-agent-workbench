@@ -23,11 +23,13 @@ Java 全栈求职面试展示项目：用 **Java 17 + Spring Boot 3.3 + Vue 3 (s
 > 所有 docker / docker compose 都在 **WSL 发行版 `nexus-agent-workbench`** 内运行，Windows 侧不直接跑 docker。
 > 前置条件：Windows 11 + WSL2，且该发行版内已装好 Docker 与 compose 插件；仓库位于 `C:\wp\nexus-agent-workbench`（仓库换了位置时，同步改下面命令里的路径）。
 
-**动手之前先确认两件事**（否则会构建出旧代码，且不容易发现）：
+**动手之前先确认一件事**（否则会构建出旧代码，而且不容易发现）：
 
-1. **要构建哪个分支** —— `docker-compose/.env` 的 `NEXUS_REPO_BRANCH`（默认 `main`）。在自己的工作分支上开发时改成分支名。
-2. **代码推上去了没有** —— builder 容器是从**远端**拉代码的，宿主本地未 `push` 的提交它看不到。
-   顺序永远是：`commit` → `push` → 再跑 `up.sh`。
+**代码合并并推送到 `main` 了吗？** builder 容器是从**远端**拉代码的，宿主本地未 `push` 的提交它看不到。
+
+> **本项目约定的工作流是「先合并再构建」**：功能分支开发完 → 合并进 `main` → push → 再跑 `up.sh`。
+> 因此 `docker-compose/.env` 的 `NEXUS_REPO_BRANCH` **保持默认的 `main` 即可**；
+> 只有确需构建某个**尚未合并**的分支时，才临时改成那个分支名。
 
 ```bash
 wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/up.sh"
@@ -107,7 +109,7 @@ Windows 侧访问：前端页面 `http://localhost:8088`，后端接口 `http://
 mvn clean install -DskipTests && java -jar nexus-start/target/*.jar
 ```
 
-- PowerShell 下通配符不会被展开，请直接写实际文件名：`java -jar nexus-start/target/nexus-start-0.1.0.jar`（WSL / Git Bash 中通配符可用）。
+- PowerShell 下通配符不会被展开，请直接写实际文件名：`java -jar nexus-start/target/nexus-start-0.2.0.jar`（WSL / Git Bash 中通配符可用）。
 - 本地直跑时数据源 / Redis / Ollama 地址默认是容器服务名（`postgres` / `redis` / `ollama`），需用环境变量覆盖为 `localhost`（依赖容器仍由 compose 提供），详见 [`docs/api/README.md`](docs/api/README.md) §3。
 
 前端（在 `frontend/` 目录执行）：
@@ -125,7 +127,7 @@ npm install && npm run dev
 ```bash
 # ① 后端健康检查（业务级契约：Result<T>，checks 三项应均为 UP）
 curl http://localhost:8089/api/health
-# → {"code":0,"msg":"success","data":{"status":"UP","service":"nexus-start","version":"0.1.0",
+# → {"code":0,"msg":"success","data":{"status":"UP","service":"nexus-start","version":"0.2.0",
 #    "timestamp":"...","checks":{"postgres":"UP","redis":"UP","ollama":"UP"}}}
 
 # ② 经前端 nginx 反代的健康检查（验证前端容器与 /api 代理链路）
