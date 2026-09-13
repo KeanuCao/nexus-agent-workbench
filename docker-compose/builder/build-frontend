@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# =============================================================================
+# build-frontend —— 编译前端并把静态产物放进共享目录
+#
+# 产物：${NEXUS_ARTIFACT_DIR}/frontend/
+#       —— nexus-frontend 容器的 nginx 以它为 root（挂载同一个卷）。
+#
+# 目录替换不是原子的（要 rm -rf 再 mv），存在极短的窗口期：此刻若真有请求打进来，
+# nginx 会返回 404。演示环境下可接受；真要零窗口得改成软链接切换，本轮不做。
+# =============================================================================
+set -euo pipefail
+
+REPO_DIR="${NEXUS_REPO_DIR:-/workspace/repo}"
+ARTIFACT_DIR="${NEXUS_ARTIFACT_DIR:-/artifacts}"
+OUT_DIR="${ARTIFACT_DIR}/frontend"
+TMP_DIR="${OUT_DIR}.tmp"
+
+cd "${REPO_DIR}/frontend"
+
+# npm ci 严格按 package-lock.json 安装（lock 里的 resolved 已全部固化为 npmmirror，走国内源）
+echo "[build-frontend] npm ci"
+npm ci
+
+echo "[build-frontend] npm run build"
+npm run build
+
+if [ ! -f "${REPO_DIR}/frontend/dist/index.html" ]; then
+    echo "[build-frontend] 失败：dist/index.html 不存在，构建未产出预期结果" >&2
+    exit 1
+fi
+
+rm -rf "${TMP_DIR}"
+mkdir -p "${TMP_DIR}"
+cp -a "${REPO_DIR}/frontend/dist/." "${TMP_DIR}/"
+
+rm -rf "${OUT_DIR}"
+mv "${TMP_DIR}" "${OUT_DIR}"
+
+echo "[build-frontend] 产物已就绪：${OUT_DIR}"
+ls -1 "${OUT_DIR}" | head -20

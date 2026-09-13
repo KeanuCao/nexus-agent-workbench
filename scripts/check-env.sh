@@ -26,7 +26,8 @@
 #
 # 明确不做（防止后续按草稿重新生成这些错误检查项）：
 #   · 不查 pg_extension（本库从未 CREATE EXTENSION，现阶段必然 FAIL；可用 ≠ 已启用）
-#   · 不查 t_db_patch / 业务表 tenant_id（0.2 未开工、多租户属阶段1，表都还不存在）
+#   · 不查 t_db_patch / 业务表 tenant_id（补丁迁移的成败由 up.sh 第 5 步的退出码判定；
+#     多租户属阶段1。本脚本是**启动前置门禁**，只查"环境能不能开始工作"）
 #   · 不做 GPU / nvidia-smi 检查（已定 CPU 推理）
 #   · 不调 /api/ai/ping（阶段2 才有该接口）
 #   · 不提示修改 /etc/docker/daemon.json（镜像加速走 Dockerfile/compose 前缀，用户规则）

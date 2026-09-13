@@ -95,7 +95,7 @@ Controller 层注解规范（Spring Boot 3.x 现代风格）：
 演示环境：Windows + WSL。整理并维护 `wsl.abc.md` 作为 WSL 参考文档；注意 AI 时代的文档可能不正确，遇到问题时要自己排查解决（用日志、官方文档交叉验证），不要照抄。
 容器化：前端、后端、PostgreSQL、Redis、Ollama 各自独立容器部署，全部容器化。
 国内镜像加速：镜像一律通过 Dockerfile `FROM` / compose `image:` 前缀走 `docker.m.daocloud.io` 加速（官方镜像走 `/library/` 路径），禁止修改 `/etc/docker/daemon.json`；这是第一步要生成的交付物。
-构建容器（builder）：docker compose 中配置专门的打包容器 `nexus-builder`（git + mvn + npm + postgresql-client），负责前后端打包与 db-patch 迁移执行；采用多阶段构建（multi-stage build）：前后端以 `nexus-builder` 为共用构建阶段（stage 1），后端产物复制到 JRE 运行镜像、前端产物由 Nginx 镜像承载。尽量节约资源：构建容器只在打包/迁移时使用，运行期不常驻。
+构建容器（builder）：docker compose 中配置专门的打包容器 `nexus-builder`（git + mvn + npm + postgresql-client），负责前后端打包与 db-patch 迁移执行；builder容器不需要挂载源代码，直接使用git pull源码改动；仓库repo可以配置；buidler容器可以手工启动和手工退出; 当需要打包时，启动起来，手工在里面执行打包，打db patch的命令；包拷贝到一个共享目录，前后端容器重启时直接从共享目录获取最新的包。
 
 🧭 任务执行协议（Task Execution Protocol）
 为避免"接到需求就写代码"导致的架构失控，所有任务按粒度分级执行：

@@ -2,7 +2,10 @@
 
 Java 全栈求职面试展示项目：用 **Java 17 + Spring Boot 3.3 + Vue 3 (script setup) + TypeScript** 复刻「AI 数字员工平台」的核心能力 —— 统一 AI 网关、RAG 知识库问答、多租户与 Agent 编排。数据库（PostgreSQL + pgvector）、缓存（Redis）、本地大模型（Ollama）与前后端全部容器化，一条命令拉起整套环境。
 
-> **当前进度（阶段0 进行中）**：环境编排、前后端骨架、健康检查与运维脚本已交付；db-patch 补丁工作流待落地。多租户登录（阶段1）、统一 AI 网关（阶段2）、RAG 知识库（阶段3）、Agent 编排（阶段4）均为**规划中**。进度以 [`docs/核心任务.md`](docs/核心任务.md) 为准。
+> **当前进度（阶段0 进行中）**：环境编排、前后端骨架、健康检查与运维脚本已交付；db-patch 补丁工作流**代码已交付、待实机验收**。多租户登录（阶段1）、统一 AI 网关（阶段2）、RAG 知识库（阶段3）、Agent 编排（阶段4）均为**规划中**。进度以 [`docs/核心任务.md`](docs/核心任务.md) 为准。
+>
+> ⚠️ **2026-09-13 构建链路重构**：`builder` 容器改为**手工启停**，不再挂载宿主源码（容器内 `git pull`），产物写到共享卷 `build-artifacts` 供前后端容器挂载取用。
+> **由此产生一条硬约束：改完必须先 `commit` + `push`**，否则容器里拉到的还是旧代码。详见 [`docs/design/01-多租户与认证.md`](docs/design/01-多租户与认证.md) §2。
 
 ## 目录
 
@@ -25,7 +28,7 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && .
 ```
 
 `up.sh` 依次执行九步：
-① 前置自检（FAIL 即中止）→ ② 构建打包容器 `builder` → ③ 拉起 postgres / redis / ollama → ④ 执行 db-patch 迁移（当前条件跳过）→ ⑤ 多阶段构建前后端镜像 → ⑥ 拉起 backend / frontend（同时由一次性容器 `nexus-ollama-init` 拉模型）→ ⑦ 等两个模型就绪（约 5GB，超时 30min 只告警不中止）→ ⑧ 健康检查（容器级 + 业务级）→ ⑨ 打印服务清单与常用命令。
+① 前置自检（FAIL 即中止）→ ② 构建并启动打包容器 `builder` → ③ 拉起 postgres / redis / ollama → ④ 同步源码（容器内 git pull，**只能拿到已 push 的提交**）→ ⑤ 执行 db-patch 迁移 → ⑥ 前后端打包到共享目录 `build-artifacts` → ⑦ 构建运行镜像并拉起 backend / frontend（同时由一次性容器 `nexus-ollama-init` 拉模型）→ ⑧ 等两个模型就绪（约 5GB，超时 30min 只告警不中止）→ ⑨ 健康检查（容器级 + 业务级）与服务清单。
 
 首次执行要拉取基础镜像（约 9GB，含 Ollama fat 镜像）并下载两个模型（约 5GB），耗时较长属正常；模型落在命名卷 `ollama-models` 里，之后重建容器不会重新下载。
 
@@ -63,7 +66,23 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && .
 | 后端 API | `nexus-backend` | **8089**（`BACKEND_PORT`） | **8089** | Spring Boot；`GET /api/health` 在此 |
 | 前端页面（nginx） | `nexus-frontend` | **8088**（`FRONTEND_PORT`） | **80** | 静态托管 + 反代 `/api → nexus-backend:8089` |
 
-另有两个非常驻容器：`nexus-ollama-init`（一次性拉模型，`restart: "no"`，**退出码 0 = 两个模型拉取成功**）、`nexus-builder`（打包 / db-patch 迁移用，`profiles: ["build"]` 隔离，运行期不常驻）。容器间互访走 compose 网络 `nexus-net` 的服务名，不依赖宿主 DNS。
+另有：`nexus-ollama-init`（一次性拉模型，`restart: "no"`，**退出码 0 = 两个模型拉取成功**）；`nexus-builder`（打包 / db-patch 迁移用，**手工启停的常驻容器**，`profiles: ["build"]` 隔离 —— 裸 `docker compose up -d` 不会拉起它，要显式 `up -d builder`）。
+容器间互访走 compose 网络 `nexus-net` 的服务名，不依赖宿主 DNS。
+
+**builder 的手工用法**（需要打包时启动，用完停掉）：
+
+```bash
+cd /mnt/c/wp/nexus-agent-workbench/docker-compose
+docker compose up -d builder                          # 启动
+docker compose exec builder git-sync                  # 拉取已 push 的源码
+docker compose exec builder build-all                 # 前后端打包 → /artifacts
+docker compose exec builder db-patch-migrate          # 执行数据库补丁迁移
+docker compose stop builder                           # 用完停掉
+```
+
+产物落在命名卷 `build-artifacts`（`/artifacts/backend/app.jar`、`/artifacts/frontend/**`），前后端容器只读挂载同一卷。
+**注意：运行镜像不再自包含** —— 产物还没生成时后端容器会启动失败（入口脚本会打印三步修复命令）。
+想查看卷里有什么：`docker run --rm -v build-artifacts:/a alpine ls -lR /a`
 
 Windows 侧访问：前端页面 `http://localhost:8088`，后端接口 `http://localhost:8089/api/health`。
 
@@ -129,7 +148,7 @@ nexus-agent-workbench/
 │   └── src/                     #   api/ 接口封装 · views/ 页面 · components/ 组件 · router/ · stores/
 ├── docker-compose/              # 环境编排：docker-compose.yml + .env + 各服务 Dockerfile
 ├── scripts/                     # check-env.sh / up.sh / check-health.sh / lib/probe.sh
-├── db-patch/                    # 数据库补丁 YYYYMMDDHHmm_描述.sql（0.2 落地，目录尚未创建）
+├── db-patch/                    # 数据库补丁 YYYYMMDDHHmm_描述.sql（仓库根目录；已执行过的补丁禁改）
 ├── docs/                        # design/ 设计文档 · api/ 接口契约 · task/ 任务拆解 · agent-log/ 工作日志
 ├── wsl.abc.md                   # WSL 排查手册（四段式：现象 → 日志证据 → 官方文档 → 结论）
 └── CLAUDE.md                    # 项目"宪法"：编码规范、技术选型、协作约定
@@ -144,7 +163,7 @@ nexus-agent-workbench/
 | 缓存 | Redis 7 |
 | AI 能力 | Ollama 本地 CPU 推理：`qwen2.5:7b`（对话）+ `nomic-embed-text`（向量化）；统一网关后续规划接入云端模型（DeepSeek） |
 | 前端 | Vue 3 (script setup) + TypeScript · Vite 5 · Element Plus · Pinia · Vue Router · Axios |
-| 部署 | Docker Compose（WSL2 内运行）· 多阶段构建（前后端共用 `builder` 构建阶段）· nginx 反代 |
+| 部署 | Docker Compose（WSL2 内运行）· `builder` 容器内构建 → 产物落共享卷 `build-artifacts` → 前后端挂载消费 · nginx 反代 |
 | 测试（规划中） | JUnit 5 + Mockito（后端）· Vitest + Playwright（前端） |
 
 ## 文档索引

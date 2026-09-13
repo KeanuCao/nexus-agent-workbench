@@ -17,13 +17,17 @@ color: green
 - 当前项目使用的发行版记录在项目记忆中，可先查记忆；记忆中没有就先问用户。
 - **镜像加速规则**：通过 Dockerfile `FROM` 与 compose `image:` 字段直接写 `docker.m.daocloud.io` 前缀（官方镜像走 `docker.m.daocloud.io/library/<镜像>`），**禁止修改 `/etc/docker/daemon.json`**。
 - **db-patch 执行位置**：补丁由 nexus-builder 容器（专门的打包容器，含 git+mvn+npm+postgresql-client）执行迁移，不在后端启动流程中执行。
+  > 2026-09-13 起 builder 改为**手工启停的常驻容器**，迁移入口是 `docker compose exec builder db-patch-migrate`（不再是 `run --rm`）。它不再挂载宿主源码 —— 补丁文件来自容器内 git 工作区，故**宿主必须先 push**。
 
 ## 核心能力
 
 ### 1. Docker Compose 编排
 - 镜像加速：Dockerfile `FROM` / compose `image:` 直写 `docker.m.daocloud.io` 前缀（不改 daemon.json）
 - 编排 PostgreSQL 16 + pgvector、Redis 7、Ollama
-- 专门的 `nexus-builder` 打包容器（git + mvn + npm + postgresql-client）：构建前后端包、执行 db-patch 迁移，运行期不常驻
+- 专门的 `nexus-builder` 打包容器（git + mvn + npm + postgresql-client）：**手工启停的常驻容器**（2026-09-13 起）
+- builder 不挂载宿主源码，容器内 `git pull`（仓库地址由 `.env` 的 `NEXUS_REPO_URL` / `NEXUS_REPO_BRANCH` 配置）
+- builder 的产物写到共享卷 `build-artifacts`；前后端容器**只读挂载该卷**取包（镜像因此不再自包含）
+- **由此产生一条硬约束：改完必须先 `commit` + `push`**，否则容器里拉到的还是旧代码
 - 确保 `docker compose up -d` 一键拉起全部服务
 - Ollama 就绪后自动拉取 `qwen2.5:7b` 和 `nomic-embed-text`
 
@@ -122,7 +126,8 @@ cd frontend && npm run test:e2e               # 运行前端 E2E 测试
 ### db-patch 数据库补丁工作流
 补丁目录 `/db-patch`，命名规则 `YYYYMMDDHHmm_描述.sql`（如 `202609030900_初始化多租户表.sql`），按文件名排序依次执行。
 数据库内置补丁记录表（如 `t_db_patch`，含 patch_id、文件名、执行时间、checksum 等字段）。
-由 builder 容器执行迁移（`PatchCli`，见 `docs/design/00-环境与部署.md` §3）：扫描补丁目录，未执行过的补丁按顺序应用；已执行过的补丁再次执行必须报错终止（通过记录表 + checksum 校验实现幂等保护）。
+由 builder 容器执行迁移（`PatchCli`，见 `docs/design/00-环境与部署.md` §3）：扫描补丁目录，未执行过的补丁按顺序应用；已执行过的补丁**checksum 一致则静默跳过（退出码 0）**，**checksum 不一致才报错终止**（2026-09-13 订正：旧措辞"再执行必须报错终止"的准确含义是"篡改只能被检出、不能被重放"，不是"重跑迁移就报错"）。
+迁移入口：`docker compose exec builder db-patch-migrate`（builder 已改为手工启停的常驻容器，不再是 `run --rm`）。
 涉及表结构变更时新增补丁文件，严禁修改已发布的历史补丁。
 
 

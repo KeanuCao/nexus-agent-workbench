@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# =============================================================================
+# git-sync —— 把远端仓库同步到容器内工作区（首次 clone，之后增量 fetch）
+#
+# 依据 CLAUDE.md：builder 容器不挂载源代码，直接 git pull 源码改动；仓库 repo 可配置。
+#
+# ⚠️ 最重要的语义（必须让使用者知道）：
+#     容器只能拿到【已 push 到远端】的提交。
+#     宿主工作区里未 commit / 已 commit 未 push 的改动，容器**永远看不到**。
+#     所以「改完想构建」的正确顺序是：commit → push → builder 里 git-sync → 打包。
+#
+# 为什么用 detached HEAD 而不是分支：
+#     这是**构建工作区**，永远不应该在这里提交。detached 到 origin/<branch>
+#     使每次同步的结果唯一确定（恰好等于远端），也免掉了本地分支的簿记。
+#
+# 为什么 clean 只带 -fd、不带 -x：
+#     -x 会连 .gitignore 忽略的文件一起删 —— 那正是 target/ 与 node_modules/，
+#     删掉等于每次同步都强制全量重建。不带 -x 则保留它们，增量构建才有意义。
+# =============================================================================
+set -euo pipefail
+
+REPO_URL="${NEXUS_REPO_URL:?环境变量 NEXUS_REPO_URL 未设置（配置见 docker-compose/.env）}"
+REPO_BRANCH="${NEXUS_REPO_BRANCH:-main}"
+REPO_DIR="${NEXUS_REPO_DIR:-/workspace/repo}"
+
+echo "[git-sync] 仓库   : ${REPO_URL}"
+echo "[git-sync] 分支   : ${REPO_BRANCH}"
+echo "[git-sync] 工作区 : ${REPO_DIR}"
+
+if [ -d "${REPO_DIR}/.git" ]; then
+    echo "[git-sync] 已存在工作区 → 增量同步"
+    git -C "${REPO_DIR}" fetch --prune origin
+    git -C "${REPO_DIR}" checkout --force --detach "origin/${REPO_BRANCH}"
+    # 清掉上游已删除的未跟踪文件；保留 .gitignore 忽略的构建产物（见文件头）
+    git -C "${REPO_DIR}" clean -fd
+else
+    # 刻意**不用** --depth 1 浅克隆：本仓库只有源码与文档，全量体积很小，
+    # 而浅克隆会给后续 fetch 引入一类边界情况（shallow update not allowed /
+    # 隐式 deepen / 与 --branch 组合的行为差异）。这里的确定性比省几 MB 更值。
+    echo "[git-sync] 首次克隆"
+    mkdir -p "$(dirname "${REPO_DIR}")"
+    git clone --branch "${REPO_BRANCH}" "${REPO_URL}" "${REPO_DIR}"
+fi
+
+echo "[git-sync] 同步完成，当前提交："
+git -C "${REPO_DIR}" log -1 --format='  %h  %ad  %s' --date=short

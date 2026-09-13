@@ -24,7 +24,8 @@ color: blue
   - 表结构变更（CREATE / ALTER / DROP）必须包含幂等性判断（如 `IF NOT EXISTS` / `IF EXISTS`）。
   - 数据变更（INSERT / UPDATE）需先校验目标数据是否已存在，避免重复执行报错。
   - 每个补丁文件必须包含完整的回滚注释（或回滚语句，视项目策略而定）。
-- **补丁记录表设计**：若项目尚未实现补丁管理机制，需输出 `t_db_patch` 表结构 DDL（含 `patch_name`、`applied_at`、`checksum` 字段），供 DevOps 执行时使用。
+- **补丁记录表设计**：若项目尚未实现补丁管理机制，需输出 `t_db_patch` 表结构 DDL，供 DevOps 执行时使用。
+  > ⚠️ **字段名以 `docs/design/00-环境与部署.md` §3.1 的权威 DDL 为准**：是 `file_name`（**不是** `patch_name`），另有 `checksum`(CHAR(64)) / `applied_at` / `applied_by` / `exec_time_ms`。本项目已实现该机制，直接引用即可，不要重新设计。
 - **红线**：严禁修改已合入主干的旧补丁文件（即使发现错误，也必须新增一个新补丁去修正）。
 
 ### 3. API 契约文档生成

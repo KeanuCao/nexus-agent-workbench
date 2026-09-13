@@ -30,7 +30,9 @@
 #   常驻 5 个 ：nexus-postgres / nexus-redis / nexus-ollama / nexus-backend / nexus-frontend
 #   一次性 1 个：nexus-ollama-init（restart: "no"，**退出码是"模型是否拉取成功"的唯一权威判据**；
 #               `docker compose ps` 默认不列已退出容器 ⇒ 走 docker inspect，陷阱 1）
-#   不纳入     ：nexus-builder（profiles: ["build"] 隔离、运行期不常驻）
+#   不纳入     ：nexus-builder（**手工启停的构建容器** —— 它平时就该是停着的，
+#               拿它当健康判据会天天误报。2026-09-13 由"运行期不常驻"改为手工启停，
+#               排除它的理由不变：构建容器不参与运行期健康）
 #
 # 三层判据（**不可混用**，混用是最大坑源）：
 #   L1 容器级：State + compose healthcheck（后端打 /actuator/health，覆盖 Boot 内建
@@ -48,7 +50,9 @@
 #
 # 明确不做（沿用 §4.6，防止后续 agent 照草稿重新生成）：
 #   · 不查 pg_extension「已安装」（本库从未 CREATE EXTENSION，现阶段必然 FAIL；可用 ≠ 已启用）
-#   · 不查 t_db_patch / 业务表 tenant_id（0.2 未开工、多租户属阶段1，表都还不存在）
+#   · 不查 t_db_patch 记录数（2026-09-13 起该表已存在）：补丁打没打好由迁移命令的**退出码**判定
+#     （up.sh 第 5 步），那是"一次性动作的成败"，不是"运行期的健康"——两者判据不同源，不并入本脚本
+#   · 不查业务表 tenant_id（多租户属阶段1）
 #   · 不做 GPU / nvidia-smi 检查（已定 CPU 推理）
 #   · 不调 /api/ai/ping（阶段2 才有该接口）
 #   · 不给 nexus-frontend 补 healthcheck（compose 里已有）
@@ -91,7 +95,7 @@ usage() {
 检查对象:
   常驻 5 个：nexus-postgres / nexus-redis / nexus-ollama / nexus-backend / nexus-frontend
   一次性 1 个：nexus-ollama-init（退出码 = 模型是否拉取成功的唯一权威判据）
-  不纳入：nexus-builder（profiles 隔离、运行期不常驻）
+  不纳入：nexus-builder（手工启停的构建容器，停着是常态）
 
 判据来源: docs/api/README.md §4（§4.1 两个探活口分工 / §4.2 判定规则表 / §4.3 抖动免疫 /
           §4.5 模型就绪 / §4.6 避坑清单）；端口取自 docker-compose/.env（唯一真源）。
@@ -257,7 +261,8 @@ else
             *)        _warn "$c 状态：${os:-未知}" ;;
         esac
     done
-    _info "注：nexus-builder 不纳入运行期检查（profiles 隔离、运行期不常驻，用完即走）"
+    _info "注：nexus-builder 不纳入运行期检查（手工启停的构建容器 —— 停着才是常态）"
+    _info "    要确认它是否在跑：docker compose ps -a | grep builder"
 fi
 
 # ── 3/6 L2 业务级 ────────────────────────────────────────────────────────────
