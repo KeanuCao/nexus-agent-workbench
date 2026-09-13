@@ -557,7 +557,7 @@ curl -s --max-time 5 "http://localhost:${OLLAMA_PORT}/api/tags"
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `data.token` | string | 是 | JWS 紧凑序列化串 |
-| `data.tokenType` | string | 是 | 固定 `Bearer`（前端据此拼 `Authorization` 头，不要硬编码） |
+| `data.tokenType` | string | 是 | 固定 `Bearer`。前端拼 `Authorization: ${tokenType} ${token}`（用返回值而非硬编码，行为等价但更贴合 RFC 6750 的语义；后端目前只签发这一种） |
 | `data.expiresIn` | integer | 是 | 有效期（秒），与 Redis 白名单 TTL 一致 |
 | `data.user` | object | 是 | 当前用户信息，见下 |
 
@@ -636,8 +636,12 @@ curl -s --max-time 5 "http://localhost:${OLLAMA_PORT}/api/tags"
 const data = await login({ username, password })   // LoginData
 setToken(data.token)                                // 存进 Pinia store（手写 localStorage，见 D7）
 
-// 之后每个请求由请求拦截器统一注入（在拦截器函数体内取 store，避免模块级循环依赖）
-config.headers.Authorization = `Bearer ${userStore.token}`
+// 之后每个请求由请求拦截器统一注入。
+// 两点与 request.ts 的实际实现对齐（改动前请同步改那边）：
+//   ① 在拦截器函数体内**动态 import** 取 store —— request.ts → stores/user.ts → api/auth.ts → request.ts
+//      是一个真环，顶层静态 import 会让它在模块初始化期闭合；
+//   ② 前缀取 data.tokenType，不硬编码 Bearer（见 §5.2 的字段说明）。
+config.headers.Authorization = `${userStore.tokenType} ${userStore.token}`
 
 // 401：清 token + 跳登录（并发多请求同时 401 时只跳一次 —— 需防抖）
 if (status === 401) {

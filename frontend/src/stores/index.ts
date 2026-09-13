@@ -1,12 +1,13 @@
 import { createPinia } from 'pinia'
 
 /**
- * Pinia 实例 —— 在 main.ts 中经 app.use(pinia) 装配。
+ * Pinia 实例 —— 在 main.ts 中经 app.use(pinia) 装配（**必须先于 router**：
+ * 阶段1 的导航守卫要读 user store）。
  *
- * 阶段0：为空实例（骨架预留）。
- * 阶段1（多租户认证）在此目录新增 user.ts：useUserStore 管理 token 与用户信息，
- * 提供 login / logout actions，并接入持久化插件（pinia-plugin-persistedstate）
- * 将 token 落入 localStorage —— request.ts 的拦截器届时从这里取 token。
+ * 阶段1（多租户认证）已在 user.ts 落地 useUserStore：token / 用户信息 + login / logout / restore / clear。
+ * 持久化**由该文件内部手写 localStorage 完成**（设计决策 D7：为一个「存一个字符串」的需求引
+ * pinia-plugin-persistedstate 需联网安装依赖，不划算），未接入任何持久化插件。
+ * request.ts 的请求拦截器按需从中取 token，路由守卫按需取登录态。
  */
 const pinia = createPinia()
 
