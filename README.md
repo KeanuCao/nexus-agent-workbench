@@ -23,6 +23,12 @@ Java 全栈求职面试展示项目：用 **Java 17 + Spring Boot 3.3 + Vue 3 (s
 > 所有 docker / docker compose 都在 **WSL 发行版 `nexus-agent-workbench`** 内运行，Windows 侧不直接跑 docker。
 > 前置条件：Windows 11 + WSL2，且该发行版内已装好 Docker 与 compose 插件；仓库位于 `C:\wp\nexus-agent-workbench`（仓库换了位置时，同步改下面命令里的路径）。
 
+**动手之前先确认两件事**（否则会构建出旧代码，且不容易发现）：
+
+1. **要构建哪个分支** —— `docker-compose/.env` 的 `NEXUS_REPO_BRANCH`（默认 `main`）。在自己的工作分支上开发时改成分支名。
+2. **代码推上去了没有** —— builder 容器是从**远端**拉代码的，宿主本地未 `push` 的提交它看不到。
+   顺序永远是：`commit` → `push` → 再跑 `up.sh`。
+
 ```bash
 wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/up.sh"
 ```
@@ -30,7 +36,9 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && .
 `up.sh` 依次执行九步：
 ① 前置自检（FAIL 即中止）→ ② 构建并启动打包容器 `builder` → ③ 拉起 postgres / redis / ollama → ④ 同步源码（容器内 git pull，**只能拿到已 push 的提交**）→ ⑤ 执行 db-patch 迁移 → ⑥ 前后端打包到共享目录 `build-artifacts` → ⑦ 构建运行镜像并拉起 backend / frontend（同时由一次性容器 `nexus-ollama-init` 拉模型）→ ⑧ 等两个模型就绪（约 5GB，超时 30min 只告警不中止）→ ⑨ 健康检查（容器级 + 业务级）与服务清单。
 
-首次执行要拉取基础镜像（约 9GB，含 Ollama fat 镜像）并下载两个模型（约 5GB），耗时较长属正常；模型落在命名卷 `ollama-models` 里，之后重建容器不会重新下载。
+首次执行要拉取基础镜像（约 9GB，含 Ollama fat 镜像）、下载两个模型（约 5GB），并让 builder 下载 Maven / npm 依赖（约 150MB+），耗时较长属正常。三者都落在命名卷里（`ollama-models` / `builder-m2` / `builder-npm`），之后重建容器不会重新下载。
+
+> **源码有两份，别搞混**：宿主仓库 `C:\wp\nexus-agent-workbench` 是**开发真源**；builder 容器内 `/workspace/repo` 那份是**构建用的克隆副本**，只读不写、每次 `git-sync` 同步到远端分支的最新提交。所以"改了没生效"的第一排查方向是——推没推。
 
 也可以分步执行（在 WSL 内，任一步都可单独重跑）：
 
@@ -48,15 +56,16 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && .
 | 脚本 | 定位 | 何时运行 | 失败语义 |
 |------|------|----------|----------|
 | `scripts/check-env.sh` | **启动前置自检（门禁）**：问"这台机器能不能把环境拉起来" | 环境起来**之前**（`up.sh` 第 1 步会调用） | 任一 `[FAIL]` → 退出码非 0 → **`up.sh` 中止**。判据必须在"一个容器都没起"的机器上可复现（所以"模型就绪"在这里只判 WARN） |
-| `scripts/up.sh` | **一键拉起**：九步全流程 | 首次启动 / 重置环境 | 自检 FAIL、构建失败、依赖不健康 → 中止；模型拉取超时 → 只告警不中止 |
+| `scripts/up.sh` | **一键拉起 + 构建**：九步全流程（同步源码 → 迁移 → 打包 → 起容器）。2026-09-13 起构建也由它承担 | 首次启动 / 改完代码要重建 | 自检 FAIL、构建失败、依赖不健康 → 中止；模型拉取超时 → 只告警不中止 |
 | `scripts/check-health.sh` | **运行期巡检**：对"此刻"的环境做快照报告 | 环境起来**之后**，任何时刻可重跑 | `[FAIL]` **仅报告，不中止任何流程**；退出码只表达报告结论。容器一个都没起时也会正常跑完，并提示"若尚未启动，请先执行 up.sh" |
 
 三者共用同一套探针判据（`scripts/lib/probe.sh`），巡检分三层：容器级（容器状态 + compose healthcheck）→ 业务级（`GET /api/health` 的 `checks`）→ 模型级（`/api/tags`）。
 
 ## 服务与端口
 
-> 端口唯一真源是 [`docker-compose/.env`](docker-compose/.env)（下表为当前默认值）；冲突时只改 `.env` 一处。
+> 配置唯一真源是 [`docker-compose/.env`](docker-compose/.env)（下表为当前默认值）；冲突时只改 `.env` 一处。
 > **宿主端口**供 Windows 侧访问；**容器内端口固定**不随宿主端口漂移（健康检查与 nginx 反代都按容器内端口固定写死）。
+> `.env` 里还有两项 builder 配置：`NEXUS_REPO_URL`（仓库地址）、`NEXUS_REPO_BRANCH`（构建哪个分支）。
 
 | 服务 | 容器名 | 宿主端口（`.env` 变量） | 容器内端口 | 说明 |
 |------|--------|------------------------|-----------|------|
@@ -81,8 +90,12 @@ docker compose stop builder                           # 用完停掉
 ```
 
 产物落在命名卷 `build-artifacts`（`/artifacts/backend/app.jar`、`/artifacts/frontend/**`），前后端容器只读挂载同一卷。
-**注意：运行镜像不再自包含** —— 产物还没生成时后端容器会启动失败（入口脚本会打印三步修复命令）。
 想查看卷里有什么：`docker run --rm -v build-artifacts:/a alpine ls -lR /a`
+
+> **⚠️ 运行镜像不再自包含** —— 这带来两个具体后果，是 2026-09-13 架构变更最需要记住的一点：
+> ① **裸 `docker compose up -d` 不再是可靠入口**（产物还没生成时后端会启动失败）。请走 `up.sh`，它保证顺序；
+> ② 想只更新应用代码，**不必重建任何镜像**：`docker compose exec builder build-all` 之后 `docker compose restart nexus-backend` 即可。
+> 后端产物缺失时入口脚本会打印三步修复命令；前端则是 nginx 照常启动、**全部 404 + 容器 unhealthy**（别把 404 当配置写错）。
 
 Windows 侧访问：前端页面 `http://localhost:8088`，后端接口 `http://localhost:8089/api/health`。
 
@@ -147,6 +160,9 @@ nexus-agent-workbench/
 ├── frontend/                    # Vue 3 (script setup) + TypeScript（Vite）
 │   └── src/                     #   api/ 接口封装 · views/ 页面 · components/ 组件 · router/ · stores/
 ├── docker-compose/              # 环境编排：docker-compose.yml + .env + 各服务 Dockerfile
+│   ├── builder/                 #   builder 镜像 + 5 个入口脚本（git-sync / build-* / db-patch-migrate）
+│   ├── backend/                 #   后端运行镜像（JRE + entrypoint.sh，不含应用产物）
+│   └── frontend/                #   前端运行镜像（nginx + nginx.conf，不含静态产物）
 ├── scripts/                     # check-env.sh / up.sh / check-health.sh / lib/probe.sh
 ├── db-patch/                    # 数据库补丁 YYYYMMDDHHmm_描述.sql（仓库根目录；已执行过的补丁禁改）
 ├── docs/                        # design/ 设计文档 · api/ 接口契约 · task/ 任务拆解 · agent-log/ 工作日志
@@ -172,7 +188,8 @@ nexus-agent-workbench/
 |------|------|
 | [`CLAUDE.md`](CLAUDE.md) | 项目宪法：编码规范、技术选型、Agent 协作约定 |
 | [`docs/核心任务.md`](docs/核心任务.md) | 作战地图：阶段划分与当前进度 |
-| [`docs/design/00-环境与部署.md`](docs/design/00-环境与部署.md) | 阶段0 设计文档：架构、端口、镜像加速、脚本、健康检查 |
+| [`docs/design/00-环境与部署.md`](docs/design/00-环境与部署.md) | 阶段0 设计文档：架构、端口、镜像加速、脚本、健康检查（**顶部有 2026-09-13 修订块，列出因 builder 重构而失效的章节**） |
+| [`docs/design/01-多租户与认证.md`](docs/design/01-多租户与认证.md) | 阶段1 + 0.2 设计文档：**新 builder 架构（§2）**、多租户与认证决策 D1~D9、接口契约、错误码 |
 | [`docs/api/README.md`](docs/api/README.md) | 后端 API 契约：`Result<T>`、错误码、健康检查判据 |
 | [`docs/task/task.1+环境准备.md`](docs/task/task.1+环境准备.md) | 阶段0 任务拆解、验收标准与验收现状 |
 | [`backend/README.md`](backend/README.md) | 后端模块说明、打包约定与版本选型 |
