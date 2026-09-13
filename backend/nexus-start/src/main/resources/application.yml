@@ -103,9 +103,36 @@ nexus:
       # Ollama 版本接口：能返回即证明进程可用（不校验模型是否已拉取，那是 up.sh 的职责）
       version-path: /api/version
 
+  # ── JWT（阶段1 认证；绑定见 JwtProperties）──
+  jwt:
+    # 签名密钥（HS256 要求至少 32 字节）。⚠️ 下面这串是**随仓库公开的 dev 默认值**，
+    # 任何非本地环境都必须用环境变量 NEXUS_JWT_SECRET 覆盖，否则等于公开签名密钥。
+    # 密钥太短/为空时 jjwt 会抛异常，应用**启动即失败**（有意的 fail-fast，详见 JwtUtil）。
+    secret: ${NEXUS_JWT_SECRET:nexus-dev-only-jwt-secret-please-override-in-any-real-environment}
+    # 有效期（秒），同时也是 Redis 白名单的 TTL（两者必须一致）；7200 = 2 小时
+    expire-seconds: 7200
+
+  # ── 请求侧安全（阶段1；绑定见 SecurityProperties）──
+  security:
+    # 免鉴权路径（Ant 风格）。**除本清单外一律需要 token**（默认拒绝，不默认放行）。
+    # 三条各有硬理由，删任何一条都会打断既有验收：
+    #   /api/auth/login —— 登录本身不能要求先登录；
+    #   /api/health     —— scripts/up.sh、check-env.sh、check-health.sh 的探活口（0.3 已验收）；
+    #   /actuator/**    —— docker-compose 中 nexus-backend 的 healthcheck 探活口。
+    # 与 SecurityProperties 的 Java 默认值保持一致（yml 缺失时行为不退化）。
+    whitelist:
+      - /api/auth/login
+      - /api/health
+      - /actuator/**
+
 # ── 日志 ──
 logging:
   level:
     root: info
     # 本项目包统一 info：关键流程（探活、向量入库、大模型调用）按宪法要求打 log.info
     com.nexus: info
+    # ⚠️ 阶段1 的验收判据之一（1.3-1）：Mapper 包开 debug 才能看到 MyBatis 打印的最终 SQL
+    #    与参数（"==>  Preparing: ... WHERE ... tenant_id = ?"），
+    #    这是"任何查询都自动带租户条件"唯一可见、可截图、可演示的证据。
+    #    验收通过后可改回 info（届时 SQL 日志消失，属预期）。
+    com.nexus.module.system.mapper: debug

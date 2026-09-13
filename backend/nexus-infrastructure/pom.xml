@@ -1,14 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  nexus-infrastructure —— 基础设施：MyBatis-Plus 多租户 / JWT / db-patch 引擎
+  nexus-infrastructure —— 基础设施：MyBatis-Plus 多租户 / JWT 认证 / db-patch 引擎
 
-  阶段0 定位：可编译的骨架 + 数据层依赖就位（不写业务代码）。
-  依赖说明：
+  阶段1 起本模块承载三件事（设计依据：docs/design/01-多租户与认证.md §6.1）：
+    ① 多租户：TenantContext（ThreadLocal）+ TenantLineHandlerImpl（fail-closed 注入 tenant_id）
+              + @IgnoreTenant 注解与切面（tenant 包）；
+    ② 认证：JwtUtil / JwtAuthenticationFilter / TokenStore（security 包）；
+    ③ 迁移引擎：PatchCli（dbpatch 包，零第三方依赖，见 §2.6）。
+
+  依赖说明（**每个依赖都对应一个被直接 import 的类，不做"顺手加进来"**）：
     - mybatis-plus-spring-boot3-starter：Boot 3 专用 starter，版本由父 POM 统一管理；
-    - spring-boot-starter-jdbc：显式声明（JDBC 与连接池 HikariCP 的实际归属模块，
-      MyBatis-Plus starter 只是间接带入，本模块作为"数据库配置"归属方显式持有）；
-    - org.postgresql:postgresql（runtime）：JDBC 驱动仅运行期需要，版本由 Boot BOM 管理。
+    - mybatis-plus-jsqlparser ★阶段1 新增：MyBatis-Plus 自 3.5.9 起把 JSqlParser 相关插件
+      拆到本模块 —— TenantLineInnerInterceptor 与 TenantLineHandler **在这个 jar 里**
+      （已实测：mybatis-plus-extension-3.5.9.jar 内无 plugins/inner 包）。不加它编译期即失败；
+    - spring-boot-starter-jdbc：JDBC 与连接池 HikariCP 的实际归属模块（显式持有）；
+    - org.postgresql:postgresql（runtime）：JDBC 驱动仅运行期需要，版本由 Boot BOM 管理；
+    - spring-boot-starter-aop ★新增：@IgnoreTenant 切面（决策 D4）需要 AspectJ 织入；
+    - spring-boot-starter-data-redis ★新增：TokenStore 的登录态白名单（StringRedisTemplate）；
+    - jjwt-api / jjwt-impl / jjwt-jackson ★新增：JWT 签发与校验（决策 D1），版本见父 POM；
+    - spring-web ★新增：JwtAuthenticationFilter 的基类 OncePerRequestFilter 与 MediaType。
+      刻意**不用** spring-boot-starter-web —— 本模块只需要这几个类型，不需要内嵌 Tomcat，
+      更不该把整条 MVC 链带进所有下游模块（与决策 D5「只取需要的那一个类」同一取舍逻辑）；
+    - jakarta.servlet:jakarta.servlet-api ★新增（provided）：Filter/HttpServletRequest 等类型的
+      来源。**必须显式声明**：spring-web 6.1 的 POM 里没有任何 servlet 依赖（已实测该 POM），
+      运行期由 nexus-start 的 tomcat-embed-core 提供同名类，故 scope=provided；
+    - jackson-databind ★新增：过滤器在 Spring MVC 之外（DispatcherServlet 之前）写 401 响应体，
+      拿不到 @RestControllerAdvice，需用 ObjectMapper 手工序列化统一响应体 Result。
 -->
+
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -37,6 +56,12 @@
             <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
         </dependency>
 
+        <!-- TenantLineInnerInterceptor / TenantLineHandler 的实际归属 jar（MP 3.5.9 起拆分） -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
@@ -46,6 +71,62 @@
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
+        </dependency>
+
+        <!-- ── 认证与多租户（阶段1 新增）── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- OncePerRequestFilter（JwtAuthenticationFilter 的基类） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+
+        <!--
+          jakarta.servlet-api：Filter / HttpServletRequest / HttpServletResponse 的类型来源。
+          runtime 不需要它 —— tomcat-embed-core（nexus-start 的 spring-boot-starter-web 带入）
+          提供同名类，故用 provided（编译期可见、不打进本模块产物）。
+        -->
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- 过滤器在 MVC 之外手工序列化 Result（401 出口） -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- ── 测试（JUnit 5 + Mockito + spring-test 的 MockHttpServletRequest）── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

@@ -1,17 +1,21 @@
 /**
- * 多租户隔离（阶段1 填充）。
+ * 多租户隔离（阶段1 已落地，设计依据：docs/design/01-多租户与认证.md §3 D3/D4、§6.1）。
  *
- * <p>计划内容（见 docs/task/task.2+多租户认证.md 与 CLAUDE.md 宪法约束）：
+ * <p>本包内容与各自职责：
  * <ul>
- *     <li>{@code TenantLineHandler} 实现：基于 MyBatis-Plus 的租户行级插件，
- *         对 SQL 自动追加 {@code tenant_id} 条件；</li>
- *     <li>{@code @IgnoreTenant} 注解 + 拦截逻辑：标注在 Mapper 方法上跳过租户注入
- *         （如系统级字典表、补丁记录表 {@code t_db_patch}）；</li>
- *     <li>当前租户上下文持有者：从登录态（JWT / Redis 会话）取 {@code tenantId}，
- *         由拦截器在请求进入时绑定、请求结束时清理。</li>
+ *     <li>{@code TenantLineHandlerImpl}：MyBatis-Plus 的 {@code TenantLineHandler} 实现，
+ *         对 SQL 自动追加 {@code tenant_id} 条件；<b>fail-closed</b> ——
+ *         无租户上下文且未豁免时抛异常，绝不静默放行（决策 D3）；</li>
+ *     <li>{@code TenantContext}：请求级租户上下文的 {@code ThreadLocal} 持有者
+ *         （userId / tenantId / tokenId + 豁免计数），<b>必须在 finally 清理</b>；</li>
+ *     <li>{@code IgnoreTenant} + {@code IgnoreTenantAspect}：自研豁免注解与切面
+ *         （决策 D4），豁免时 {@code log.warn} 留痕，使"每一次破例"可追溯；</li>
+ *     <li>装配：{@code com.nexus.infrastructure.config.MybatisPlusConfig}。</li>
  * </ul>
  *
- * <p>阶段0 状态：仅占位包结构，保证 {@code mvn clean install} 链路可编译，不含实现。
+ * <p><b>两类豁免不要混用</b>：结构性豁免（表本身无 tenant_id 列，如 {@code t_tenant} /
+ * {@code t_db_patch}）按表声明在 {@code TenantLineHandlerImpl} 里；
+ * 调用级豁免（同一张表某些方法要跨租户查）才用 {@code @IgnoreTenant}，且必须写明原因。
  *
  * @author nexus
  */

@@ -2,6 +2,7 @@ package com.nexus.start.handler;
 
 import com.nexus.common.exception.BusinessException;
 import com.nexus.common.exception.SystemException;
+import com.nexus.common.exception.UnauthorizedException;
 import com.nexus.common.result.Result;
 import com.nexus.common.result.ResultCode;
 import org.slf4j.Logger;
@@ -20,6 +21,7 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
  *     <caption>异常分类与出口</caption>
  *     <tr><th>异常类型</th><th>HTTP</th><th>code</th><th>日志级别</th><th>msg 是否可展示</th></tr>
  *     <tr><td>{@link BusinessException}</td><td>200</td><td>业务码（非 0）</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link UnauthorizedException}</td><td>401</td><td>40100 / 40101 / 40102</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link SystemException}</td><td>500</td><td>50000</td><td>error（含堆栈）</td><td>否，只回通用话术</td></tr>
  *     <tr><td>{@link NoResourceFoundException}</td><td>404</td><td>40400</td><td>warn</td><td>是</td></tr>
  *     <tr><td>其他 {@link Exception}</td><td>500</td><td>50000</td><td>error（含堆栈）</td><td>否，只回通用话术</td></tr>
@@ -28,6 +30,12 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
  * <p>业务异常为何用 HTTP 200：本项目以"统一响应体 + 业务码"作为前端的判定依据
  * （前端拦截器按 {@code code === 0} 判成功），HTTP 状态码留给传输/可用性语义
  * （如 /api/health 的 503）。该约定已写入 docs/api/README.md，前后端一致。
+ *
+ * <p>未认证异常为何是 HTTP 401（阶段1 新增）：认证失败是<b>传输层</b>语义 ——
+ * 前端 {@code request.ts} 的 401 分支负责"清 token + 跳登录"，契约在先。
+ * 注意本出口只覆盖<b>进入 MVC 之后</b>抛出的未认证异常；
+ * 过滤器（DispatcherServlet 之前）的 401 由 {@code JwtAuthenticationFilter} 自己序列化，
+ * 两处出口的响应体结构一致，均为 {@code Result}。
  *
  * @author nexus
  */
@@ -47,6 +55,24 @@ public class GlobalExceptionHandler {
         // 业务异常不打堆栈：它是"规则没通过"，不是程序缺陷
         log.warn("业务异常：code={} msg={}", ex.getCode(), ex.getMessage());
         return ResponseEntity.ok(Result.failure(ex.getCode(), ex.getMessage()));
+    }
+
+    /**
+     * 未认证异常：登录态缺失或失效（HTTP 401）。
+     *
+     * <p>与 {@link BusinessException} 的处理风格一致 —— warn 级别、不打堆栈：
+     * "没带 token / token 过期"是<b>预期内</b>的请求结果，不是程序缺陷。
+     * HTTP 401 与响应体里的 40100/40101/40102 同时给出：
+     * 前者供 axios 走 401 分支（清 token + 跳登录），后者供提示文案。
+     *
+     * @param ex 未认证异常
+     * @return HTTP 401 + 对应响应码
+     */
+    @ExceptionHandler(UnauthorizedException.class)
+    public ResponseEntity<Result<Void>> handleUnauthorizedException(UnauthorizedException ex) {
+        log.warn("未认证：code={} msg={}", ex.getCode(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(Result.failure(ex.getCode(), ex.getMessage()));
     }
 
     /**
