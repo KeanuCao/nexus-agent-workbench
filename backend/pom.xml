@@ -17,9 +17,26 @@
       其运行镜像阶段以 Docker COPY 通配 `/build/nexus-start/target/*.jar` 拷贝为 /app/app.jar，
       该通配必须只匹配到一个文件 —— 故本项目不启用 maven-source-plugin / maven-javadoc-plugin
       （spring-boot-starter-parent 亦未绑定这两个插件，已核对 3.3.13 版本 POM 确认）。
+      新增插件的准入判据（2026-09-15 补）：新插件必须不产出 *.jar，否则上面这条「只命中一个文件」
+      即被打破（source/javadoc 会产 -sources.jar，禁止；flatten 只产 .flattened-pom.xml，安全）。
+      判据的完整说明见下方 <build> 段。
 
-  版本策略：Spring Boot 生态版本全部由 spring-boot-starter-parent → spring-boot-dependencies(BOM)
-  统一管理；BOM 未覆盖的第三方（MyBatis-Plus）在本文件集中声明，子模块引用时禁止再写 <version>。
+  版本策略（2026-09-15 修订：单点化）：
+    【单一真源】后端自身版本号（即全部 6 个模块的版本）唯一真源 = 本文件 <properties> 的 <revision>，
+      发版只改这一行。5 个子模块不写 <version>（继承本 POM），其 <parent><version> 一律写 ${revision}，
+      因此它们请求的 parent GAV 与 ../pom.xml 必然字符串相等，从结构上消除版本漂移。
+      install/deploy 前由 flatten-maven-plugin（见下方 <build>）把 ${revision} 落成具体版本号，
+      否则装进仓库的 POM 里仍是 ${revision} 字面量，消费者解析不了。
+    【生态版本】Spring Boot 生态版本全部由 spring-boot-starter-parent → spring-boot-dependencies(BOM)
+      统一管理；BOM 未覆盖的第三方（MyBatis-Plus / jjwt）在本文件集中声明，子模块引用时禁止再写 <version>。
+    【历史故障，勿重演】2026-09-15 实测：父 POM 0.2.1、子模块 <parent><version> 写死 0.2.0 时，
+      Maven 在 ../pom.xml 读到 GAV 不匹配（0.2.1 ≠ 被请求的 0.2.0），转而从本地仓库解析
+      nexus-parent:0.2.0；因为 builder-m2 是持久卷、里面正好有旧版本，构建成功且零警告，
+      产物版本仍是旧的 —— 现场日志即 `Building nexus-common 0.2.0` 与 `Building nexus-parent 0.2.1`
+      并存。只有把本地仓库的 com/nexus 挪走后才会响亮失败：
+      `Non-resolvable parent POM for com.nexus:nexus-common:0.2.0 ... 'parent.relativePath'
+      points at wrong local POM`。教训：写死版本号 + 持久化本地仓库 = 静默用旧版本构建，
+      比直接报错更危险 —— 报错至少会让人停下来。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -36,7 +53,8 @@
 
     <groupId>com.nexus</groupId>
     <artifactId>nexus-parent</artifactId>
-    <version>0.2.1</version>
+    <!-- ★ 唯一真源在下方 <properties> 的 <revision>：见文件头「版本策略」 -->
+    <version>${revision}</version>
     <packaging>pom</packaging>
 
     <name>nexus-parent</name>
@@ -51,6 +69,13 @@
     </modules>
 
     <properties>
+        <!--
+          ★ 后端版本号唯一真源 —— 发版只改这一行。
+          5 个子模块不写 <version>（继承本 POM）；它们的 <parent><version> 一律写 ${revision}，
+          因此其请求的 parent GAV 与 ../pom.xml 必然字符串相等，从结构上消除版本漂移。
+          命令行覆盖：mvn -Drevision=0.3.0 clean install（用户属性优先，全 reactor 一致）。
+        -->
+        <revision>0.2.1</revision>
         <!-- Java 17：与构建镜像 maven:3.9-eclipse-temurin-17、运行镜像 eclipse-temurin:17-jre-alpine 一致 -->
         <java.version>17</java.version>
         <!--
@@ -141,9 +166,61 @@
 
     <build>
         <!--
-          说明：此处刻意不绑定任何插件 —— 编译参数（含 -parameters 保留方法参数名）、
-          资源过滤（application*.yml 使用 @..@ 分隔符）等已由 spring-boot-starter-parent 提供。
+          默认不绑定任何插件 —— 编译参数（含 -parameters 保留方法参数名）、资源过滤
+          （application*.yml 用 @..@ 分隔符）等已由 spring-boot-starter-parent 提供；
           打包插件由 nexus-start 单独声明，保证其余模块产物为普通 jar。
+
+          新增插件的准入判据（2026-09-15 补）：必须**不产出 *.jar**，否则会打破
+          docker-compose/backend/Dockerfile 那条 `/build/nexus-start/target/*.jar` 必须只命中一个文件的约定
+          （source/javadoc 插件会产出 -sources.jar，属禁止；flatten 只产出 .flattened-pom.xml，属安全）。
+
+          下方 flatten 是唯一例外，理由见其自身注释。
         -->
+        <plugins>
+            <!--
+              flatten-maven-plugin：把 ${revision} 落成具体版本号后再 install/deploy。
+              为什么必须有它（不能只写 ${revision}）：不装它时本 reactor 内构建照样过，
+              但 mvn install 装进仓库的 pom 里 <version> / <parent><version> 仍是 ${revision} 字面量，
+              消费者（IDE 单模块导入 / 只 clone 子目录 / 将来 deploy 的接收方）解析不了 ——
+              这是 Maven 官方 CI-friendly 版本写法的硬要求。
+
+              三个配置项各自的理由：
+                · flattenMode=resolveCiFriendliesOnly：只把 ${revision} 等 CI-friendly 变量落成字面量，
+                  保留 parent / dependencyManagement / properties / modules。本项目不是对外发布的 OSS 构件，
+                  不需要 clean / oss 模式那套「剥父关系、删 build」的重写 —— 那会让子模块的父引用与
+                  dependencyManagement 一并消失，与本项目「父 POM 集中管版本」的约定冲突。
+                · updatePomFile=true：packaging=pom 的工程该项**默认为 false**，不显式打开就会出现
+                  「子模块 flatten 了、父 POM 没 flatten」的半生效状态，而父 POM 恰是版本真源所在。
+                · 不设 outputDirectory（保持默认 ${project.basedir}）：.flattened-pom.xml 落在各模块目录下、
+                  **不在 target/ 里**，与上面那条「恰好一个 jar」的通配零交集；且可直接 cat 出来核对是否已落版
+                  （已加入 .gitignore，不提交）。
+
+              版本选型：1.8.0 是阿里云 public 源上的 release（已实测
+              https://maven.aliyun.com/repository/public/org/codehaus/mojo/flatten-maven-plugin/1.8.0/
+              flatten-maven-plugin-1.8.0.pom → HTTP 200，1.05s）；prerequisites 要求 Maven 3.6.3，
+              构建容器是 maven:3.9-*，满足。若首次构建拉取失败，回退 1.7.3（只改下面这一行）。
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.8.0</version>
+                <configuration>
+                    <updatePomFile>true</updatePomFile>
+                    <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals><goal>flatten</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>flatten.clean</id>
+                        <phase>clean</phase>
+                        <goals><goal>clean</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 </project>

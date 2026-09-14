@@ -15,7 +15,8 @@
     <parent>
         <groupId>com.nexus</groupId>
         <artifactId>nexus-parent</artifactId>
-        <version>0.2.0</version>
+        <!-- 版本随父 POM 的 <revision>：写死具体版本号会重演 0.2.0/0.2.1 漂移（父 0.2.1 / 子 0.2.0 时 Maven 静默回落本地仓库里的旧父 POM） -->
+        <version>${revision}</version>
     </parent>
 
     <artifactId>nexus-common</artifactId>
