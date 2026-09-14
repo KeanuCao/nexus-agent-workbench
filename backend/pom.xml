@@ -75,7 +75,7 @@
           因此其请求的 parent GAV 与 ../pom.xml 必然字符串相等，从结构上消除版本漂移。
           命令行覆盖：mvn -Drevision=0.3.0 clean install（用户属性优先，全 reactor 一致）。
         -->
-        <revision>0.2.1</revision>
+        <revision>0.2.2</revision>
         <!-- Java 17：与构建镜像 maven:3.9-eclipse-temurin-17、运行镜像 eclipse-temurin:17-jre-alpine 一致 -->
         <java.version>17</java.version>
         <!--
