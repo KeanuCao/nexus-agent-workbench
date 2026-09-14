@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | **backend-engineer** | Java 后端业务代码（Controller/Service/Mapper）；DB Patches；API 契约文档 | ❌ 不打包 ❌ 不启动服务 ❌ 不联调验证 | 后端业务开发、数据库补丁、API 文档输出 |
 | **frontend-engineer** | Vue 3 页面、Pinia Store、Axios 拦截器、路由守卫；**必须先读 API 文档** | ❌ 不打包 ❌ 不预览 ❌ 不 Mock 数据 ❌ 不改 CORS | 前端页面开发、状态管理、拦截器配置 |
 | **devops-engineer** | Docker Compose 编排、db-patch 执行、环境脚本、前后端项目骨架、构建容器 | ❌ 不写业务代码 ❌ 不修改已发布的历史补丁 | 环境搭建、部署脚本、打包容器、集成联调 |
-| **qa-engineer** (规划中) | 单元测试 (JUnit/Vitest)、E2E 测试 (Playwright)、覆盖率分析 | ❌ 不写业务代码 | 测试用例编写、自动化测试实现 |
+| **qa-engineer** | **测试案例（TC-XX）设计与维护**、单元测试 (JUnit/Vitest)、E2E 测试 (Playwright)、覆盖率分析 | ❌ 不写业务代码 ❌ 不擅自起停环境 | 测试案例编写、自动化测试实现 |
 
 ### Agent 协作流程（标准链路）
 ```mermaid

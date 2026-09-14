@@ -16,6 +16,8 @@ target/
 *.class
 *.jar
 !.mvn/wrapper/maven-wrapper.jar
+# flatten-maven-plugin 的构建期产物（各模块目录下，内含已落版的版本号），不提交
+.flattened-pom.xml
 
 # ── Node / Vite ──
 node_modules/

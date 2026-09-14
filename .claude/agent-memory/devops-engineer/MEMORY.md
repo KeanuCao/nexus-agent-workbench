@@ -6,3 +6,4 @@
 - [本环境无外网](project-no-internet-verify-empirically.md) — 在线文档不可达，规则判断改走本机实测/--help，未验证的标注为推断
 - [健康检查实测偏差](project-health-probe-findings.md) — 前端/ollama-init 两条已在 compose 修复（待 up -d 生效）；data.timestamp 用 `Z` 未闭环；0.3.3 探针决策
 - [WSL 内工具实况](project-wsl-tooling-facts.md) — **jq 缺失**（sed 兜底才是实际路径）、python3 可做 stub、经 wsl 传长脚本要用 heredoc
+- [builder-m2 持久卷隐患](project-builder-m2-persistent-volume-hazard.md) — 持久卷静默复用旧构件，把「配置没生效」伪装成构建成功；判据要落在产物本身
