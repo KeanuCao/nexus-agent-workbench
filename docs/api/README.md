@@ -134,13 +134,16 @@
 }
 ```
 
+> ⚠️ 上面样例里的 `"version": "0.2.0"` 是**示例值，非真源；实际以 `/api/health` 的实际返回为准**
+> （真源与判据见 §4.2.2）。
+
 #### `data` 字段完整定义（`HealthReport`）
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `data.status` | `"UP" \| "DOWN"` | 是 | 总体状态：三个依赖全 UP 才是 `UP` |
 | `data.service` | string | 是 | 服务名，固定 `nexus-start` |
-| `data.version` | string | 是 | 服务版本，如 `0.2.0`（构建期由 pom 版本注入） |
+| `data.version` | string | 是 | 服务版本。**真源 = `backend/pom.xml` 的 `<revision>`**，构建期由 Maven 资源过滤注入 `application.yml` 的 `@project.version@`；`0.2.0` 只是**示例值，非真源**，实际以 `/api/health` 的实际返回为准（判据见 §4.2.2） |
 | `data.timestamp` | string (`date-time`) | 是 | ISO-8601 带时区偏移，格式固定 `yyyy-MM-dd'T'HH:mm:ssXXX`（**秒级、无小数秒**）。偏移量 = 服务端默认时区：容器内通常 `+00:00`，Windows 本地直跑 `+08:00` |
 | `data.checks` | object | 是 | 各依赖探测结果，见下 |
 
@@ -172,6 +175,8 @@
   }
 }
 ```
+
+> 同样：这里的 `"version": "0.2.0"` 是**示例值，非真源；实际以 `/api/health` 的实际返回为准**。
 
 - `msg` 已把故障依赖拼进文案（多个依赖用 `、` 连接），可直接 `ElMessage.error(msg)`；
 - 若要在页面上逐项标红，可在 `catch` 分支读取 `error.response.data.data.checks`
@@ -297,21 +302,31 @@ L2 是**唯一**同时覆盖 postgres / redis / ollama 的入口 —— 依赖�
 | --- | --- | --- |
 | `data.status` | `"UP"` | 与 HTTP 200 同真同假。若 `status=UP` 但 HTTP=503（或反之）→ **契约被破坏，报后端 bug** |
 | `data.service` | `"nexus-start"` | 固定值（配置 `nexus.health.service-name`）。不匹配 → 打到别的服务了 |
-| `data.version` | `"0.2.0"` | **专条见下** |
+| `data.version` | 等于 `backend/pom.xml` 的 `<revision>`（**不要写死具体版本号**） | 取真源值：`grep -o '<revision>[^<]*</revision>' backend/pom.xml`。**专条见下** |
 | `data.timestamp` | 正则 `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$` | 秒级、**无小数秒**。**不要断言时区**：容器内 `+00:00`、Windows 本地直跑 `+08:00`，两者都合法 |
 | `data.checks.postgres` / `.redis` / `.ollama` | 三项均 `"UP"` | **取值域只有 `UP` / `DOWN`**（后端刻意不复用 Spring `HealthStatus`，就没有 `OUT_OF_SERVICE`/`UNKNOWN`）。出现第三值 → 契约破坏，脚本应报错而非通过 |
 | `data.checks` 的键数 | **恰好 3 个** | 多出未知键 → 契约已变更，报告而非静默通过 |
 
 **`data.version` 专条（脚本最容易漏的判据）**
 
-- 期望 `0.2.0` —— 来源是 `backend/pom.xml` 的 `<version>`，构建期由 Maven 资源过滤替换
-  `application.yml` 里的 `@project.version@` 占位符。
+- **期望值 = `backend/pom.xml` 的 `<revision>`**（版本号**唯一真源**，发版只改这一行）。
+  构建期由 Maven 资源过滤替换 `application.yml` 里的 `@project.version@` 占位符。
+  取真源值（WSL 内、仓库根目录执行）：
+  ```bash
+  cd /mnt/c/wp/nexus-agent-workbench && grep -o '<revision>[^<]*</revision>' backend/pom.xml
+  ```
+  ⚠️ 真源是 `<properties>` 里的 `<revision>`，**不是**父 POM 的 `<version>` ——
+  后者是 `${revision}` 字面量，直接 grep 它取不到版本号。
+- **不要**把期望值写成某个具体版本号：`main` 与功能分支上的语义版本可以不同，写死换个分支就错。
 - **必须 FAIL 的取值**：字面量 `@project.version@`（= 资源过滤失效）、或空串。
   这是**构建层缺陷**，不是环境问题 —— 脚本要给出"检查 `maven-resources-plugin` 过滤是否生效"的提示，
   别让用户以为是容器没起好。
-- **建议判据写法**：不要硬编码 `0.2.0`，而是断言 `^[0-9]+\.[0-9]+\.[0-9]+$` 且显式拒绝 `^@.*@$`
-  —— pom 版本升级时脚本不用改，仍能抓到过滤失效。
-- **交叉验证**：同一个占位符还出现在 `/actuator/info` → `info.app.version`（值为 `0.2.0`）。
+- **建议判据写法**：断言 `^[0-9]+\.[0-9]+\.[0-9]+$` 且显式拒绝 `^@.*@$`，
+  **并且**与上面从 `<revision>` 取到的值**比对相等**。
+  semver 正则**只挡「占位符没被替换」这类格式缺陷**；要防「版本号改了、产物却没跟着变」，
+  必须比对 `<revision>` —— 那是版本漂移的唯一判据（2026-09-15 实景：父 POM 0.2.1 / 子模块 0.2.0，
+  构建成功且零警告，产物仍是旧的，详见 `docs/design/00-环境与部署.md` §5.1）。
+- **交叉验证**：同一个占位符还出现在 `/actuator/info` → `info.app.version`（**同样等于 `<revision>`**）。
   两个出口都查一遍，可确认是"同一处坏掉"还是只有一处。
 
 #### 4.2.3 取数与解析示例（WSL 内、仓库根目录执行）
@@ -396,6 +411,8 @@ docker compose start redis
 curl -s --max-time 10 http://localhost:8089/api/health
 # → 应回到 200；若首次仍是 503，等待数秒重试（连接池需重建，属预期，非缺陷）
 ```
+
+> 上面两处输出里的 `"version":"0.2.0"` 是**示例值，非真源；实际以 `/api/health` 的实际返回为准**（§4.2.2）。
 
 断言清单（自测脚本时逐条对）：
 

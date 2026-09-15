@@ -43,8 +43,8 @@ src/main/resources/application.yml
 $env:POSTGRES_HOST="localhost"; $env:REDIS_HOST="localhost"
 $env:OLLAMA_BASE_URL="http://localhost:11434"
 mvn -pl nexus-start -am spring-boot:run
-# 或运行已打包的 fat jar
-java -jar nexus-start/target/nexus-start-0.2.0.jar
+# 或运行已打包的 fat jar（文件名里的版本号 = 父 POM 的 <revision>）
+java -jar nexus-start/target/*.jar
 ```
 
 启动后：`curl http://localhost:8089/api/health`（依赖全通时 HTTP 200，否则 503）。
