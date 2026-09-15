@@ -89,6 +89,7 @@ AI 集成：Spring AI 或 OkHttp + 策略模式 (对接 Ollama/DeepSeek)
 多租户强制隔离：使用 MyBatis-Plus 的 `TenantLineHandler` 自动注入 `tenant_id`，任何查询都必须带上租户条件（除非用 `@IgnoreTenant` 注解跳过）。
 日志规范：关键流程（调用大模型、向量入库）必须打印 `log.info`，方便面试时展示调用链路。
 Git 提交：请按功能点分批提交，commit message 使用 `feat: 添加统一AI网关` 格式。
+版本号单一真源：后端版本号唯一真源 = `backend/pom.xml` 的 `<revision>`（**发版只改这一行**）；5 个子模块的 `<parent><version>` 一律写 `${revision}`，**禁止写死具体版本号**（写死会触发"父 POM 与子模块 GAV 不等 → Maven 静默回落本地仓库旧版本 → 改了版本号产物却没变"的故障）。理由、历史故障与判据见 `docs/design/00-环境与部署.md` §5.1。
 
 ### 针对"Python转Java"的特别限制（避免露怯）
 不要出现 Python 语法：严禁在 Java 代码中使用 `_` 作为变量名，严禁滥用 `var`（只在类型明确且不可变时使用，如 `var list = new ArrayList<String>()`，否则必须显式声明类型）。

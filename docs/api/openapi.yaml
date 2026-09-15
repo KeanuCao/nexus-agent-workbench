@@ -16,6 +16,10 @@ openapi: 3.0.3
 
 info:
   title: nexus 统一 AI 网关 —— API 契约
+  # ⚠️ 本字段是 **OpenAPI 契约文档自身的版本**（OpenAPI 规范要求 info.version 必填），
+  #    不是后端产物版本 —— 别拿它去断言 GET /api/health 的 data.version。
+  #    后端版本唯一真源 = backend/pom.xml 的 <revision>（运行时见 paths./api/health 里 data.version 的说明）；
+  #    0.2.0 是示例值，非真源；实际以 /api/health 的实际返回为准。
   version: 0.2.0
   description: |
     演示项目后端接口契约。阶段0：健康检查；阶段1：多租户 + 认证（登录/登出/取当前用户）。
@@ -260,6 +264,8 @@ paths:
                     data:
                       status: UP
                       service: nexus-start
+                      # 示例值，非真源；实际以 /api/health 的实际返回为准
+                      # （真源 = backend/pom.xml 的 <revision>，见 docs/api/README.md §4.2.2）
                       version: 0.2.0
                       timestamp: '2026-09-03T10:00:00+08:00'
                       checks:
@@ -281,6 +287,7 @@ paths:
                     data:
                       status: DOWN
                       service: nexus-start
+                      # 示例值，非真源；实际以 /api/health 的实际返回为准
                       version: 0.2.0
                       timestamp: '2026-09-03T10:00:00+08:00'
                       checks:
@@ -295,6 +302,7 @@ paths:
                     data:
                       status: DOWN
                       service: nexus-start
+                      # 示例值，非真源；实际以 /api/health 的实际返回为准
                       version: 0.2.0
                       timestamp: '2026-09-03T10:00:00+00:00'
                       checks:
@@ -415,7 +423,13 @@ components:
           example: nexus-start
         version:
           type: string
-          description: 服务版本号，取自 `nexus.health.version`（构建期由 Maven 资源过滤注入 pom 版本）
+          description: |
+            服务版本号，取自配置 `nexus.health.version` —— 构建期由 Maven 资源过滤把
+            `@project.version@` 替换成 **`backend/pom.xml` 的 `<revision>`**（版本号唯一真源，发版只改这一行）。
+            **不要**把期望值写死成某个具体版本号；要防「版本号改了、产物却没跟着变」必须比对 `<revision>`
+            （取真源值：`grep -o '<revision>[^<]*</revision>' backend/pom.xml`；判据与历史故障见
+            `docs/api/README.md` §4.2.2）。
+          # 示例值，非真源；实际以 /api/health 的实际返回为准
           example: 0.2.0
         timestamp:
           type: string

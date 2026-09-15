@@ -109,7 +109,7 @@ Windows 侧访问：前端页面 `http://localhost:8088`，后端接口 `http://
 mvn clean install -DskipTests && java -jar nexus-start/target/*.jar
 ```
 
-- PowerShell 下通配符不会被展开，请直接写实际文件名：`java -jar nexus-start/target/nexus-start-0.2.0.jar`（WSL / Git Bash 中通配符可用）。
+- PowerShell 下通配符不会被展开，需写出实际文件名（`nexus-start/target/nexus-start-<版本号>.jar`，版本号取 `backend/pom.xml` 的 `<revision>`）；WSL / Git Bash 中可直接用通配 `nexus-start/target/*.jar`。
 - 本地直跑时数据源 / Redis / Ollama 地址默认是容器服务名（`postgres` / `redis` / `ollama`），需用环境变量覆盖为 `localhost`（依赖容器仍由 compose 提供），详见 [`docs/api/README.md`](docs/api/README.md) §3。
 
 前端（在 `frontend/` 目录执行）：
@@ -138,6 +138,9 @@ curl http://localhost:8088/api/health
 curl -I http://localhost:8088
 # → HTTP/1.1 200 OK
 ```
+
+> ① 的响应里 `"version": "0.2.0"` 是**示例值，非真源；实际以 `/api/health` 的实际返回为准** ——
+> 真源是 `backend/pom.xml` 的 `<revision>`（发版只改这一行，构建期经资源过滤注入）。
 
 任一依赖不可用时 `/api/health` 返回 **HTTP 503** 且 `code=20000`，body 仍是完整 JSON、`data.checks` 会点名 DOWN 的依赖（如 `"ollama":"DOWN"`）。取数请用 `curl -s`（**不加 `-f`**，否则 503 时 body 会丢）。走前端端口只能查 `/api/health`，`/api/actuator/health` 必然 404。
 

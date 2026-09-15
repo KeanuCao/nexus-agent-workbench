@@ -30,8 +30,8 @@ mvn clean install -DskipTests
 # 仅启动模块（含其依赖模块）
 mvn -pl nexus-start -am spring-boot:run
 
-# 打包产物（仅 nexus-start 产出可执行 jar）
-mvn -DskipTests package && java -jar nexus-start/target/nexus-start-0.2.0.jar
+# 打包产物（仅 nexus-start 产出可执行 jar；文件名里的版本号 = 父 POM 的 <revision>）
+mvn -DskipTests package && java -jar nexus-start/target/*.jar
 ```
 
 容器化构建见 `docker-compose/backend/Dockerfile`（stage 1 = `nexus-builder`，stage 2 = JRE 瘦身镜像，容器内端口固定 8089）。
