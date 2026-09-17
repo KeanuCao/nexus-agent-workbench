@@ -36,7 +36,8 @@ import java.util.stream.Stream;
  *     <tr><td>补丁未执行过</td><td>单事务内执行 SQL + 写入记录</td><td>0</td></tr>
  *     <tr><td>已执行、checksum 一致</td><td>静默跳过（重跑迁移的幂等行为）</td><td>0</td></tr>
  *     <tr><td>已执行、checksum 不一致</td><td>报错终止（历史补丁被篡改，严禁二次执行）</td><td>2</td></tr>
- *     <tr><td>文件名不符命名规则</td><td>警告并跳过（目录允许放说明性文件）</td><td>0</td></tr>
+ *     <tr><td>文件名不符命名规则（限 .sql 文件）</td><td>警告并跳过（目录允许放说明性文件）</td><td>0</td></tr>
+ *     <tr><td>非 .sql 文件</td><td>扫描阶段即被过滤，静默忽略（不计入扫描数、不告警）</td><td>0</td></tr>
  *     <tr><td>时间戳早于已应用的最大时间戳</td><td>报错终止（乱序保护）</td><td>3</td></tr>
  * </table>
  *
@@ -134,7 +135,9 @@ public final class PatchCli {
                 String fileName = patchFile.getFileName().toString();
                 Matcher matcher = PATCH_FILE_PATTERN.matcher(fileName);
                 if (!matcher.matches()) {
-                    // 目录里允许放 README 之类的说明性文件，不算失败
+                    // 能走到这里的只有「以 .sql 结尾但名字不合规」的文件 —— 非 .sql 的说明性文件
+                    // （README.md 之类）在 listPatchFiles 的扫描阶段就被过滤掉了，根本进不来，
+                    // 因此也不会打印这行 WARN。实测见 docs/test-cases/TC-00.md 的 TC-00-0.2-6。
                     logWarn("命名不符 " + PATCH_FILE_PATTERN.pattern() + "，跳过：" + fileName);
                     continue;
                 }
