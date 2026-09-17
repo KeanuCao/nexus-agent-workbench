@@ -44,11 +44,7 @@
 #      谁在消费它：白名单全局共享 → 清理精确到 jti，绝不批量删。
 #   ② 幂等清理 —— 清理段对两个真 token 各调一次 POST /api/auth/logout（remove 幂等）；
 #      jti 一删，两份伪造 token 同时失效（它们共用同一个 jti）。
-#      异常退出：`set -e` 与显式 exit 由 EXIT trap 兜底；**Ctrl-C / kill 另需 trap** ——
-#      实测（2026-09-17，WSL bash 5.2）：未被 trap 的信号直接终止 bash，**EXIT trap 不会执行**，
-#      故下面显式写了 `trap 'exit 130' INT` / `trap 'exit 143' TERM`，把信号转成一次正常退出。
-#      （前提：**前台运行**。`… &` 起在后台的 bash 会继承 SIGINT 的忽略态，而"入口即被忽略的
-#        信号无法再被 trap" —— 那种跑法下 Ctrl-C 不触发清理，不在本脚本的设计范围内。）
+#      异常退出（含 Ctrl-C / kill）由 tc_begin 装的 trap 兜底，见 qa/scripts/lib/tc-common.sh 的文件头。
 #      残留的**最坏情况**：登录请求已发出、token 还没落到脚本手里就被中断 —— 那个 jti 登不掉，
 #        只能等 TTL 自然过期（本脚本唯一无法自清的残留；它不阻断任何后续用例）。
 #      **清理失败会怎样**：残留键最长存活 7200s（TTL 自然过期，无需人工修）；要立刻清：
@@ -67,70 +63,16 @@
 #
 # 依赖：python3（HMAC + JSON + base64url；WSL 内实测 3.12.3）、curl、docker（取指纹）、openssl（仅 --self-test 用）。
 # 运行位置：WSL（发行版 nexus-agent-workbench），**不需要 push**。
-#
-# ⚠️ 与 qa/scripts/tc01-two-tenant-me.sh 有逐字相同的公共段（常量、json_get、Redis 指纹、HTTP 动作）
-#    —— 改任何一边都要同步另一边（两个脚本各自独立可跑，刻意不做共享库）。
+# 公共机械动作段（常量解析 / JSON 取值 / HTTP 动作 / Redis 指纹 / 清理脚手架）在
+#   qa/scripts/lib/tc-common.sh；**重签（forge_token）与夹具密钥自检是本用例独有的夹具逻辑，留在本文件里**。
 # =============================================================================
 
 set -euo pipefail
 
-readonly REPO_DIR='/mnt/c/wp/nexus-agent-workbench'
-readonly ENV_FILE="${REPO_DIR}/docker-compose/.env"
-readonly REDIS_CONTAINER='nexus-redis'
-readonly REDIS_KEY_PATTERN='nexus:auth:token:*'
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/tc-common.sh"
 
-# application.yml:111 的 dev 默认值（与后端同源；后端若被环境变量覆盖，见"夹具密钥自检"）
-readonly DEV_SECRET='nexus-dev-only-jwt-secret-please-override-in-any-real-environment'
-
-# ── 后端地址：宿主端口从 docker-compose/.env 解析（与 compose 同源，脚本内不写死 8089）──
-backend_port='8089'
-if [ -r "$ENV_FILE" ]; then
-  port_from_env="$(grep -E '^[[:space:]]*BACKEND_PORT[[:space:]]*=' "$ENV_FILE" | tail -n 1 | cut -d= -f2- | tr -d ' \r"' || true)"
-  if [ -n "$port_from_env" ]; then
-    backend_port="$port_from_env"
-  fi
-fi
-readonly BASE_URL="${TC01_BASE_URL:-http://localhost:${backend_port}}"
-
-work_dir=''
 admin_token=''
 demo_token=''
-admin_jti=''
-demo_jti=''
-cleaned=0
-
-section() { printf '\n===== %s =====\n' "$1"; }
-
-# ── 从 JSON 文件里取「点分路径」的值（替代 jq；WSL 内无 jq）─────────────────────
-json_get() {
-  python3 - "$1" "$2" <<'PY'
-import json
-import sys
-
-try:
-    node = json.load(open(sys.argv[1], encoding="utf-8"))
-    for part in sys.argv[2].split("."):
-        node = node[int(part)] if isinstance(node, list) else node[part]
-except (OSError, KeyError, IndexError, TypeError, ValueError):
-    sys.exit(1)
-print("" if node is None else node)
-PY
-}
-
-# ── 本地解码 token 载荷的某个 claim（只解码、不验签）────────────────────────────
-token_claim() {
-  python3 - "$1" "$2" <<'PY'
-import base64
-import json
-import sys
-
-parts = sys.argv[1].split(".")
-if len(parts) != 3:
-    sys.exit(1)
-segment = parts[1] + "=" * (-len(parts[1]) % 4)
-print(json.loads(base64.urlsafe_b64decode(segment)).get(sys.argv[2], ""))
-PY
-}
 
 # ── 重签：<secret> <真 token> <新 tenantId> <方向标签> → stdout = 新 token，stderr = 说明 ──
 # 夹具密钥自检也在这个函数里：验不过真 token 就直接退出码 3（见文件头"假通过陷阱"）
@@ -221,50 +163,10 @@ sys.stdout.write(signing_input + "." + b64e(signature) + "\n")
 PY
 }
 
-# ── Redis 白名单指纹（只读）────────────────────────────────────────────────────
-redis_keys() {
-  docker exec "$REDIS_CONTAINER" redis-cli --scan --pattern "$REDIS_KEY_PATTERN" 2>/dev/null | tr -d '\r' | sort
-}
-
-redis_exists() {  # redis_exists <完整键名> → 打印 0/1
-  docker exec "$REDIS_CONTAINER" redis-cli exists "$1" 2>/dev/null | tr -d '\r'
-}
-
-# ── 响应体打印：curl 连不上时 -o 的文件**根本不会建**（实测），直接 cat 会被 set -e 吞成退出码 1 ──
-show_body() {
-  if [ -f "$1" ]; then
-    cat "$1"
-  else
-    printf '（curl 没拿到响应体 —— 后端不可达 / 连接被拒）'
-  fi
-}
-
-# ── HTTP 动作（只发请求、原样打印，不做任何判断）────────────────────────────────
-post_login() {  # post_login <请求体> <响应写到这个文件>
-  local body="$1" outfile="$2" http
-  http="$(curl -s -o "$outfile" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-        -d "$body" "${BASE_URL}/api/auth/login" || true)"
-  printf 'POST %s/api/auth/login\n  body: %s\n  → HTTP %s\n  body(原样): ' "$BASE_URL" "$body" "$http"
-  show_body "$outfile"; printf '\n'
-}
-
-get_me() {  # get_me <标签> <token> <响应写到这个文件>
-  local label="$1" token="$2" outfile="$3" http
-  http="$(curl -s -o "$outfile" -w '%{http_code}' -H "Authorization: Bearer ${token}" \
-        "${BASE_URL}/api/auth/me" || true)"
-  printf 'GET %s/api/auth/me   [%s]\n  → HTTP %s\n  body(原样): ' "$BASE_URL" "$label" "$http"
-  show_body "$outfile"; printf '\n'
-}
-
-post_logout() {  # post_logout <标签> <token>（token 为空则跳过 —— 幂等）
-  if [ -z "$2" ]; then
-    printf '  [%s] 没有 token，跳过登出\n' "$1"
-    return 0
-  fi
-  local out
-  out="$(curl -s -X POST -H "Authorization: Bearer $2" -w '\n  → HTTP %{http_code}' \
-        "${BASE_URL}/api/auth/logout" || true)"
-  printf '  [%s] POST %s/api/auth/logout\n  body(原样): %s\n' "$1" "$BASE_URL" "$out"
+# ── 清理 hook：只做清理动作（幂等），由库在正常收尾与异常兜底两条路径上调用 ──────────
+tc_cleanup() {
+  tc_post_logout 'admin' "$admin_token"
+  tc_post_logout 'demo' "$demo_token"
 }
 
 # ── 夹具自检（--self-test）：只跑本地计算，不碰 docker / 网络 / Redis / 后端 ──────────
@@ -276,7 +178,7 @@ run_self_test() {
   tmp_dir="$(mktemp -d)"
 
   printf '\n[自检 1] 本地造一份「模拟后端签发」的真 token（secret = application.yml 的 dev 默认值）\n'
-  fake_token="$(TC01_JWT_SECRET="$DEV_SECRET" python3 - <<'PY'
+  fake_token="$(TC01_JWT_SECRET="$TC_DEV_JWT_SECRET" python3 - <<'PY'
 import base64
 import hashlib
 import hmac
@@ -314,7 +216,7 @@ PY
 
   printf '\n[自检 2] 用 forge_token 把它的 tenantId 由 1 改成 2，验三件事\n'
   forging_err="$tmp_dir/forge.err"
-  forged="$(forge_token "$DEV_SECRET" "$fake_token" 2 '自检' 2>"$forging_err")"
+  forged="$(forge_token "$TC_DEV_JWT_SECRET" "$fake_token" 2 '自检' 2>"$forging_err")"
   sed 's/^/  /' "$forging_err"
   printf '  重签后 token 长度 = %s\n' "${#forged}"
 
@@ -324,7 +226,7 @@ PY
     printf '  (a) header 段与模拟真 token 逐字节相同：**不通过** ← 夹具改了 header，后端可能拒收\n'
   fi
 
-  verify_out="$(TC01_JWT_SECRET="$DEV_SECRET" python3 - "$fake_token" "$forged" <<'PY'
+  verify_out="$(TC01_JWT_SECRET="$TC_DEV_JWT_SECRET" python3 - "$fake_token" "$forged" <<'PY'
 import base64
 import hashlib
 import hmac
@@ -362,7 +264,7 @@ PY
   signing_input="${forged%.*}"
   forged_sig="${forged##*.}"
   if command -v openssl >/dev/null 2>&1; then
-    openssl_sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -hmac "$DEV_SECRET" -binary | base64 | tr '+/' '-_' | tr -d '=')"
+    openssl_sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -hmac "$TC_DEV_JWT_SECRET" -binary | base64 | tr '+/' '-_' | tr -d '=')"
     if [ "$openssl_sig" = "$forged_sig" ]; then
       printf '  (c) openssl 独立复算签名（与脚本不是同一段代码）：与脚本算出的相同\n'
     else
@@ -383,7 +285,7 @@ PY
   printf '\n===== 夹具自检结束 =====\n'
 }
 
-# ── 入口：--self-test 只跑本地自检，不进主流程 ────────────────────────────────────
+# ── 入口：--self-test 只跑本地自检，不进主流程（也不建工作目录、不装 trap）────────────
 if [ "${1:-}" = '--self-test' ]; then
   run_self_test
   exit 0
@@ -394,154 +296,69 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
-work_dir="$(mktemp -d)"
+tc_begin tc_cleanup \
+  '⑧ 清理：登出两个真 token（幂等；jti 一删，两份伪造 token 同时失效）' \
+  '⑨ 无害性自证：Redis 白名单指纹（跑后）'
 
-cleanup_and_fingerprint() {
-  section '⑧ 清理：登出两个真 token（幂等；jti 一删，两份伪造 token 同时失效）'
-  post_logout 'admin' "$admin_token"
-  post_logout 'demo' "$demo_token"
-  # 清理动作已完成 —— 置位后即便下面的取指纹失败，EXIT trap 也不会重复登出
-  cleaned=1
-
-  section '⑨ 无害性自证：Redis 白名单指纹（跑后）'
-  redis_keys > "$work_dir/keys-after.txt" || true
-  printf '  键数 = %s\n' "$(wc -l < "$work_dir/keys-after.txt" | tr -d ' ')"
-  if [ -s "$work_dir/keys-after.txt" ]; then
-    sed 's/^/  /' "$work_dir/keys-after.txt"
-  else
-    printf '  （空）\n'
-  fi
-
-  section '指纹差异（跑后 vs 跑前）'
-  if [ -f "$work_dir/keys-before.txt" ]; then
-    printf '  跑后有、跑前没有的键：\n'
-    comm -13 "$work_dir/keys-before.txt" "$work_dir/keys-after.txt" | sed 's/^/    /'
-    printf '  跑前有、跑后没有的键：\n'
-    comm -23 "$work_dir/keys-before.txt" "$work_dir/keys-after.txt" | sed 's/^/    /'
-  else
-    printf '  （跑前指纹没取到，无法比较 —— 说明脚本在取指纹之前就退出了）\n'
-  fi
-  printf '  本次自建 jti 的存活检查（EXISTS，1 = 键还在）：\n'
-  if [ -n "$admin_jti" ]; then
-    printf '    admin jti=%s → %s\n' "$admin_jti" "$(redis_exists "nexus:auth:token:${admin_jti}" || echo '?')"
-  fi
-  if [ -n "$demo_jti" ]; then
-    printf '    demo  jti=%s → %s\n' "$demo_jti" "$(redis_exists "nexus:auth:token:${demo_jti}" || echo '?')"
-  fi
-}
-
-finish() {  # finish <退出码>
-  cleanup_and_fingerprint
-  cleaned=1
-  exit "$1"
-}
-
-cleanup() {  # EXIT trap：只在"非正常路径"（set -e 触发 / 信号）时兜底
-  local rc=$?
-  if [ "$cleaned" -eq 0 ]; then
-    printf '\n[清理] 非正常路径退出（退出码 %s）—— 兜底执行清理与指纹，见下\n' "$rc"
-    cleanup_and_fingerprint || true
-  fi
-  if [ -n "$work_dir" ]; then
-    rm -rf "$work_dir"
-  fi
-  exit "$rc"
-}
-trap cleanup EXIT
-# 信号本身不会触发 EXIT trap（实测），先转成一次正常退出，再交给 EXIT trap 兜底
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-section '前置检查（只读）'
-for tool in python3 curl docker; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    printf '错误：找不到 %s。本脚本要在 WSL（发行版 nexus-agent-workbench）内跑。\n' "$tool" >&2
-    exit 3
-  fi
-done
-printf '  工具：python3 / curl / docker 均可用\n'
-printf '  后端地址：%s（端口取自 %s 的 BACKEND_PORT；可用环境变量 TC01_BASE_URL 覆盖）\n' "$BASE_URL" "$ENV_FILE"
+tc_preflight_tools
 
 if [ -n "${NEXUS_JWT_SECRET:-}" ]; then
   secret="$NEXUS_JWT_SECRET"
   secret_source='环境变量 NEXUS_JWT_SECRET'
 else
-  secret="$DEV_SECRET"
+  secret="$TC_DEV_JWT_SECRET"
   secret_source='application.yml 的 dev 默认值（NEXUS_JWT_SECRET 未设置）'
 fi
 printf '  本地夹具密钥来源：%s\n' "$secret_source"
 printf '  本地夹具密钥指纹（sha256 前 8 位）：%s\n' "$(printf '%s' "$secret" | sha256sum | cut -c1-8)"
 
-redis_ping="$(docker exec "$REDIS_CONTAINER" redis-cli ping 2>&1 | tr -d '\r' || true)"
-if [ "$redis_ping" != 'PONG' ]; then
-  printf '错误：取不到 Redis 指纹（docker exec %s redis-cli ping → %s）。\n' "$REDIS_CONTAINER" "$redis_ping" >&2
-  printf '      无害性自证（§2 第 3 条）依赖它，所以**先停下**，一个键都不写。\n' >&2
-  exit 3
-fi
-printf '  Redis：docker exec %s redis-cli ping → PONG\n' "$REDIS_CONTAINER"
+tc_preflight_services
+tc_fingerprint_before '① 指纹（跑前）：Redis 白名单 nexus:auth:token:* 键清单'
 
-health_code="$(curl -s -o "$work_dir/health.json" -w '%{http_code}' "${BASE_URL}/api/health" || true)"
-if [ "$health_code" != '200' ]; then
-  printf '错误：GET %s/api/health → HTTP %s（预期 200）。原始响应：\n' "$BASE_URL" "$health_code" >&2
-  show_body "$work_dir/health.json" >&2
-  printf '\n      环境未就绪 —— 先跑 ./scripts/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
-  exit 3
-fi
-printf '  后端：GET %s/api/health → HTTP 200\n' "$BASE_URL"
-
-section '① 指纹（跑前）：Redis 白名单 nexus:auth:token:* 键清单'
-redis_keys > "$work_dir/keys-before.txt"
-printf '  键数 = %s\n' "$(wc -l < "$work_dir/keys-before.txt" | tr -d ' ')"
-if [ -s "$work_dir/keys-before.txt" ]; then
-  sed 's/^/  /' "$work_dir/keys-before.txt"
-else
-  printf '  （空）\n'
-fi
-
-section '② 真登录 admin（租户 default；会写 1 个 Redis 白名单键）'
-post_login '{"username":"admin","password":"admin123"}' "$work_dir/admin-login.json"
-admin_token="$(json_get "$work_dir/admin-login.json" data.token || true)"
+tc_section '② 真登录 admin（租户 default；会写 1 个 Redis 白名单键）'
+tc_post_login '{"username":"admin","password":"admin123"}' "$tc_work_dir/admin-login.json"
+admin_token="$(tc_json_get "$tc_work_dir/admin-login.json" data.token || true)"
 if [ -z "$admin_token" ]; then
   printf '\n错误：admin 的登录响应里没有 data.token（原始响应见上）—— 机械动作做不下去。\n' >&2
-  finish 4
+  tc_finish 4
 fi
-admin_jti="$(token_claim "$admin_token" jti || true)"
-admin_claim_tenant="$(token_claim "$admin_token" tenantId || true)"
+tc_note_jti 'admin' "$(tc_token_claim "$admin_token" jti || true)"
 printf '  admin token 长度 = %s\n' "${#admin_token}"
 printf '  admin token 载荷（本地解码，仅观察）：sub=%s tenantId=%s username=%s jti=%s\n' \
-  "$(token_claim "$admin_token" sub)" "$admin_claim_tenant" \
-  "$(token_claim "$admin_token" username)" "$admin_jti"
+  "$(tc_token_claim "$admin_token" sub)" "$(tc_token_claim "$admin_token" tenantId)" \
+  "$(tc_token_claim "$admin_token" username)" "$(tc_token_claim "$admin_token" jti)"
 
-section '③ 真登录 demo（租户 demo；会写 1 个 Redis 白名单键）'
-post_login '{"username":"demo","password":"demo123"}' "$work_dir/demo-login.json"
-demo_token="$(json_get "$work_dir/demo-login.json" data.token || true)"
+tc_section '③ 真登录 demo（租户 demo；会写 1 个 Redis 白名单键）'
+tc_post_login '{"username":"demo","password":"demo123"}' "$tc_work_dir/demo-login.json"
+demo_token="$(tc_json_get "$tc_work_dir/demo-login.json" data.token || true)"
 if [ -z "$demo_token" ]; then
   printf '\n错误：demo 的登录响应里没有 data.token（原始响应见上）—— 机械动作做不下去。\n' >&2
-  finish 4
+  tc_finish 4
 fi
-demo_jti="$(token_claim "$demo_token" jti || true)"
-demo_claim_tenant="$(token_claim "$demo_token" tenantId || true)"
+tc_note_jti 'demo' "$(tc_token_claim "$demo_token" jti || true)"
+demo_claim_tenant="$(tc_token_claim "$demo_token" tenantId || true)"
 printf '  demo token 长度 = %s\n' "${#demo_token}"
 printf '  demo token 载荷（本地解码，仅观察）：sub=%s tenantId=%s username=%s jti=%s\n' \
-  "$(token_claim "$demo_token" sub)" "$demo_claim_tenant" \
-  "$(token_claim "$demo_token" username)" "$demo_jti"
+  "$(tc_token_claim "$demo_token" sub)" "$demo_claim_tenant" \
+  "$(tc_token_claim "$demo_token" username)" "$(tc_token_claim "$demo_token" jti)"
 
-section '④ 重签方向 A：admin 的身份（sub/jti）+ demo 的租户（本地计算，不写任何状态）'
+tc_section '④ 重签方向 A：admin 的身份（sub/jti）+ demo 的租户（本地计算，不写任何状态）'
 if ! forged_a="$(forge_token "$secret" "$admin_token" "$demo_claim_tenant" '方向A')"; then
   printf '\n错误：夹具前提不成立（原因见上）—— 本用例**不给结论**。\n' >&2
-  finish 3
+  tc_finish 3
 fi
 
-section '⑤ 用方向 A 的 token 调 GET /api/auth/me'
-get_me '方向A：admin 的身份 + demo 的租户' "$forged_a" "$work_dir/forged-a-me.json"
+tc_section '⑤ 用方向 A 的 token 调 GET /api/auth/me'
+tc_get_me '方向A：admin 的身份 + demo 的租户' "$forged_a" "$tc_work_dir/forged-a-me.json"
 
-section '⑥ 重签方向 B：demo 的身份（sub/jti）+ admin 的租户（本地计算，不写任何状态）'
+tc_section '⑥ 重签方向 B：demo 的身份（sub/jti）+ admin 的租户（本地计算，不写任何状态）'
+admin_claim_tenant="$(tc_token_claim "$admin_token" tenantId || true)"
 if ! forged_b="$(forge_token "$secret" "$demo_token" "$admin_claim_tenant" '方向B')"; then
   printf '\n错误：夹具前提不成立（原因见上）—— 本用例**不给结论**。\n' >&2
-  finish 3
+  tc_finish 3
 fi
 
-section '⑦ 用方向 B 的 token 调 GET /api/auth/me'
-get_me '方向B：demo 的身份 + admin 的租户' "$forged_b" "$work_dir/forged-b-me.json"
+tc_section '⑦ 用方向 B 的 token 调 GET /api/auth/me'
+tc_get_me '方向B：demo 的身份 + admin 的租户' "$forged_b" "$tc_work_dir/forged-b-me.json"
 
-finish 0
+tc_finish 0

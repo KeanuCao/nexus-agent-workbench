@@ -41,6 +41,9 @@
 set -euo pipefail
 
 # application.yml:111 的 dev 默认值（与后端同源；后端若被环境变量覆盖，见文件头说明）
+# ⚠️ 同一个常量在 qa/scripts/lib/tc-common.sh 里还有一份（TC_DEV_JWT_SECRET）——
+#    本夹具是**纯本地计算**、刻意不 source 任何库（不依赖仓库布局），所以两份要一起改。
+#    （那份不一致时会被 tc01-cross-tenant-token.sh 的「夹具密钥自检」以退出码 3 拦住，不会假通过。）
 readonly DEV_SECRET='nexus-dev-only-jwt-secret-please-override-in-any-real-environment'
 
 readonly USAGE='用法：tc01-expired-token.sh [--expired-by <秒>]
