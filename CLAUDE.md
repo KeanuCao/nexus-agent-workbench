@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | **backend-engineer** | Java 后端业务代码（Controller/Service/Mapper）；DB Patches；API 契约文档 | ❌ 不打包 ❌ 不启动服务 ❌ 不联调验证 | 后端业务开发、数据库补丁、API 文档输出 |
 | **frontend-engineer** | Vue 3 页面、Pinia Store、Axios 拦截器、路由守卫；**必须先读 API 文档** | ❌ 不打包 ❌ 不预览 ❌ 不 Mock 数据 ❌ 不改 CORS | 前端页面开发、状态管理、拦截器配置 |
 | **devops-engineer** | Docker Compose 编排、db-patch 执行、环境脚本、前后端项目骨架、构建容器 | ❌ 不写业务代码 ❌ 不修改已发布的历史补丁 | 环境搭建、部署脚本、打包容器、集成联调 |
-| **qa-engineer** | **测试案例（TC-XX）设计与维护**、单元测试 (JUnit/Vitest)、E2E 测试 (Playwright)、覆盖率分析 | ❌ 不写业务代码 ❌ 不擅自起停环境 | 测试案例编写、自动化测试实现 |
+| **qa-engineer** | **测试案例（TC-XX）设计与维护**、单元测试 (JUnit/Vitest)、E2E 测试 (Playwright)、覆盖率分析 | ❌ 不写业务代码 ❌ 不擅自起停环境 ❌ **不碰业务状态**（Test Harmlessness，资质性红线，见其 charter） | 测试案例编写、自动化测试实现 |
 
 ### Agent 协作流程（标准链路）
 ```mermaid
@@ -67,10 +67,16 @@ CLAUDE.md 是"宪法"：编码规范、技术选型、禁止事项以本文档�
  │   ├── api                 # 后端接口封装 (Axios)
  │   ├── views               # 页面 (登录、控制台、知识库管理、Agent编排)
  │   ├── components          # 公共组件
- │   └── __tests__           # 前端组件与 E2E 测试代码 (Vitest + Playwright)
+ │   └── __tests__           # 前端组件单测 (Vitest)。⚠️ 尚未落地（目录不存在、依赖未装）：
+                            #   docs/design/01 §D8 决定本阶段不引 Vitest/Playwright；
+                            #   E2E 待解禁后落 /qa/e2e，不放在本目录、也不与组件单测混放
 /docker-compose             # 环境依赖 (PostgreSQL+pgvector, Redis, Ollama, 构建容器)
 /db-patch                   # 数据库补丁 (命名规则见 db-patch 工作流章节)
 /scripts                    # 环境检查与一键启动脚本 (check-env.sh 含容器健康检查 / up.sh)
+/qa                         # 测试资产：夹具 fixtures（探针补丁/种子 SQL）+ 用例辅助脚本 + E2E。
+                            #   不属于生产链路（up.sh / 镜像构建 / db-patch 迁移都不读它）；
+                            #   测试夹具禁止放 scripts/ db-patch/ docker-compose/（那些会被生产链路消费）。
+                            #   约定见 qa/README.md，纪律见 qa-engineer charter 的《Test Harmlessness》
 /docs/test-cases            # 每个阶段交付后的测试案例设计 (TC-00, TC-01, ...)
 ```
 
