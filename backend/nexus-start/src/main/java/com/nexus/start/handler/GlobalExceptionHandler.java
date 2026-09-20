@@ -7,11 +7,17 @@ import com.nexus.common.result.Result;
 import com.nexus.common.result.ResultCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+
+import java.util.List;
 
 /**
  * 全局异常处理：保证任何异常出口都返回统一响应体 {@link Result}，且不泄露内部信息。
@@ -22,6 +28,9 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
  *     <tr><th>异常类型</th><th>HTTP</th><th>code</th><th>日志级别</th><th>msg 是否可展示</th></tr>
  *     <tr><td>{@link BusinessException}</td><td>200</td><td>业务码（非 0）</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link UnauthorizedException}</td><td>401</td><td>40100 / 40101 / 40102</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link MethodArgumentNotValidException}</td><td>200</td><td>40001</td><td>warn（打字段级明细，不打堆栈）</td><td>是</td></tr>
+ *     <tr><td>{@link HttpMessageNotReadableException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link TaskRejectedException}</td><td>503</td><td>20100</td><td>warn（异常 message 自带线程池现场）</td><td>是</td></tr>
  *     <tr><td>{@link SystemException}</td><td>500</td><td>50000</td><td>error（含堆栈）</td><td>否，只回通用话术</td></tr>
  *     <tr><td>{@link NoResourceFoundException}</td><td>404</td><td>40400</td><td>warn</td><td>是</td></tr>
  *     <tr><td>其他 {@link Exception}</td><td>500</td><td>50000</td><td>error（含堆栈）</td><td>否，只回通用话术</td></tr>
@@ -36,6 +45,11 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
  * 注意本出口只覆盖<b>进入 MVC 之后</b>抛出的未认证异常；
  * 过滤器（DispatcherServlet 之前）的 401 由 {@code JwtAuthenticationFilter} 自己序列化，
  * 两处出口的响应体结构一致，均为 {@code Result}。
+ *
+ * <p>校验失败为何是 200 + 40001 而非 400（阶段2 新增）：与业务异常同一条理由 ——
+ * {@code docs/api/README.md} §1.2 已把「参数不合法」归入"业务失败 → HTTP 200"，
+ * 且 openapi.yaml 头部只列举了 401/404/500/503。选 400 就必须在同一次改动里改这两份
+ * 已发布契约（见 {@link ResultCode#PARAM_INVALID}）。
  *
  * @author nexus
  */
@@ -73,6 +87,69 @@ public class GlobalExceptionHandler {
         log.warn("未认证：code={} msg={}", ex.getCode(), ex.getMessage());
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                 .body(Result.failure(ex.getCode(), ex.getMessage()));
+    }
+
+    /**
+     * 请求体校验失败：{@code @Valid} 拦下的 Bean Validation 违规（阶段2 新增）。
+     *
+     * <p>出口是 <b>HTTP 200 + 40001</b>，理由是"参数不合法"属业务失败（见类注释）。
+     * 返回的 {@code msg} 用枚举自带的通用文案，<b>不</b>把字段级明细回给前端 ——
+     * 明细只进日志（warn 级、不打堆栈），既够定位问题，又不引入"把校验器实现细节当契约"的耦合。
+     *
+     * <p>本出口存在的<b>前提</b>是运行期真有校验实现：Boot 3 的 starter-web 不带
+     * hibernate-validator，缺了它 {@code @Valid} 会静默失效，本方法成死代码。
+     * 故 nexus-module-ai 显式声明了 {@code spring-boot-starter-validation}（见其 pom 注释）。
+     *
+     * @param ex 参数校验异常
+     * @return HTTP 200 + 40001
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<Result<Void>> handleMethodArgumentNotValid(MethodArgumentNotValidException ex) {
+        // 刻意只记"哪个字段违反了哪条约束"，不记字段值：校验失败的入参可能含用户正文
+        // （阶段2 的对话消息就是这么用的），记进日志等于把隐私与日志体积问题一起引进来。
+        log.warn("参数校验失败：{}", describeFieldErrors(ex.getFieldErrors()));
+        return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+    }
+
+    /**
+     * 请求体不可读：JSON 畸形、类型不匹配等（阶段2 新增）。
+     *
+     * <p>与 {@link #handleMethodArgumentNotValid} 同归 40001 + HTTP 200 —— 对前端而言
+     * "JSON 都没解析出来"与"解析出来了但没通过校验"是同一种处置（改请求重发）。
+     *
+     * <p>它同时是"契约要 10200、而框架先抛异常"那条的兜底：若把请求体里的
+     * {@code modelType} 直接声明成枚举类型，未知取值会走到这里（500 + 50000 的旧行为）——
+     * 现在的正解是 DTO 用 {@code String} 承接、由业务层显式 parse（见 ChatRequest）。
+     *
+     * @param ex 请求体不可读异常
+     * @return HTTP 200 + 40001
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Result<Void>> handleHttpMessageNotReadable(HttpMessageNotReadableException ex) {
+        log.warn("请求体不可读（JSON 畸形或类型不匹配）：{}", ex.getMessage());
+        return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+    }
+
+    /**
+     * 模型线程池已满（阶段2 新增）：唯一一个走 <b>HTTP 503</b> 的业务侧可用性出口。
+     *
+     * <p>为什么单开一条而不是落兜底：兜底是 500 + 50000，会把"本服务此刻并发满了、稍后重试即可"
+     * 报成"系统故障"。契约（{@code docs/api/README.md} §6.3）把这一格明确写成 <b>503 + 20100</b>，
+     * 与 {@code /api/health} 的 503 同一条思路：<b>HTTP 状态码承担可用性语义，业务码承担具体原因</b>。
+     * 这也是"全异步"口径下唯一还能给 503 的失败点 —— 池满是开流前同步可判的，
+     * 而上游不可达只在工作线程上才暴露，那时响应头已经发出去了（只能写 {@code error} 帧）。
+     *
+     * <p>warn 级、不打堆栈：它不是缺陷，是容量信号。异常的 message 自带线程池现场
+     * （{@code pool size / active threads / queued tasks}），排查"为什么池满了"看它就够。
+     *
+     * @param ex 线程池拒绝执行异常
+     * @return HTTP 503 + 20100
+     */
+    @ExceptionHandler(TaskRejectedException.class)
+    public ResponseEntity<Result<Void>> handleTaskRejectedException(TaskRejectedException ex) {
+        log.warn("模型线程池已满，拒绝本次对话：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Result.failure(ResultCode.CHAT_UPSTREAM_UNAVAILABLE));
     }
 
     /**
@@ -116,5 +193,28 @@ public class GlobalExceptionHandler {
         log.error("未预期异常：type={}", ex.getClass().getName(), ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Result.failure(ResultCode.SYSTEM_ERROR));
+    }
+
+    /**
+     * 把字段级校验失败压成一行日志文本，形如 {@code messages size must be between 1 and ...; modelType ...}。
+     *
+     * <p>用 {@link StringBuilder} 而非 {@code stream().collect(joining())}：本方法在异常路径上被调用，
+     * 不值得为一行日志引入流式写法（且异常对象可能很大，多一次装箱没有必要）。
+     *
+     * @param fieldErrors 字段错误列表
+     * @return 单行描述；无字段错误时返回 {@code "(无字段级明细)"}
+     */
+    private static String describeFieldErrors(List<FieldError> fieldErrors) {
+        if (fieldErrors.isEmpty()) {
+            return "(无字段级明细)";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (FieldError fieldError : fieldErrors) {
+            if (builder.length() > 0) {
+                builder.append("; ");
+            }
+            builder.append(fieldError.getField()).append(' ').append(fieldError.getDefaultMessage());
+        }
+        return builder.toString();
     }
 }

@@ -1,9 +1,9 @@
-# 后端 API 契约（阶段0 + 阶段1）
+# 后端 API 契约（阶段0 + 阶段1 + 阶段2）
 
-> 面向 `frontend-engineer`（§1~§3 + **§5 认证接口**）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
+> 面向 `frontend-engineer`（§1~§3 + **§5 认证接口** + **§6 对话接口**）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
 > 机器可读版本：[`openapi.yaml`](./openapi.yaml)（OpenAPI 3.0.3）。
-> 契约来源：`docs/design/00-环境与部署.md` §5.3 + `docs/design/01-多租户与认证.md` §5（已确认设计）；
-> 实现：`backend/nexus-start`（健康检查）+ `backend/nexus-module-system`（认证）。
+> 契约来源：`docs/design/00-环境与部署.md` §5.3 + `docs/design/01-多租户与认证.md` §5 + `docs/design/02-统一AI网关.md` §3（均已确认）；
+> 实现：`backend/nexus-start`（健康检查）+ `backend/nexus-module-system`（认证）+ `backend/nexus-module-ai`（对话）。
 > 更新纪律：协议变更**先改本文件**再改代码，前后端以本文件为唯一事实源。
 > ⚠️ **本文件若自相矛盾，以"字段说明"为准、"代码示例"次之，但必须上报矛盾点**（并发起修正），
 > 不得默不作声地挑一条照做 —— 实例：§5.2 的 `data.tokenType` 曾同时写着"固定 `Bearer`"与"不要硬编码"。
@@ -17,7 +17,8 @@
 | `openapi.yaml` | OpenAPI 3.0.3 规范，可直接导入 Apifox / Postman / 生成 TS 类型 |
 | `README.md` | 本文件：人工速查版（字段表、示例、错误码、常见坑）<br>§4 = 健康检查判据（0.3 的 `check-env.sh` / `check-health.sh` 照此写） |
 
-阶段0 只有系统级接口：`GET /api/health`。业务接口随阶段1（认证）、阶段2（AI 网关）等逐步补充。
+现有接口：`GET /api/health`（阶段0）、`/api/auth/login|logout|me`（阶段1）、
+`POST /api/chat/stream`（阶段2，**流式**，见 §6）。
 
 ---
 
@@ -69,6 +70,9 @@
 | 50000 | `SYSTEM_ERROR` | 500 | 系统繁忙，请稍后重试 |
 
 编码分段（按模块细分，**不复用**上表已有值）：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+
+> 阶段2 新增的 3 个码（`40001` / `10200` / `20100`）列在 **§6.4**（对话接口那一节），
+> 与上表一起构成完整错误码表 —— 上表保持"阶段0 + 阶段1 已落地"的原貌不动，避免改动被 `scripts/` 引用的编号。
 
 三条 401 分开的理由：**处置动作不同** —— `40100` 是客户端压根没带 token（接入问题）；
 `40102` 过期，重新登录即可；`40101` 是"token 签名不对"或"Redis 白名单里已无此 jti（已登出/被清）"，
@@ -671,11 +675,214 @@ if (status === 401) {
 
 ---
 
-## 6. 变更记录
+## 6. 对话接口（阶段2）
+
+> 契约来源：`docs/design/02-统一AI网关.md` §3（已确认设计）；实现：`backend/nexus-module-ai`
+> （`ChatController` / `ChatService` / `ModelRouter` / `OllamaService` / `DeepSeekService`）。
+> ⚠️ 这是本项目第一个**流式**接口：响应体不是一次性的 JSON，而是 `text/event-stream` 事件流。
+> 但**每一帧的 `data` 仍是统一响应体 `Result<T>`**（设计决策 D4）——
+> 这**不是**给「所有 API 返回 `Result`」开例外，而是把统一响应体搬进了事件帧，前端复用同一套解包/成功判定。
+
+### 6.1 `POST /api/chat/stream` —— 请求
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/chat/stream`（前端 `baseURL='/api'` + `url='/chat/stream'`） |
+| Method | `POST`（消息内容在 body：不进 URL、也不进访问日志） |
+| `consumes` | `application/json`（显式声明） |
+| `produces` | `text/event-stream`（显式声明） |
+| 鉴权 | **必需** `Authorization: Bearer <token>`；**不在白名单**（漏 token → HTTP 401 + `40100`） |
+| 成功 | HTTP **200** + `Content-Type: text/event-stream` + 事件流（§6.2） |
+
+请求头两个都要带，缺一不可（前端不用 axios，**这两个头要自己补**，见设计 §5.1-2）：
+
+| Header | 缺了会怎样 |
+| --- | --- |
+| `Content-Type: application/json` | 后端按契约声明了 `consumes` → **HTTP 415**，且响应体不是 `Result`，会把排查方向带偏 |
+| `Authorization: Bearer <token>` | HTTP 401 + `40100` |
+
+请求体：
+
+```json
+{
+  "messages": [
+    { "role": "user",      "content": "你好" },
+    { "role": "assistant", "content": "你好！有什么可以帮你的？" },
+    { "role": "user",      "content": "介绍一下你自己" }
+  ],
+  "modelType": "OLLAMA"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `messages` | array | 是 | 会话历史**全量上送**（无状态后端，不落库）。至少 1 条，最后一条必须是 `role=user` |
+| `messages[].role` | string | 是 | `user` / `assistant`。本阶段**不支持** `system` —— 传其他值（含 `system`）都是 `40001` |
+| `messages[].content` | string | 是 | 非空、去空白后非空 |
+| `modelType` | string | **否** | `OLLAMA` / `DEEPSEEK`；**`null` 或缺省 = 由后端决定**（本轮解析为默认模型）。未知取值 → `10200` |
+
+#### 三条补充约束
+
+1. **允许连续同角色。** 失败或停止后前端若回滚该轮 assistant 消息，数组会以 `role=user` 结尾，
+   下一次提问再 push 一条 `user` 就成了连续两条 —— 这是**契约允许**的（两个上游都接受），
+   前端不必为此做特殊处理。
+2. **`modelType` 用 `String` 承接、由后端 `ModelType.parse()` 转枚举。** 后端 DTO **不**把该字段声明为枚举：
+   Jackson 遇未知值会抛 `HttpMessageNotReadableException` → 落兜底处理器 → **500 + 50000**，
+   而不是契约要的 `10200`。
+3. **`content` 上限：单条 8KB、总长 64KB**（按 UTF-8 字节数计，超出 → `40001`）。
+   防的是误贴大段文本把上游上下文撑爆 —— 那种情况下上游报错会把排查方向带偏。
+
+### 6.2 事件帧格式（四种，顺序固定）
+
+```
+event: meta
+data: {"code":0,"msg":"success","data":{"modelType":"OLLAMA","model":"qwen2.5:7b","servedBy":"user-selected"}}
+
+event: delta
+data: {"code":0,"msg":"success","data":{"content":"你"}}
+
+event: delta
+data: {"code":0,"msg":"success","data":{"content":"好"}}
+
+event: done
+data: {"code":0,"msg":"success","data":{"finishReason":"stop","deltaCount":2,"durationMs":842}}
+```
+
+| 事件名 | 时机 | `data` 载荷 | 说明 |
+| --- | --- | --- | --- |
+| `meta` | **第一帧，仅有且必有一帧**（**成功路径**上；见下方注） | `modelType`、`model`（**真实模型名**）、`servedBy` | 见下方**时序规则 1**。`servedBy` 本轮取值 `user-selected` / `default` |
+| `delta` | 0~N 帧 | `content`（增量文本片段，**不是累积全文**） | 前端做**追加**，不做替换 |
+| `done` | 正常结束 | `finishReason`、`deltaCount`、`durationMs` | `finishReason`：`stop`（模型正常结束）/ `length`（触达 token 上限）/ `timeout`（**服务端软上限**截断） |
+| `error` | 异常结束 | `{"deltaCount": N}` | **形状定死为对象**（不是 `null`）：前端靠它知道"已经吐了多少字" |
+
+> ⚠️ **两处最容易读错的边界**（前端解析器必须容忍，否则会把正常情况当成故障）：
+> 1. `meta` 的「必有」只对**成功路径**成立：**上游一个字都没吐就失败**时，这条流只有一帧 `error`
+>    —— `meta` 的语义是"这次用了哪个模型"，而上游根本没给出响应。**不要断言"第一帧一定是 meta"**。
+> 2. **服务端软上限截断走 `done`、不走 `error`**（`finishReason=timeout`，`code=0`）：它是"我们主动收尾"，
+>    不是失败；失败形态表见 §6.3。
+
+`data` 字段定义：
+
+| 帧 | 字段 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `meta` | `data.modelType` | string | `OLLAMA` / `DEEPSEEK`（枚举名） |
+| `meta` | `data.model` | string | 上游**真实模型名**：`qwen2.5:7b` / `deepseek-chat` |
+| `meta` | `data.servedBy` | string | `user-selected`（用户选的）/ `default`（用户没选，后端取默认） |
+| `delta` | `data.content` | string | 增量片段；单帧可能是**一个汉字** |
+| `done` | `data.finishReason` | string | `stop` / `length` / `timeout` |
+| `done` | `data.deltaCount` | integer | 本次共发出多少帧 `delta` |
+| `done` | `data.durationMs` | integer | 从开始到结束的毫秒数 |
+| `error` | `data.deltaCount` | integer | 已经发出的 `delta` 帧数（可能为 `0`，此时 `data` 仍是对象而非 `null`） |
+
+> **机器可读版（`openapi.yaml`）的对应关系**：上表四种帧各有一个 schema —
+> `ChatStreamMeta` / `ChatStreamDelta` / `ChatStreamDone` / `ChatStreamError`
+> （OpenAPI 3.0.3 无法把 schema 挂到 SSE 事件上，故对应关系写在这里与 `openapi.yaml` 的
+> `/api/chat/stream` 描述里各写一份）。**本节与这四份 schema 必须逐项一致**：任何一帧改了字段，
+> 两处同改；少一个 schema，就等于"按 openapi 生成类型的人会漏掉那种帧"。
+> `data.servedBy` 在 openapi 里刻意是 `string` 而不是 enum（取值集合会随自动路由扩大，见设计 §10.1）。
+
+#### 三条时序规则
+
+1. **`meta` 的发出时机**：「开流前」指的是**对客户端开流前**、而非「调用上游前」。具体定为：
+   **在首次取到上游响应（首个分片）之后、第一个 `delta` 之前发出，且只发一次。**
+   这样既满足"模型必须在有内容前定下"，也不会因为上游连接慢而让客户端干等。
+2. **终止帧唯一**：`done` **xor** `error`，有且仅有一个；服务端发完终止帧立即 `complete()`。
+3. **SSE 字段解析**（跨端协议边界，前后端都要遵守）：
+   - 取 `event:` / `data:` 后的值时，**先剥掉至多一个前导空格**再 trim。各家实现
+     （含 Spring 的 `SseEmitter`）是否带空格并不统一 —— 按示例字面写 `slice(6)` 会因一个空格
+     **匹配不到任何事件名**，表现为页面一直空白而 curl 完全正常。
+   - 行终止符按规范允许 `\r\n` / `\r` / `\n` 三种；零成本兜底：入缓冲区时先 `replace(/\r\n/g, '\n')` 归一。
+
+#### 一条解析前提（破坏它立刻出坑）
+
+**`data:` 行里不会出现真换行。** 因为每帧 `data` 都是 JSON，Jackson 会把内容里的换行序列化成
+`\n` 两个字符、引号转成 `\"` —— **所以换行不需要额外转义**（手写解析器的前提）。
+⚠️ 两个前提一旦破坏立刻出坑：① 若 `delta` 改成发裸文本；② **绝不能为调试开启 Jackson 美化输出**
+（`indent-output` 会往 `data:` 里塞真换行）。当前 `application.yml` 无任何 jackson 配置 = 安全默认值。
+
+### 6.3 失败形态总表（**全异步口径**）
+
+`SseEmitter` 返回的那一刻，HTTP 响应头（`200` + `text/event-stream`）**已经发出去了**。
+据此把所有失败分成两侧：
+
+- **开流前**（控制器**尚未返回** emitter）→ 走既有 `GlobalExceptionHandler`，返回正常 `Result<T>` + 对应 HTTP 状态码。
+- **开流后**（emitter 已交给容器）→ 状态码无法再改，**一律只能写 `event: error` 帧**。
+
+| 失败点 | 时机 | 载体 | HTTP | code |
+| --- | --- | --- | --- | --- |
+| 无 token / 过期 / 伪造 | 开流前 | `Result` | 401 | `40100` / `40102` / `40101`（过滤器出口，见 §1.2） |
+| 请求体校验失败 / JSON 畸形 | 开流前 | `Result` | **200** | `40001` |
+| `modelType` 取值未知 | 开流前 | `Result` | **200** | `10200` |
+| **模型线程池已满** | 开流前 | `Result` | **503** | `20100` |
+| **上游模型不可达 / 超时** | 开流后 | `event: error` 帧 | *(已是 200)* | `20100` |
+| **上游中途报错** | 开流后 | `event: error` 帧 | *(已是 200)* | `20100` |
+| **服务端软上限截断** | 开流后 | `event: done` 帧 + `finishReason=timeout` | *(已是 200)* | **`0`**（不是失败） |
+| 未预期的内部异常 | 开流后 | `event: error` 帧 | *(已是 200)* | `50000` |
+| 客户端主动断开 | — | 无（连接已没了） | — | 服务端在 `send()` 抛异常时取消上游并释放资源 |
+
+> **`20100` 有两种载体**（503 + `Result`、200 + `error` 帧），这是**有意的**：池满是本服务侧的、
+> 同步可判的，能给出真正的 503；上游不可达只在工作线程上才暴露，那时响应头已发。
+> 前端**两种都要处理**（成本极低：先看 `Content-Type`，再按帧解析）——
+> 判断响应类型要用 `includes('application/json')`，因为 Spring 会给 `text/event-stream` 带上 `;charset=UTF-8`，全等比较会误判。
+> **为什么不再加一个码区分池满**：两者的用户动作相同（稍后重试），而排查方向已由 HTTP 状态码区分开
+> （503 且有 `Result` = 本服务；200 + `error` 帧 = 上游）。
+
+**流的三个出口**（前端任一即收尾并复位按钮）：收到 `done`、收到 `error`、
+**或 `reader.read()` 返回 `done`（EOF）**。第三项不可省：后端崩溃或 nginx 断流时，连接会在
+**没有任何终止帧**的情况下 EOF，若只认前两个，页面会永久停在"生成中"。EOF 且无终止帧时按 `error` 展示通用文案。
+
+### 6.4 错误码增量（**不复用**既有值）
+
+| code | 常量（后端 `ResultCode`） | 配套 HTTP | `msg` | 归属 |
+| --- | --- | --- | --- | --- |
+| 40001 | `PARAM_INVALID` | **200** | 请求参数不合法 | 4xxxx 请求侧 |
+| 10200 | `CHAT_MODEL_UNSUPPORTED` | 200 | 不支持的模型类型 | 1xxxx 业务 |
+| 20100 | `CHAT_UPSTREAM_UNAVAILABLE` | 503 / *流内* | 模型服务暂时不可用，请稍后重试 | 2xxxx 可用性 |
+
+**`40001` 为什么配套 HTTP 200 而不是 400**：§1.2 的表格已把「参数不合法」明确归入"业务失败 → HTTP 200"，
+并给了理由（业务失败不污染前端的 axios 失败分支）；`openapi.yaml` 头部同样只列举了 401/404/500/503。
+选 400 就必须**在同一次改动里**改这两份已发布契约 —— 收益不抵成本。**保持 200 + 40001，零契约改动。**
+
+### 6.5 curl 验证
+
+> ⚠️ **端口必须从唯一真源取，不要写死** —— `.env` 是端口唯一真源（`docker-compose/.env` 的 `BACKEND_PORT`）。
+
+```bash
+# 前置：进入仓库根目录；后端宿主端口从 docker-compose/.env 取
+cd /c/wp/nexus-agent-workbench
+BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
+
+# ① 拿 token（账号见 §5.5 开发态演示账号）
+TOKEN=$(curl -s -X POST "http://localhost:${BACKEND_PORT}/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+
+# ② 流式对话（-N 关掉 curl 自身缓冲，否则看不出增量）
+curl -N -X POST "http://localhost:${BACKEND_PORT}/api/chat/stream" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"用三句话介绍杭州"}],"modelType":"OLLAMA"}'
+```
+
+**判据**：`meta` 帧立刻出现，随后 `delta` 帧**逐条随打随出**（不是等几秒后一次性倾泻）
+—— 这就是「可见增量分片」的全部含义。
+
+> `grep -o '"token":"[^"]*"'` 不会误命中 `"tokenType":"Bearer"`（正则要求 `token` 后紧跟引号）。
+> ⚠️ **SSE 的验收与排查一律走前端端口 8088（nginx）**：nginx 默认会缓冲上游响应，
+> 不关 `proxy_buffering` 时会退化成"一次性返回"，而**直连后端端口与后端日志都完全正常**；
+> 反过来，用 Vite dev（5173）判定"SSE 坏了"也不成立。两条链路的行为差异见设计文档 §6.5。
+
+---
+
+## 7. 变更记录
 
 | 日期 | 变更 | 说明 |
 | --- | --- | --- |
+| 2026-09-20 | **订正 §6.3 失败形态表**：拆开「上游中途报错 / 服务端软上限截断」这一格 | **原表自相矛盾**：它与 §6.2 冲突 —— §6.2 规定 `done` 帧的 `finishReason` 有 `timeout`（**服务端软上限**截断），而 §6.3 那一格把"软上限截断"与"上游中途报错"并列写成 `error` 帧（20100）。后端口径以 §6.2 为准（v1 实现即如此）：软上限截断 = `done` + `finishReason=timeout` + `code=0`，**不是失败**；只有"上游中途报错"才走 `error` 帧。这一格若留着，前端会把一次正常的主动收尾渲染成故障 |
+| 2026-09-20 | §6.2 补一条边界说明（`meta` 的「必有」只对成功路径成立） | 上游一个字都没吐就失败时，这条流只有一帧 `error`（没有 `meta`）—— 这符合时序规则 1（`meta` 卡在"首次取到上游响应"之后）。**前端不要断言"第一帧一定是 meta"**，否则"上游不可用"这种正常失败会变成解析异常 |
 | 2026-09-11 | 首版（阶段0 / 子任务 0.4） | `GET /api/health` + 统一响应体 + 错误码表 + 状态码策略 |
 | 2026-09-11 | 追加 §4 健康检查判据（面向 0.3 脚本） | 两个探活口分工、判定规则表、轮询策略、503 造法、模型就绪独立判据、不可用检查项、复核偏差 |
 | 2026-09-13 | 追加 §5 认证接口（阶段1） | `login` / `logout` / `me` 三个接口 + 6 个错误码（10100~10102、40100~40102）+ 401 状态码语义 + 演示账号；§1.4 的 `Authorization` 由"不需要"改为"除白名单外必需"。**§4 编号保持不变**（`scripts/` 三个脚本按编号引用），新章节追加在其后 |
 | 2026-09-17 | 订正 §5.3 一处的用例引用 | 「这是验收项 1.2-3 的判据」→「验收项『登出即失效』（`TC-01-1.2-5`）」。原因：`1.2-3` 在本仓库有**两套编号**（design §9 / task.2 指「task 第 3 条验收标准 = 登出即失效」，TC-01.md 指「第 3 条用例 = 过期 token」），只写 `1.2-3` 会指到错的那条。对照表见 `docs/test-cases/TC-01.md` 头部 |
+| 2026-09-20 | 追加 §6 对话接口（阶段2） | `POST /api/chat/stream`：请求契约（三条补充约束）+ 四种事件帧 + 三条时序规则 + 失败形态总表（**全异步口径**）+ 3 个新错误码（`40001`/`10200`/`20100`）+ curl 验证。**§1~§5 编号保持不变**（§4 被 `scripts/` 三个脚本按编号引用），原「变更记录」顺延为 §7。⚠️ 流式接口是本仓库第一个「响应体不是一次性 JSON」的接口，但**每帧 `data` 仍是 `Result<T>`** |
+| 2026-09-20 | §6.2 补「帧表 ↔ schema 对应关系」；`openapi.yaml` 补齐 `delta` 帧 schema | **缺口来源（前端实施时提出）**：`openapi.yaml` 只有 meta/done/error 三个 schema，缺 `ChatStreamDelta`，前端只好手工补了一个类型 —— 机器可读版与本节帧表不一致，按 openapi 生成类型的人会漏掉 `delta`。本次：① openapi 新增 `ChatStreamDelta`（`content`，注明是**增量**、不是累积全文）；② 四种帧 ↔ 四份 schema 的对应关系在 §6.2 与 openapi 的接口描述里各写一份（OpenAPI 3.0.3 无法把 schema 挂到 SSE 事件上）；③ `data.servedBy` 由紧 enum 放宽为 `string` —— 取值集合会随自动路由扩大（设计 §10.1 的 `fallback`），纯展示字段的容错优先于严格 |
