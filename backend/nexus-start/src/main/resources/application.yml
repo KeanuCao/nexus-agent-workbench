@@ -54,6 +54,14 @@ spring:
     # 优雅停机的等待上限，超时强制退出（容器 stop 默认 10s 宽限期，故取更小的 20s 上限亦安全）
     timeout-per-shutdown-phase: 20s
 
+  # ── MVC 异步（阶段2 流式对话）──
+  mvc:
+    async:
+      # 异步请求（SseEmitter）的总时长上限，毫秒。不配则走容器默认值，长回答会被**中途切断**。
+      # 与 nexus.ai.stream-timeout-ms 同量级：ChatService 构造 SseEmitter 时显式传后者，
+      # 不依赖这里的全局默认值兜底（两处同源，避免"配了个值却不生效"）。
+      request-timeout: 300000
+
 # ── MyBatis-Plus：阶段0 只接入依赖、不写 Mapper；多租户拦截器 / 分页 / 主键策略在阶段1 按设计文档补充 ──
 mybatis-plus:
   global-config:
@@ -111,6 +119,44 @@ nexus:
     secret: ${NEXUS_JWT_SECRET:nexus-dev-only-jwt-secret-please-override-in-any-real-environment}
     # 有效期（秒），同时也是 Redis 白名单的 TTL（两者必须一致）；7200 = 2 小时
     expire-seconds: 7200
+
+  # ── 统一 AI 网关（阶段2；绑定见 com.nexus.module.ai.gateway.config.AiProperties）──
+  ai:
+    # modelType 缺省（null）时用哪个 provider（决策 D6）；取值即 ModelType 枚举名。
+    # 注意：本键与下面几个 base-url / model 键**都不在** docker-compose 的 nexus-backend.environment 里
+    # —— 在 .env 里改它们容器收不到，只能改本文件的默认值（= 重打包 + 重启后端）。
+    # 唯一例外是 DEEPSEEK_API_KEY，它走 compose 的 env_file（直接注入容器，不经过 compose 插值）。
+    default-model: ${NEXUS_AI_DEFAULT_MODEL:OLLAMA}
+    # emitter 硬超时（毫秒）：到点连接直接结束，**发不出任何帧**。
+    # ChatService 构造 SseEmitter 时显式传它，与上面 spring.mvc.async.request-timeout 同源。
+    stream-timeout-ms: 300000
+    # 服务端软上限（毫秒）：自己的定时任务，在硬超时**之前**触发，发 done 且 finishReason=timeout。
+    # 两者必须留出间隔（如 290s / 300s），否则软上限永远来不及发。
+    soft-timeout-ms: 290000
+    # 上游"两次读之间"的空闲超时（毫秒），**不是**流的总时长。
+    # 刻意不沿用 nexus.health.ollama.probe-timeout-ms（2000）—— 那是探活口径。
+    # 待实测确认：Ollama 在 CPU 上冷启动加载 qwen2.5:7b 时首 token 可能超过 60s，
+    # 那会表现为"第一次问必失败、第二次就好"（不是 bug）；撞上就把本值提到 120000。
+    read-timeout-ms: 60000
+    ollama:
+      # 与 nexus.health.ollama.base-url 指向同一个环境变量，保持"环境层面单一真源"
+      base-url: ${OLLAMA_BASE_URL:http://ollama:11434}
+      chat-path: /api/chat
+      model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+    deepseek:
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      chat-path: /chat/completions
+      model: ${DEEPSEEK_CHAT_MODEL:deepseek-chat}
+      # 密钥**只能**来自环境变量（compose 的 env_file，见 docker-compose/.env.local）。
+      # 为空时 DeepSeekService 启动打 warn、调用时直接返回 20100，不发无谓的网络请求
+      # —— 容器缺密钥也要能照常启动（缺密钥只让"云端那半"测不了，栈永远起得来）。
+      api-key: ${DEEPSEEK_API_KEY:}
+    executor:
+      # 专用线程池（决策 D8）：每个进行中的流占一个本池线程直到结束。
+      # 注意被占用的是本池、不是 Tomcat 请求线程（emitter 返回后请求线程即释放）。
+      core-size: 4
+      max-size: 16        # 并发流上限
+      queue-capacity: 0   # 不排队：无界队列 + 长连接 = 内存慢性泄漏；满了直接拒绝并返回 503 + 20100
 
   # ── 请求侧安全（阶段1；绑定见 SecurityProperties）──
   security:

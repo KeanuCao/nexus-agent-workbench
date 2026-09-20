@@ -3,8 +3,31 @@
   nexus-module-ai —— AI 核心模块：统一网关 / RAG / Agent 编排（阶段2-4 填充）
 
   阶段0 为空壳模块：与 nexus-module-system 同理，先保证依赖链路可编译。
-  注意：AI 集成（Spring AI 或 OkHttp + 策略模式）的依赖在阶段2 进入本模块时再添加，
-  阶段0 不预置 HTTP 客户端 / 模型 SDK，避免版本臆测与无关依赖。
+  阶段2 起本模块承载「统一 AI 网关」（com.nexus.module.ai.gateway）：
+  自研 AiModelService 端口 + 策略/工厂（决策 D2：**不引 Spring AI** —— 本阶段的交付物
+  本身就是"工厂 + 策略模式"，引框架等于把要展示的东西换成框架自带实现）。
+
+  依赖说明（**每个依赖都对应一个被直接 import 的类**，与 nexus-infrastructure 的取舍同源）：
+    - spring-web　　　　　 ★阶段2：RestClient（调用上游模型）+ HttpHeaders / MediaType；
+    - spring-webmvc　　　 ★阶段2：**SseEmitter 的制品在这里**（org.springframework.web.servlet.mvc.method.annotation）。
+      它**不会**经 nexus-infrastructure 传递过来（那个模块只声明了 spring-web，且刻意不带 MVC 链），
+      而 nexus-start 又在本模块的下游（module-ai 看不到它）→ 必须自己声明，否则编译失败。
+    - jackson-databind　　★阶段2：解析上游返回的 NDJSON / SSE 行（ObjectMapper + JsonNode）。
+      nexus-infrastructure 虽然已声明过它，但本模块**直接 import 了它的类型** —— 沿用本模块对
+      spring-web 的同一条取舍：自己 import 的类型自己声明。靠传递依赖意味着"本模块能不能编译"
+      由上游模块的依赖表决定，那是把编译期压在别人的改动上（provided/test 不传递那两条教训同理）。
+    - spring-boot-starter-validation ★阶段2：@NotBlank / @Valid 的注解（jakarta.validation-api）
+      与**运行期实现**（hibernate-validator）。只加注解是不够的 —— Boot 3 的 starter-web
+      **不带** hibernate-validator，没有实现时 @Valid 会**静默失效**（不报错、不校验），
+      于是 GlobalExceptionHandler 里那条 40001 出口成了死代码。
+      本模块声明一次即可覆盖运行期：nexus-start 依赖本模块，运行期依赖自然进 fat jar
+      （原设计曾打算把它拆成"本模块加 api（provided）+ nexus-start 加 starter"两处，已并成这一条）。
+    - spring-boot-starter-test（test）★阶段2：§7 的单测（JUnit 5 + Mockito）在本模块内。
+
+  刻意**不引** spring-boot-starter-web：那会把内嵌 Tomcat 与整条 MVC 自动装配带进本模块，
+  并在 nexus-start 之外多出一份 servlet 容器配置 —— 本模块只需要上面这几个类型
+  （与 nexus-infrastructure 注释里「只取需要的那几个类」是同一条取舍）。
+  同理也不引任何模型 SDK / OkHttp / WebClient（决策 D1：HTTP 客户端统一用 RestClient）。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -33,6 +56,35 @@
         <dependency>
             <groupId>com.nexus</groupId>
             <artifactId>nexus-infrastructure</artifactId>
+        </dependency>
+
+        <!-- ── 统一 AI 网关（阶段2 新增；版本均由 spring-boot-starter-parent 的 BOM 管理）── -->
+        <!-- RestClient / HttpHeaders / MediaType -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+        <!-- SseEmitter（spring-web 不含它，nexus-infrastructure 也不传递 MVC 链） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-webmvc</artifactId>
+        </dependency>
+        <!-- ObjectMapper / JsonNode：解析上游行协议（NDJSON 与 OpenAI 风格 SSE）。自己 import 的自己声明 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <!-- Bean Validation：注解（编译期）+ hibernate-validator（运行期实现，缺则 @Valid 静默失效） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- ── 测试：§7 的协议解析单测（喂固定分片，断言解析出的片段序列）── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

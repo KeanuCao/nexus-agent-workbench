@@ -10,7 +10,7 @@ package com.nexus.common.result;
  *     <li>0：成功</li>
  *     <li>1xxxx：通用业务异常（可展示给前端，HTTP 200 出口）</li>
  *     <li>2xxxx：依赖/服务可用性异常（如健康检查探活失败）</li>
- *     <li>4xxxx：请求侧问题（资源不存在、未认证/登录态失效；参数校验等后续阶段补充）</li>
+ *     <li>4xxxx：请求侧问题（资源不存在、未认证/登录态失效、参数校验不通过）</li>
  *     <li>5xxxx：系统异常（不对外暴露细节，仅记日志）</li>
  * </ul>
  *
@@ -42,6 +42,15 @@ public enum ResultCode {
     /** 租户已停用（{@code t_tenant.status = 0}）：账号正常但所属租户被停用，一律拒绝登录。 */
     TENANT_DISABLED(10102, "租户已停用，请联系管理员"),
 
+    /**
+     * 不支持的模型类型（阶段2 对话接口）：
+     * {@code POST /api/chat/stream} 请求体里的 {@code modelType} 取值不在 {@code ModelType} 枚举内。
+     *
+     * <p>归 1xxxx 而非 4xxxx：task.3 的验收标准 2.2 点名「未知类型抛<b>业务异常</b>」，
+     * 它由 {@link com.nexus.common.exception.BusinessException} 抛出（HTTP 200 出口）。
+     */
+    CHAT_MODEL_UNSUPPORTED(10200, "不支持的模型类型"),
+
     /** 请求的资源/路径不存在：404 出口使用（见 GlobalExceptionHandler）。 */
     NOT_FOUND(40400, "请求的资源不存在"),
 
@@ -57,8 +66,32 @@ public enum ResultCode {
     /** 登录已过期：token 的 {@code exp} 已过（HTTP 401）。与"无效"分开，前端可提示"重新登录即可"。 */
     TOKEN_EXPIRED(40102, "登录已过期，请重新登录"),
 
+    /**
+     * 请求参数不合法（阶段2）：Bean Validation 校验失败（如 {@code messages} 为空）
+     * 或请求体 JSON 畸形 —— 由 GlobalExceptionHandler 的
+     * {@code MethodArgumentNotValidException} / {@code HttpMessageNotReadableException} 两个出口使用。
+     *
+     * <p><b>配套 HTTP 200 而非 400</b>：{@code docs/api/README.md} §1.2 已把「参数不合法」明确归入
+     * "业务失败 → HTTP 200"（业务失败不污染前端的 axios 失败分支），选 400 就必须在同一次改动里
+     * 改掉 README 与 openapi.yaml 两份已发布契约 —— 收益不抵成本。
+     */
+    PARAM_INVALID(40001, "请求参数不合法"),
+
     /** 依赖服务不可用：健康检查探活失败（HTTP 503）时使用。 */
     SERVICE_UNAVAILABLE(20000, "依赖服务不可用"),
+
+    /**
+     * 模型服务暂时不可用（阶段2 对话接口）。<b>有两种载体，这是有意的</b>：
+     * <ul>
+     *     <li>HTTP <b>503</b> + 普通 {@code Result}：模型专用线程池已满 —— 本服务侧、开流前同步可判，
+     *         能给出真正的 503（见 AiModelService 与决策 D8）；</li>
+     *     <li>HTTP <b>200</b> + {@code event: error} 帧：上游模型不可达 / 超时 / 中途报错 ——
+     *         只在工作线程上才暴露，那时 {@code text/event-stream} 的响应头已经发出去了。</li>
+     * </ul>
+     * 前端两种都要处理（先看 {@code Content-Type} 再按帧解析）；排查方向由 HTTP 状态码区分开
+     * （503 且有 {@code Result} = 本服务；200 + error 帧 = 上游），故不再加第三个码。
+     */
+    CHAT_UPSTREAM_UNAVAILABLE(20100, "模型服务暂时不可用，请稍后重试"),
 
     /** 系统异常：兜底码，对外只给通用话术，细节记服务端日志。 */
     SYSTEM_ERROR(50000, "系统繁忙，请稍后重试");

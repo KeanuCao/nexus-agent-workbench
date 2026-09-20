@@ -1,7 +1,8 @@
 # =============================================================================
 # nexus 后端 API 契约（OpenAPI 3.0.3）
 #
-# 来源：docs/design/00-环境与部署.md §5.3 + docs/design/01-多租户与认证.md §5（已确认设计，契约逐字对齐）
+# 来源：docs/design/00-环境与部署.md §5.3 + docs/design/01-多租户与认证.md §5 + docs/design/02-统一AI网关.md §3
+#      （已确认设计，契约逐字对齐；人工速查版见同目录 README.md）
 # 面向：frontend-engineer（src/api/*.ts 的类型定义以本文件为准）
 #
 # 约定速记：
@@ -22,7 +23,8 @@ info:
   #    0.2.0 是示例值，非真源；实际以 /api/health 的实际返回为准。
   version: 0.2.0
   description: |
-    演示项目后端接口契约。阶段0：健康检查；阶段1：多租户 + 认证（登录/登出/取当前用户）。
+    演示项目后端接口契约。阶段0：健康检查；阶段1：多租户 + 认证（登录/登出/取当前用户）；
+    阶段2：统一 AI 网关（SSE 流式对话，见 `paths./api/chat/stream`）。
 
     ## 统一响应体约定
     所有接口（含错误）一律返回 `Result<T>`：
@@ -51,6 +53,18 @@ info:
     | 50000 | SYSTEM_ERROR | 500 | 系统异常（详情仅进服务端日志，不返回给前端） |
 
     编码分段：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
+
+    ### 阶段2 新增错误码（对话接口，见 `paths./api/chat/stream`）
+
+    | code | 常量 | HTTP | 含义 |
+    | --- | --- | --- | --- |
+    | 40001 | PARAM_INVALID | **200** | 请求参数不合法（校验失败 / JSON 畸形） |
+    | 10200 | CHAT_MODEL_UNSUPPORTED | 200 | 不支持的模型类型（`modelType` 未知取值） |
+    | 20100 | CHAT_UPSTREAM_UNAVAILABLE | **503** 或 *流内* | 模型服务暂时不可用：**503 + `Result`** = 本服务的模型线程池已满；**200 + `event: error` 帧** = 上游模型不可达/超时。两种情况都必须处理 |
+
+    > `40001` 配套 HTTP 200 而非 400：见本文件头部「业务失败走 200」的约定与 `docs/api/README.md` §6.4。
+    > `20100` 的两种载体是**有意的** —— 池满是同步可判的（能给出真正的 503），
+    > 而"上游不可达"只在工作线程上才暴露，那时 `200 + text/event-stream` 的响应头已经发出去了。
 
     ## 认证机制（阶段1）
     1. `POST /api/auth/login` 换取 `data.token`（JWT，有效期 `data.expiresIn` 秒）；
@@ -81,6 +95,11 @@ security:
 tags:
   - name: Auth
     description: 认证接口（阶段1）：登录换 token、登出使 token 立刻失效、取当前用户
+  - name: Chat
+    description: |
+      对话接口（阶段2）：SSE 流式输出。**响应是事件流而非一次性 JSON**，
+      但每帧的 `data` 仍是统一响应体 `Result<T>`。
+      ⚠️ 事件帧的完整格式 OpenAPI 3.0.3 描述不了，见 `docs/api/README.md` §6.2。
   - name: System
     description: 系统级接口（健康检查、运行信息），无需鉴权
 
@@ -219,6 +238,163 @@ paths:
                       tenantName: 默认租户
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /api/chat/stream:
+    post:
+      tags:
+        - Chat
+      operationId: streamChat
+      summary: 流式对话（SSE）
+      description: |
+        把会话历史全量上送，后端按 `modelType` 路由到本地 Ollama 或云端 DeepSeek，
+        并以 **SSE 事件流**逐片返回生成的文本（打字机效果）。**无状态**：不落库、不建会话表，
+        多轮上下文由前端持有 `messages` 数组每次全量上送（刷新即丢）。
+
+        ⚠️ **本接口的响应体不是一次性 JSON**，因此 OpenAPI 只能把它声明为
+        `text/event-stream` + `type: string` —— **这是 OpenAPI 3.0.3 的规范限制，不是遗漏**。
+        帧的真实结构（四种事件、每条时序规则、失败形态总表）以
+        **`docs/api/README.md` §6** 为准，实现与解析约定在设计文档 `docs/design/02-统一AI网关.md` §3。
+
+        ## 事件帧（四种，顺序固定）
+
+        ```
+        event: meta
+        data: {"code":0,"msg":"success","data":{"modelType":"OLLAMA","model":"qwen2.5:7b","servedBy":"user-selected"}}
+
+        event: delta
+        data: {"code":0,"msg":"success","data":{"content":"你"}}
+
+        event: done
+        data: {"code":0,"msg":"success","data":{"finishReason":"stop","deltaCount":2,"durationMs":842}}
+        ```
+
+        | 事件 | 时机 | `data` 载荷 |
+        | --- | --- | --- |
+        | `meta` | 第一帧，仅有且必有一帧（在首个 `delta` 之前，只在首次取到上游分片后发出） | `modelType` / `model` / `servedBy` |
+        | `delta` | 0~N 帧 | `content`（**增量**片段，不是累积全文 → 前端做追加） |
+        | `done` | 正常结束（与 `error` 二选一，有且仅有一个） | `finishReason` / `deltaCount` / `durationMs` |
+        | `error` | 异常结束 | `{"deltaCount": N}`（**对象**，不是 `null`） |
+
+        > 上表四种帧的 `data`，在 `components/schemas` 里**各有一个**对应 schema：
+        > `ChatStreamMeta` / `ChatStreamDelta` / `ChatStreamDone` / `ChatStreamError`。
+        > （OpenAPI 3.0.3 无法把 schema 挂到 SSE 事件上，所以这一行就是"帧表 ↔ schema"的对应关系；
+        > 少一个 schema 就意味着按本文件生成类型的人会漏掉那种帧。）
+
+        **每帧的 `data` 仍是统一响应体 `Result<T>`**（`code` / `msg` / `data` 三字段），
+        前端可复用与普通接口同一套解包与成功判定（设计决策 D4）。
+
+        ## 三条解析规则（前后端都要遵守）
+
+        1. `meta` 的「开流前」指**对客户端开流前**、非「调用上游前」：在首个上游分片之后、
+           第一个 `delta` 之前发出，且只发一次；
+        2. 终止帧唯一：`done` **xor** `error`；
+        3. 取 `event:` / `data:` 后的值时**先剥掉至多一个前导空格**再 trim ——
+           按示例字面 `slice(6)` 会因一个空格匹配不到事件名（页面空白而 curl 正常）；
+           行终止符 `\r\n` / `\r` / `\n` 都合法，入缓冲区时先归一。
+
+        ## 失败形态（**全异步口径**）
+
+        `SseEmitter` 一返回，`200 + text/event-stream` 的响应头**已经发出去了**，此后状态码无法再改：
+
+        | 失败点 | 载体 | HTTP | code |
+        | --- | --- | --- | --- |
+        | 无 token / 过期 / 伪造 | `Result` | 401 | 40100 / 40102 / 40101 |
+        | 请求体校验失败 / JSON 畸形 | `Result` | 200 | 40001 |
+        | `modelType` 取值未知 | `Result` | 200 | 10200 |
+        | **模型线程池已满** | `Result` | **503** | 20100 |
+        | 上游不可达 / 超时 / 中途报错 | `event: error` 帧 | *(已是 200)* | 20100 |
+        | 未预期的内部异常 | `event: error` 帧 | *(已是 200)* | 50000 |
+        | 客户端主动断开 | 无（连接已没了） | — | 服务端据此取消上游调用 |
+
+        前端须同时处理 `20100` 的两种载体：**先看 `Content-Type`**
+        （用 `includes('application/json')` 判断，Spring 会给 `text/event-stream` 带 `;charset=UTF-8`，全等比较会误判），
+        再按帧解析。流的出口有三个：收到 `done`、收到 `error`、**或底层流 EOF**
+        （后端崩溃/nginx 断流时不会有终止帧，只认前两个会让页面永久停在"生成中"）。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            examples:
+              singleTurn:
+                summary: 单轮提问，指定本地模型
+                value:
+                  messages:
+                    - role: user
+                      content: 用三句话介绍杭州
+                  modelType: OLLAMA
+              multiTurn:
+                summary: 多轮（历史全量上送）；`modelType` 缺省 = 由后端决定
+                value:
+                  messages:
+                    - role: user
+                      content: 你好
+                    - role: assistant
+                      content: 你好！有什么可以帮你的？
+                    - role: user
+                      content: 介绍一下你自己
+      responses:
+        '200':
+          description: |
+            成功开流：`Content-Type: text/event-stream`（Spring 会带上 `;charset=UTF-8`），
+            响应体是 §description 所述的事件流。
+            ⚠️ **也为 `code=40001 / 10200` 的业务失败所用** —— 那两种情况下响应体是普通的
+            `application/json` + `Result`（`code` 非 0），而不是事件流。
+          content:
+            text/event-stream:
+              # 事件流在 OpenAPI 3.0.3 里没有原生表达方式：只能声明为字符串，
+              # 帧的真实结构写在 description 与 docs/api/README.md §6.2。
+              schema:
+                type: string
+                description: |
+                  SSE 事件流文本。每帧形如 `event: <名>\ndata: <Result JSON>\n\n`，
+                  事件名取值 `meta` / `delta` / `done` / `error`。
+                  **请以 `docs/api/README.md` §6.2 为唯一事实源**，不要从本字段的类型反推结构。
+              example: |
+                event: meta
+                data: {"code":0,"msg":"success","data":{"modelType":"OLLAMA","model":"qwen2.5:7b","servedBy":"user-selected"}}
+
+                event: delta
+                data: {"code":0,"msg":"success","data":{"content":"你"}}
+
+                event: done
+                data: {"code":0,"msg":"success","data":{"finishReason":"stop","deltaCount":1,"durationMs":842}}
+
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              examples:
+                paramInvalid:
+                  summary: 请求体校验失败（HTTP 200，开流前）
+                  value:
+                    code: 40001
+                    msg: 请求参数不合法
+                    data: null
+                modelUnsupported:
+                  summary: modelType 未知取值（HTTP 200，开流前）
+                  value:
+                    code: 10200
+                    msg: 不支持的模型类型
+                    data: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            模型线程池已满（并发流上限），**开流前**即可判定，故能给出真正的 503。
+            上游模型不可达**不会**走这里 —— 那时响应头已发，只能写 `event: error` 帧。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              examples:
+                executorSaturated:
+                  value:
+                    code: 20100
+                    msg: 模型服务暂时不可用，请稍后重试
+                    data: null
 
   /api/health:
     get:
@@ -469,3 +645,151 @@ components:
       enum:
         - UP
         - DOWN
+
+    # ── POST /api/chat/stream 的请求体（对应后端 dto/ChatRequest + dto/ChatMessage）──
+    ChatRequest:
+      type: object
+      description: |
+        对话请求体（契约：`docs/api/README.md` §6.1）。**无状态**：多轮上下文由前端
+        每次全量上送 `messages`，后端不落库（刷新即丢，前端应给用户提示）。
+      required:
+        - messages
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          description: |
+            会话历史全量上送。至少 1 条，**最后一条必须是 `role=user`**。
+            **允许连续同角色**：失败/停止后前端回滚该轮 assistant 消息后，数组会以 `user` 结尾，
+            下一次提问再 push 一条 `user` 即成连续两条 —— 契约允许，无需特殊处理。
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        modelType:
+          type: string
+          nullable: true
+          description: |
+            模型类型。**`null` 或缺省 = 由后端决定**（本轮解析为后端默认模型，`meta.servedBy` 会是 `default`）。
+            未知取值 → `10200`（HTTP 200，开流前）。
+            后端 DTO 刻意用 `String` 承接再由 `ModelType.parse()` 转枚举：若直接声明为枚举，
+            Jackson 遇未知值会抛 `HttpMessageNotReadableException` → 500 + 50000，而不是契约要的 `10200`。
+          enum:
+            - OLLAMA
+            - DEEPSEEK
+          example: OLLAMA
+
+    ChatMessage:
+      type: object
+      description: 一条会话消息（契约：`docs/api/README.md` §6.1）
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          description: 消息角色。本阶段**不支持** `system`（提示词模板管理不在阶段2 范围内）
+          enum:
+            - user
+            - assistant
+        content:
+          type: string
+          description: |
+            消息正文。非空、去空白后非空；**单条上限 8KB、所有消息合计 64KB**（按 UTF-8 字节数计，
+            超出 → `40001`）。上限防的是误贴大段文本把上游上下文撑爆。
+          example: 用三句话介绍杭州
+
+    # ── 事件帧的 data 载荷（**四种帧各一个 schema**，与 README.md §6.2 的帧表逐项对应）──
+    #    对应后端 dto/ChatStreamMeta / ChatStreamDelta / ChatStreamDone / ChatStreamError
+    #    注意：这几个 schema 只描述帧内 data 的结构，完整帧形如 `event: X\ndata: Result<X>\n\n`
+    ChatStreamMeta:
+      type: object
+      description: |
+        `event: meta` 帧的 `data`。**第一帧、仅有且必有一帧**，在首个 `delta` 之前发出。
+        它保证"模型在有内容之前就已定下"，也是「后端自动选模型」的预留位（`servedBy`）。
+
+        ⚠️ 「必有」只对**成功路径**成立：**上游一个字都没吐就失败**时这条流只有一帧 `error`
+        （`meta` 的语义是"这次用了哪个模型"，而上游根本没给出响应）。
+        **前端不要断言"第一帧一定是 meta"** —— 那会让"上游不可用"这种正常失败变成解析异常。
+      required:
+        - modelType
+        - model
+        - servedBy
+      properties:
+        modelType:
+          type: string
+          description: 实际使用的模型类型（枚举名）
+          enum:
+            - OLLAMA
+            - DEEPSEEK
+        model:
+          type: string
+          description: 上游**真实模型名**（用于验收"传 OLLAMA/DEEPSEEK 分别命中对应实现"）
+          example: qwen2.5:7b
+        servedBy:
+          type: string
+          description: |
+            谁选的模型：`user-selected` = 请求里带了 `modelType`；`default` = 请求里没带，
+            后端取了 `nexus.ai.default-model`。
+            ⚠️ **刻意不声明为 `enum`**：它是"本轮会出现的取值"，不是"协议冻结的取值集合"。
+            自动路由上线后还会出现 `fallback`（设计文档 `docs/design/02-统一AI网关.md` §10.1），
+            而紧 enum 会让前端在一个**纯展示字段**上突然解析失败 —— 展示字段的容错优先于严格。
+          example: user-selected
+
+    ChatStreamDelta:
+      type: object
+      description: |
+        `event: delta` 帧的 `data`。0~N 帧，是回答正文的唯一载体。
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          description: |
+            **增量**文本片段（**不是累积全文**）—— 前端做**追加**，不做替换
+            （写成替换的表现是"屏幕上永远只有最后一个字"）。单帧可能只有一个汉字。
+            空串是"上游这一拍没吐字"，服务端直接跳过，因此**不会出现空内容的 delta 帧**。
+          example: 你
+
+    ChatStreamDone:
+      type: object
+      description: |
+        `event: done` 帧的 `data`。正常结束帧，与 `error` **互斥**（有且仅有一个终止帧），
+        发出后服务端立即 `complete()`。
+      required:
+        - finishReason
+        - deltaCount
+        - durationMs
+      properties:
+        finishReason:
+          type: string
+          description: |
+            `stop` 模型正常结束；`length` 触达 token 上限；`timeout` 被**服务端软上限**截断
+            （后端自己的定时任务，早于 emitter 硬超时触发）。
+          enum:
+            - stop
+            - length
+            - timeout
+        deltaCount:
+          type: integer
+          format: int32
+          description: 本次共发出多少帧 `delta`
+          example: 87
+        durationMs:
+          type: integer
+          format: int64
+          description: 从开始到结束的毫秒数
+          example: 8420
+
+    ChatStreamError:
+      type: object
+      description: |
+        `event: error` 帧的 `data`。**形状定死为对象**（而不是 `null`）：
+        前端靠 `deltaCount` 知道"已经吐了多少字"，据此决定保留还是回滚这一轮。
+        （普通的 `Result.failure(code, msg)` 产生的 `data` 是 `null`，故 error 帧专设本结构。）
+      required:
+        - deltaCount
+      properties:
+        deltaCount:
+          type: integer
+          format: int32
+          description: 出错前已经发出的 `delta` 帧数；一个都没发出时为 `0`
+          example: 12

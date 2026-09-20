@@ -49,6 +49,8 @@ async function onLogout(): Promise<void> {
       class="app-nav-menu"
     >
       <el-menu-item index="/dashboard">控制台</el-menu-item>
+      <!-- 对话页（阶段2）：受保护页面，未登录时不出现 —— 与下方「登录」项的 v-if 对称 -->
+      <el-menu-item v-if="userStore.isLoggedIn" index="/chat">对话</el-menu-item>
       <el-menu-item index="/knowledge">知识库</el-menu-item>
       <el-menu-item index="/agent">Agent 编排</el-menu-item>
       <!-- 登录入口仅在未登录时出现；登录后的"退出登录"在右侧用户区 -->
