@@ -77,6 +77,17 @@ public enum ResultCode {
      */
     PARAM_INVALID(40001, "请求参数不合法"),
 
+    /**
+     * 请求的媒体类型不受支持（阶段2）：缺 {@code Content-Type} 或不是 {@code application/json}
+     * —— 由 GlobalExceptionHandler 的 {@code HttpMediaTypeNotSupportedException} 出口使用。
+     *
+     * <p><b>配套 HTTP 415 而非 200 / 500</b>：这属于传输层语义（请求的媒体类型不被接受），
+     * 与 401/404 同类；而"缺了它就被兜底成 500 + 50000『系统繁忙』"是实测出来的缺陷 ——
+     * 把调用方的请求格式问题报成服务端故障，`docs/api/README.md` §6.1 承诺的
+     * "看到 415 就知道是 Content-Type 没带"那条诊断链路会整个失效。2026-09-20 修复。
+     */
+    UNSUPPORTED_MEDIA_TYPE(40002, "请求格式不支持，请使用 application/json"),
+
     /** 依赖服务不可用：健康检查探活失败（HTTP 503）时使用。 */
     SERVICE_UNAVAILABLE(20000, "依赖服务不可用"),
 

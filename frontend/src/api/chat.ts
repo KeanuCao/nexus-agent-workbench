@@ -302,8 +302,9 @@ export async function streamChat(
     // ── 两个请求头都得自己补（设计 §5.1-2）：axios 实例同时注入了它们，fetch 不会 ──
     const headers: Record<string, string> = {
       // ⚠️ 缺了它 fetch 会按 body 类型自动打上 `text/plain;charset=UTF-8`，而后端按契约声明了
-      //    `consumes=application/json` → **第一条请求就 415**；更坑的是 415 的响应体不是 Result，
-      //    会把排查方向带偏成"网关问题"。
+      //    `consumes=application/json` → **第一条请求就 415**（响应体是统一 Result，`code=40002`）。
+      //    ⚠️ 2026-09-20 之前这一格会落进兜底、报成 **500「系统繁忙」** —— 明明是调用方的请求格式问题
+      //    却显示成服务端故障，把排查方向带偏成"网关问题"。已加专门的 415 出口修掉（契约 §1.2）。
       'Content-Type': 'application/json'
     }
     if (userStore.token) {

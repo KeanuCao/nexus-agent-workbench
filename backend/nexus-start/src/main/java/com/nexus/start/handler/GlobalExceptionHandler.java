@@ -12,6 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -128,6 +129,30 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Void>> handleHttpMessageNotReadable(HttpMessageNotReadableException ex) {
         log.warn("请求体不可读（JSON 畸形或类型不匹配）：{}", ex.getMessage());
         return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+    }
+
+    /**
+     * 请求的媒体类型不受支持（阶段2 新增）：缺 {@code Content-Type} 或不是 {@code application/json}。
+     *
+     * <p><b>为什么必须单开一条（这是实测出来的缺陷）</b>：没有它时，{@code HttpMediaTypeNotSupportedException}
+     * 会落进 {@link #handleException} 兜底 → 客户端<b>忘带头</b>被报成 <b>500 + 50000「系统繁忙」</b>。
+     * 那一格把排查方向整个带偏：明明是调用方的请求格式问题，却显示成服务端故障 ——
+     * 而契约（{@code docs/api/README.md} §6.1 与设计 §5.1-2）恰恰把 415 写成前端诊断
+     * "是不是 Content-Type 没带"的依据。2026-09-20 由 TC-02 的只读探针实测暴露，同日修复。
+     *
+     * <p>用 <b>415</b> 而不是又一个 200：这属于传输层语义（请求的媒体类型不被接受），
+     * 与 401/404 同类；{@link ResultCode#PARAM_INVALID} 那条配套 200 的理由（业务失败不污染
+     * 前端的失败分支）在这里不成立 —— 请求根本没被解析成业务入参。
+     *
+     * @param ex 媒体类型不支持异常
+     * @return HTTP 415 + 40002
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<Result<Void>> handleHttpMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
+        // 只记"收到的是什么"，不记 content-type 明细：这条日志的价值在于定位"哪个调用方忘了带头"
+        log.warn("请求媒体类型不受支持：contentType={}", ex.getContentType());
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .body(Result.failure(ResultCode.UNSUPPORTED_MEDIA_TYPE));
     }
 
     /**
