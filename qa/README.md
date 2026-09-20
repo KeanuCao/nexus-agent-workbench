@@ -13,8 +13,8 @@
 | `fixtures/` | 用例步骤里要**注入到被测环境**的东西：探针补丁、种子 SQL、清理 SQL、造故障用的小文件 | 任何会被正式流程读取的文件 |
 | `fixtures/db-patch/` | **探针补丁**（`YYYYMMDDHHmm_描述.sql`，与正式补丁同命名规则，供 `NEXUS_PATCH_DIR` 指向） | 真实业务补丁（那些在 `/db-patch`） |
 | `fixtures/sql/` | 种子 / 清理 / 取指纹的 SQL 片段 | 表结构变更（那些走 db-patch） |
-| `scripts/` | 用例的**辅助 shell**：多步机械动作（建沙箱 → 注入 → 跑 → 断言 → 清理） | 环境脚本（那些在 `/scripts`） |
-| `scripts/lib/` | 多个用例脚本**共用的机械动作库**（如 `tc-common.sh`：路径/端口解析、JSON 取值、HTTP 动作、Redis 只读指纹、退出路径的清理脚手架）。抽库的判据：重复的是**机械动作**就抽；一旦库里开始出现期望码、判定措辞或账号口令，就说明判据漏进去了，得搬回 TC 文档 | 判据、PASS/FAIL、期望码、账号口令 |
+| `scripts/` | 用例的**辅助 shell**：多步机械动作（建沙箱 → 注入 → 跑 → 断言 → 清理）。现有：`tc01-*.sh`（认证 4 个）、`tc02-chat-stream.sh` + `tc02-pool-full.sh`（阶段2 流式对话/并发） | 环境脚本（那些在 `/scripts`） |
+| `scripts/lib/` | 多个用例脚本**共用的机械动作库**。现有：`tc-common.sh`（TC-01/TC-02 共用：路径/端口解析、JSON 取值、HTTP 动作、Redis 只读指纹、日志抓取、退出路径的清理脚手架）、`tc02-stamp-lines.py`（TC-02 用：把响应字节流逐行打上到达时刻 + 机械统计，判"增量分片"就看它）。抽库的判据：重复的是**机械动作**就抽；一旦库里开始出现期望码、判定措辞或账号口令，就说明判据漏进去了，得搬回 TC 文档 | 判据、PASS/FAIL、期望码、账号口令 |
 | `e2e/` | Playwright（**待 `docs/design/01-多租户与认证.md` §D8 解禁后再落**） | — |
 
 **单测不在本目录**：后端 `backend/<module>/src/test/java`、前端 `frontend/src/**/__tests__` —— 位置由 Maven / Vitest 的约定决定，**没得选**，必须跟被测代码同模块。`qa/` 装的是「跨模块、可注入」的那类资产。
