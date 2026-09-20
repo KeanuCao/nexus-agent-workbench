@@ -8,6 +8,8 @@ import axios, {
 } from 'axios'
 import { ElMessage } from 'element-plus'
 
+import { handleUnauthorized } from '@/utils/authFailure'
+
 /**
  * 统一返回体 —— 与后端 Result<T> 一一对应（docs/design/00-环境与部署.md §5.3，
  * 完整字段表见 docs/api/README.md §1.1）
@@ -66,8 +68,13 @@ const service: AxiosInstance = axios.create({
  * 判定响应体是否为后端统一返回体 `Result<T>`。
  * 用来区分"后端明确告知的失败"（能取到 code / msg / data）与"请求没到后端或被网关拦下"
  * （超时、连接被拒、网关 502 错误页、SPA 回退的 HTML —— 见 docs/api/README.md §4.2.1）。
+ *
+ * **本函数是 export 的，不是顺手为之**：流式对话接口（`POST /api/chat/stream`）的每一帧
+ * `data` 仍是同一个 `Result<T>` 信封（设计决策 D4），其解析器 `utils/sse.ts` 必须与普通接口
+ * **复用同一个函数对象**才能保证"同一套成功判定"。在 sse.ts 里另写一份形状判定，
+ * 等于把"复用"变成两个会各自漂移的副本 —— 那正是 D4 想避免的。
  */
-function isResult(body: unknown): body is Result {
+export function isResult(body: unknown): body is Result {
   if (typeof body !== 'object' || body === null) {
     return false
   }
@@ -143,45 +150,10 @@ service.interceptors.request.use(
   (error: AxiosError) => Promise.reject(error)
 )
 
-/**
- * 401 统一处置：清本地登录态 + 跳登录页（docs/api/README.md §1.2 / §5.1 第 4 条）。
- *
- * 防抖策略 —— **一次 401 风暴只跳一次**，用"标志位 + 落地路径判定"两道闸：
- *   · `redirectingToLogin`：覆盖"同一批并发请求在同一跳转落地之前陆续失败"
- *     （典型是页面加载时多个受保护请求同时 401），跳转结束由 finally 复位；
- *   · `currentRoute.path === '/login'`：覆盖"跳转已落地之后的余波"，此时再 push 只会产生一条
- *     重复导航，并可能把 redirect 覆盖成本次失败请求所在页。
- * 两者叠加保证了复位之后（用户重新登录、再次过期）仍能正常触发新的跳转，不会一锤子失效。
- */
-let redirectingToLogin = false
-
-async function handleUnauthorized(): Promise<void> {
-  // 与请求拦截器同理：不在模块顶层 import，避免环在初始化期闭合
-  const { useUserStore } = await import('@/stores/user')
-  const { default: router } = await import('@/router')
-
-  if (redirectingToLogin || router.currentRoute.value.path === '/login') {
-    return
-  }
-  redirectingToLogin = true
-
-  // 只清本地登录态，**不能**调 store.logout()：那会再发一次 POST /api/auth/logout，
-  // 而此刻 token 已被服务端判为失效 → 又是 401 → 递归
-  useUserStore().clear()
-
-  try {
-    // redirect 带上当前路径，重新登录后可回到原页面（与路由守卫的写法保持一致）
-    await router.push({
-      path: '/login',
-      query: { redirect: router.currentRoute.value.fullPath }
-    })
-  } catch (error) {
-    // 跳转被中止（如守卫返回 false）不应影响本次请求的错误传播：本函数只是"尽力而为"的副作用
-    console.warn('[request] 401 后跳转登录页未完成', error)
-  } finally {
-    redirectingToLogin = false
-  }
-}
+// ── 401 统一处置 ──
+// `handleUnauthorized`（清本地登录态 + 跳登录页，含跨请求防抖）已抽到 `@/utils/authFailure`：
+// 流式对话接口不走 axios，它那条链路也必须触发**同一个**防抖标志，否则"并发 401 只跳一次"是假命题。
+// 该模块与本文件之间的依赖是单向的（本文件 → authFailure），不构成静态环。
 
 // ── Response 拦截器：统一解包 Result<T> ──
 service.interceptors.response.use(

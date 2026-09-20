@@ -18,6 +18,7 @@ declare module 'vue-router' {
  * 路由表 —— 阶段0 为占位页，页面能力随各阶段填充：
  *   /login     → 阶段1 地基搭建（多租户 + 用户权限，交付 /api/auth/login）
  *   /dashboard → 阶段1+ 控制台（健康检查在此展示）
+ *   /chat      → 阶段2 统一 AI 网关（流式对话，POST /api/chat/stream）
  *   /knowledge → 阶段3 大脑搭建（RAG 知识库）
  *   /agent     → 阶段4 灵魂搭建（Agent 编排）
  */
@@ -37,6 +38,15 @@ const routes: RouteRecordRaw[] = [
     name: 'dashboard',
     component: () => import('@/views/DashboardView.vue'),
     meta: { title: '控制台' }
+  },
+  {
+    // 对话页（阶段2）。**不加 `public`**：流式接口不在白名单（契约 §6.1：漏 token → 401 + 40100），
+    // 所以它必须受守卫保护，既有的「无 token → 带 redirect 跳登录」即可正确处理。
+    // name 取 'chat' 而不是 'login' —— 守卫的第 ① 条是按 `to.name === 'login'` 判断的。
+    path: '/chat',
+    name: 'chat',
+    component: () => import('@/views/ChatView.vue'),
+    meta: { title: '对话' }
   },
   {
     path: '/knowledge',
