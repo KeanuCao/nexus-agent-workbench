@@ -75,6 +75,13 @@ def feed_line(state, line: bytes, moment: str):
         if text.strip() == "":
             state["last_event"] = None   # 空行 = 一帧结束
 
+    # ★ 这一行是「⑥ 段逐行回显」的全部来源：少了它，调用方拿到的是 None，
+    #   于是响应头与每一帧都被打成 "[时刻] None" —— 而**汇总统计照常正确**，
+    #   自检（只查统计）也照常通过 ⇒ 一个"看着像跑通了"的静默失效。
+    #   2026-09-21 实测漏过一次：2.1-1 的判据 ①（响应头两行）与 ②（meta 帧 data）
+    #   因此都读不到。自检里已补上「逐行回显」这一项。
+    return text
+
 
 def print_summary(state):
     raw_bytes = bytes(state["raw"])
@@ -174,6 +181,10 @@ def self_test():
         ("事件计数 done", counts.get("done"), 1),
         ("delta 正文拼接", joined, "你�" + "tail-without-blank-line"),
         ("替换字符能被数出来（故意样本里正好 1 个）", bytes(state["raw"]).decode("utf-8").count("�"), 1),
+        # ★ 2026-09-21 补：自检原先只查统计，漏了**逐行回显**这条路 —— 而 ⑥ 段的响应头
+        #   与每一帧都靠它。feed_line 漏了 return 时，统计全对、自检全绿，只有回显整片变成 None。
+        ("逐行回显（feed_line 必须把该行原样交回）", feed_line(new_state(), b"event: meta\n", "00:00:00.000"), "event: meta"),
+        ("逐行回显（响应头那种非 event/data 的行同样要交回）", feed_line(new_state(), b"HTTP/1.1 200 \r\n", "00:00:00.000"), "HTTP/1.1 200 "),
     ]
     failed = 0
     for label, actual, expected in checks:
