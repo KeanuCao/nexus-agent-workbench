@@ -10,6 +10,9 @@
 .claude/settings.local.json
 # settings.json 仅含团队共享 hooks（无密钥），随仓库提交
 !.claude/settings.json
+# 技能（skills）默认视为**个人工作流**，不进仓库（如 sync-master：本机 git 同步用）。
+# 若某个技能确实要随项目交付，用 `!.claude/skills/<技能名>/` 显式放行 —— 别为此放开整个目录。
+.claude/skills/
 
 # ── Java / Maven ──
 target/
