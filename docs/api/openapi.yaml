@@ -307,7 +307,8 @@ paths:
         | 客户端主动断开 | 无（连接已没了） | — | 服务端据此取消上游调用 |
 
         前端须同时处理 `20100` 的两种载体：**先看 `Content-Type`**
-        （用 `includes('application/json')` 判断，Spring 会给 `text/event-stream` 带 `;charset=UTF-8`，全等比较会误判），
+        （用 `includes('application/json')` 判断：失败形态的 `application/json` 实测带 `;charset=UTF-8`，
+        成功形态的 `text/event-stream` 不带 —— 两边形态不一致，全等比较会误判），
         再按帧解析。流的出口有三个：收到 `done`、收到 `error`、**或底层流 EOF**
         （后端崩溃/nginx 断流时不会有终止帧，只认前两个会让页面永久停在"生成中"）。
       parameters:
@@ -339,7 +340,7 @@ paths:
       responses:
         '200':
           description: |
-            成功开流：`Content-Type: text/event-stream`（Spring 会带上 `;charset=UTF-8`），
+            成功开流：`Content-Type: text/event-stream`（**裸的，不带 `;charset=UTF-8`**；2026-09-21 实测），
             响应体是 §description 所述的事件流。
             ⚠️ **也为 `code=40001 / 10200` 的业务失败所用** —— 那两种情况下响应体是普通的
             `application/json` + `Result`（`code` 非 0），而不是事件流。

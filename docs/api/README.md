@@ -832,7 +832,8 @@ data: {"code":0,"msg":"success","data":{"finishReason":"stop","deltaCount":2,"du
 > **`20100` 有两种载体**（503 + `Result`、200 + `error` 帧），这是**有意的**：池满是本服务侧的、
 > 同步可判的，能给出真正的 503；上游不可达只在工作线程上才暴露，那时响应头已发。
 > 前端**两种都要处理**（成本极低：先看 `Content-Type`，再按帧解析）——
-> 判断响应类型要用 `includes('application/json')`，因为 Spring 会给 `text/event-stream` 带上 `;charset=UTF-8`，全等比较会误判。
+> 判断响应类型要用 `includes('application/json')`：**失败形态的 `application/json` 实测带 `;charset=UTF-8`（2026-09-20 实测），而成功形态的 `text/event-stream` 不带**（2026-09-21 实测）—— 两边形态不一致，全等比较会误判。
+> ⚠️ **SSE 那半刻意不加 charset**：SSE 规范里 `charset` 是"仅为兼容遗留服务端"的可选参数，事件流恒为 UTF-8；本契约声明的就是裸 `text/event-stream`（§6.1），实现与契约一致。
 > **为什么不再加一个码区分池满**：两者的用户动作相同（稍后重试），而排查方向已由 HTTP 状态码区分开
 > （503 且有 `Result` = 本服务；200 + `error` 帧 = 上游）。
 
