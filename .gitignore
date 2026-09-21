@@ -55,3 +55,9 @@ docker-compose/data/
 #      下 spring-{core,web,webmvc}-6.1.21-sources.jar 解包而成。
 # 体积约 15MB，纯只读参考，不属于任何构建链路 —— 删掉不影响构建，需要时重下即可。
 .deps-src/
+
+# ── 测试运行的临时捕获（含登录 token，严禁提交）──
+# 用例脚本的输出重定向到这里（如 .result/tmp-result.txt）。它只是"取证现场"：
+# 关键行（响应头、meta/done 帧、日志、指纹）应**摘录进 TC-XX 的「实测」栏**，
+# 原始捕获本身不入库 —— 它内含真实 JWT，且体积随帧数增长。删掉不影响任何链路。
+.result/
