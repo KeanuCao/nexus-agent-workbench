@@ -1,6 +1,7 @@
 # nexus-module-ai
 
-AI 核心模块：**统一 AI 网关 / RAG 知识库 / Agent 编排**。阶段0 为空壳模块，阶段2 起按 `gateway` 包填充。
+AI 核心模块：**统一 AI 网关 / RAG 知识库 / Agent 编排**。阶段0 为空壳模块，阶段2 起按 `gateway` 包填充，
+阶段3 起再加 `rag` 包。
 
 ## 阶段状态
 
@@ -15,6 +16,24 @@ AI 核心模块：**统一 AI 网关 / RAG 知识库 / Agent 编排**。阶段0 
     `controller/ChatController`（`POST /api/chat/stream`）。
   ⚠️ 首次编译由 devops 的 `build-backend` 完成（宿主无 `mvn`）；契约见 `docs/api/README.md` §6，
   验收用例见 `docs/test-cases/TC-02.md`。
+- **阶段3**（设计：`docs/design/03-RAG知识库.md`）：`rag` 包**地基已就位、业务类待落地**。
+  - **已落地（本段的交付物）**：三处依赖增量（见下）、`application.yml` 的 `nexus.ai.rag.*` /
+    `nexus.ai.ollama.embed-path` / `spring.servlet.multipart.*` / rag mapper debug、
+    `ResultCode` +5 个码、`GlobalExceptionHandler` +4 个出口、
+    `db-patch/202609221000_初始化知识库表.sql`（两张表 + 4 个索引，含 HNSW）、
+    契约 `docs/api/README.md` §7 + `openapi.yaml` 的 4 个 path。
+  - **待落地（下一段，设计 §4.1 的文件清单）**：`rag` 子包
+    `config`（`RagProperties`）/ `controller`（`KbDocumentController`、`KbAskController`）/
+    `dto`（`KbAskRequest`、`KbDocumentVO`、`KbDocumentListVO`、`KbAnswerVO`、`KbSourceVO`）/
+    `entity`（`KbDocument`、`KbChunk`）/ `mapper`（`KbDocumentMapper`、`KbChunkMapper`、
+    `VectorTypeHandler`）/ `parse`（`DocumentParser` + `TikaDocumentParser`）/ `chunk`（`TextChunker`）/
+    `embedding`（`EmbeddingService` + `OllamaEmbeddingService`）/ `prompt`（`PromptBuilder`）/
+    `generate`（`ModelAnswerGenerator`）/ `service` + `service/impl`。
+  - **依赖方向（模块内也是单向的）**：`rag → gateway`（RAG 复用阶段2 的模型端口生成答案），
+    **反过来不成立** —— `gateway` 里任何类都不得 import `rag` 的东西。
+    判据：`grep -rn "module.ai.rag" backend/nexus-module-ai/src/main/java/com/nexus/module/ai/gateway/` 必须无输出。
+  - 契约见 `docs/api/README.md` §7（四个接口 + 失败形态总表 + 错误码增量），
+    实现结构见设计 §4，用例见 `docs/test-cases/TC-03.md`（qa-engineer 产出）。
 
 ## 依赖
 
@@ -25,13 +44,23 @@ AI 核心模块：**统一 AI 网关 / RAG 知识库 / Agent 编排**。阶段0 
   也不会经 nexus-infrastructure 传递过来）+ `jackson-databind`（解析上游的 NDJSON / SSE 行）
   + `spring-boot-starter-validation`（`@Valid` 注解与运行期实现）
   + `spring-boot-starter-test`(test)。逐条理由见 `pom.xml` 头部注释。
+- 阶段3 新增（版本统一在父 POM 的 `dependencyManagement`，本模块不写 `<version>`）：
+  - `org.apache.tika:tika-core`（compile，`3.2.3`）：`AutoDetectParser` / `BodyContentHandler` /
+    `Metadata` / `TikaException` —— **只用于 PDF**。TXT 走 JDK 直读 + 编码探测（决策 D13），
+    因为 TXT 真正的坑是编码（GBK 文件按 UTF-8 解 = 一屏乱码），框架不替我们解决；
+  - `org.apache.tika:tika-parser-pdf-module`（**runtime**）：PDF 解析器实现（含 PDFBox），
+    代码不 import 它的任何类型，靠 Tika 的服务加载机制在运行期发现；
+  - `com.baomidou:mybatis-plus-spring-boot3-starter`（compile）：`BaseMapper` / `@TableName` /
+    `@TableId`。它已由 `nexus-infrastructure` 传递进来，显式声明是为了遵循本模块
+    "自己 import 的类型自己声明"的既定原则。
+  - 版本核实与回退链（Tika 若在镜像源上不存在会**响亮报错**）见父 POM 的 `tika.version` 注释。
 
 ## 阶段计划内容
 
 | 阶段 | 包 | 内容 |
 | --- | --- | --- |
 | 阶段2 | `gateway` | 统一 AI 网关：工厂 + 策略模式切换 Ollama / DeepSeek，SSE 流式输出（`/api/chat/stream`） |
-| 阶段3 | `rag` | 文档解析（Tika）→ 分块 → `nomic-embed-text` 向量化 → pgvector 检索 TopK → 拼接 Prompt |
+| 阶段3 | `rag` | 文档解析（TXT 直读 + 编码探测 / PDF 走 Tika）→ 固定窗口分块（500/50）→ `nomic-embed-text` 向量化 → pgvector 检索 TopK（HNSW）→ 拼 Prompt → 复用 `gateway` 生成答案 |
 | 阶段4 | `agent` | ReAct 工具调用、多 Agent 串行协作（`CompletableFuture`） |
 
 日志要求：调用大模型、向量入库等关键流程必须打 `log.info`（CLAUDE.md 宪法约束 —— 面试时展示调用链路）。

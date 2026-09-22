@@ -51,6 +51,58 @@ public enum ResultCode {
      */
     CHAT_MODEL_UNSUPPORTED(10200, "不支持的模型类型"),
 
+    /**
+     * 不支持的文件类型（阶段3 知识库）：扩展名不在白名单（{@code nexus.ai.rag.allowed-extensions}，
+     * 默认 {@code txt,pdf}），或扩展名与内容检测不符（{@code .pdf} 的扩展名但内容检测为纯文本之类）。
+     *
+     * <p>归 1xxxx 而非 4xxxx：与 {@link #CHAT_MODEL_UNSUPPORTED} 同一条取舍 —— 它由
+     * {@link com.nexus.common.exception.BusinessException} 抛出（HTTP 200 出口，文案可直接展示），
+     * 且 4xxxx 那一段在本项目里已被"参数不合法 / 媒体类型 / 文件过大"占满，再塞一条会把
+     * "客户端传参问题"与"上传内容的业务规则"混成一类。契约见 {@code docs/api/README.md} §7.8。
+     *
+     * <p>⚠️ <b>msg 里的 "TXT / PDF" 是写死的，而白名单可配</b>：改 {@code allowed-extensions}
+     * 之后本码的文案会失真（比如加了 Word 支持，文案仍说"仅支持 TXT / PDF"）。
+     * 这是"文案一眼可读"与"配置单一真源"之间的取舍，本轮按契约取前者，记在明处。
+     */
+    KB_FILE_TYPE_UNSUPPORTED(10201, "不支持的文件类型，仅支持 TXT / PDF"),
+
+    /**
+     * 文档不存在或已被删除（阶段3 知识库）：删除接口的目标 id 查不到，或它不属于当前租户。
+     *
+     * <p><b>两个刻意的约定</b>（契约 {@code docs/api/README.md} §7.3）：
+     * <ol>
+     *     <li>用 HTTP <b>200</b> + 本码，而不是 404 —— 本项目的 HTTP 状态码只承载传输/可用性语义
+     *         （契约 §1.2），业务拒绝一律 200 + 业务码；且 404 出口需要新造一套异常类型，
+     *         收益不抵成本；</li>
+     *     <li>"别的租户的文档"与"不存在"在本接口里<b>完全同形</b>（都返回本码）：区分开就等于
+     *         给出"某 id 是否存在"的探测口，跨租户删除尝试因此不返回 403 之类的额外信号。</li>
+     * </ol>
+     */
+    KB_DOCUMENT_NOT_FOUND(10202, "文档不存在或已被删除"),
+
+    /**
+     * 未能解析出文本（阶段3 知识库）：扫描版 PDF（有页面、没有文本层）、空文件、
+     * 编码不可识别（UTF-8 与 GBK 解出来都超标），以及 Tika 侧的加密/损坏文件
+     * （{@code TikaException} / {@code SAXException} 统一归这一档，不把上游异常原样抛给用户）。
+     *
+     * <p><b>为什么单开一个码而不复用 10000</b>：这四种原因的用户动作相同（换一份文件），
+     * 但它是"上传看似成功、内容却是空的"这类<b>静默失败</b>的唯一出口 —— 没有它，扫描版 PDF
+     * 会变成"上传成功但什么都检索不到"，把排查方向带向检索侧（契约 §7.7 正是按这个思路排的）。
+     */
+    KB_PARSE_EMPTY(10203, "未能从文件中解析出文本（可能是扫描版 PDF 或空文件）"),
+
+    /**
+     * 文档内容过长（阶段3 知识库）：分块数超过 {@code nexus.ai.rag.max-chunks-per-document}（默认 3000）。
+     *
+     * <p><b>判在向量化之前</b>（决策 D15）：10MB 的 TXT ≈ 2 万块 ≈ 上万次 embedding 调用，
+     * "先分块、数一眼、再决定调不调 embedding"让失败在几秒内以本码发生，而不是几分钟后
+     * 以一个上游超时（{@link #CHAT_UPSTREAM_UNAVAILABLE}）的形态出现 —— 后者的排查方向是错的。
+     *
+     * <p>与 {@link #FILE_TOO_LARGE} 的分工：那个管<b>字节数</b>（multipart 层），本码管<b>分块数</b>
+     * （业务层）。同样 10MB，纯文本与 PDF 解析出的字符数能差一个数量级，故两道闸都要有。
+     */
+    KB_CONTENT_TOO_LARGE(10204, "文档内容过长，超出单文档分块上限，请拆分后上传"),
+
     /** 请求的资源/路径不存在：404 出口使用（见 GlobalExceptionHandler）。 */
     NOT_FOUND(40400, "请求的资源不存在"),
 
@@ -87,6 +139,25 @@ public enum ResultCode {
      * "看到 415 就知道是 Content-Type 没带"那条诊断链路会整个失效。2026-09-20 修复。
      */
     UNSUPPORTED_MEDIA_TYPE(40002, "请求格式不支持，请使用 application/json"),
+
+    /**
+     * 上传文件过大（阶段3）：超过 {@code spring.servlet.multipart.max-file-size}（本项目配 10MB）。
+     * 由 GlobalExceptionHandler 的 {@code MaxUploadSizeExceededException} 出口使用。
+     *
+     * <p><b>为什么列在通用段（{@code docs/api/README.md} §1.3）而不是知识库那一段</b>：
+     * 它约束的是 multipart 请求体本身，任何上传接口都会撞上，与"知识库"这个业务域无关。
+     * 按业务域归码的代价是：下一个上传接口要么复用知识库的码（读起来像串了模块），
+     * 要么再造就一个同含义的码（同一件事两个码）。
+     *
+     * <p>配套 HTTP <b>200</b>：与 {@link #PARAM_INVALID} 同一条理由（业务失败不污染前端的
+     * axios 失败分支），见其 javadoc。
+     *
+     * <p>⚠️ <b>待实测</b>：Tomcat 的 {@code max-swallow-size}（默认约 2MB）可能让超限请求表现为
+     * "连接被重置"而不是本码 —— 设计 §6.2 与契约 §7.7 已记该风险与判据（故意上传一个 11MB 的文件）。
+     * <p>⚠️ msg 里的 "10MB" 与 yml 的 {@code max-file-size} 是两处，改一处忘另一处文案就会失真
+     * （与 {@link #KB_FILE_TYPE_UNSUPPORTED} 同类的取舍，记在明处）。
+     */
+    FILE_TOO_LARGE(40003, "文件过大，最大支持 10MB"),
 
     /** 依赖服务不可用：健康检查探活失败（HTTP 503）时使用。 */
     SERVICE_UNAVAILABLE(20000, "依赖服务不可用"),

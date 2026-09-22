@@ -6,6 +6,9 @@
   阶段2 起本模块承载「统一 AI 网关」（com.nexus.module.ai.gateway）：
   自研 AiModelService 端口 + 策略/工厂（决策 D2：**不引 Spring AI** —— 本阶段的交付物
   本身就是"工厂 + 策略模式"，引框架等于把要展示的东西换成框架自带实现）。
+  阶段3 起再加「RAG 知识库」（com.nexus.module.ai.rag）：解析 → 分块 → 向量化 → pgvector 检索
+  → 拼 Prompt → 复用阶段2 的网关生成（同源决策 D1/D2：手写链路，不引 Spring AI 的 RAG 组件）。
+  依赖方向在模块内也是单向的：rag → gateway，gateway 不得反向 import rag。
 
   依赖说明（**每个依赖都对应一个被直接 import 的类**，与 nexus-infrastructure 的取舍同源）：
     - spring-web　　　　　 ★阶段2：RestClient（调用上游模型）+ HttpHeaders / MediaType；
@@ -23,6 +26,12 @@
       本模块声明一次即可覆盖运行期：nexus-start 依赖本模块，运行期依赖自然进 fat jar
       （原设计曾打算把它拆成"本模块加 api（provided）+ nexus-start 加 starter"两处，已并成这一条）。
     - spring-boot-starter-test（test）★阶段2：§7 的单测（JUnit 5 + Mockito）在本模块内。
+    - org.apache.tika:tika-core（compile）★阶段3：PDF 解析要用 AutoDetectParser / BodyContentHandler；
+      org.apache.tika:tika-parser-pdf-module（runtime）★阶段3：PDF 解析器实现，运行期经 Tika 的
+      服务加载机制发现，代码不 import 它任何类型。TXT **不走 Tika**（JDK 直读 + 编码探测，决策 D13）。
+    - com.baomidou:mybatis-plus-spring-boot3-starter（compile）★阶段3：rag 的 Mapper/实体要用
+      BaseMapper / @TableName / @TableId。它本可由 nexus-infrastructure 传递进来，显式声明是为遵循
+      本模块的既定原则（自己 import 的类型自己声明），不是缺依赖。
 
   刻意**不引** spring-boot-starter-web：那会把内嵌 Tomcat 与整条 MVC 自动装配带进本模块，
   并在 nexus-start 之外多出一份 servlet 容器配置 —— 本模块只需要上面这几个类型
@@ -85,6 +94,43 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+        </dependency>
+
+        <!-- ── RAG 知识库（阶段3 新增；版本均由父 POM 的 dependencyManagement 管理）── -->
+        <!--
+          Tika 核心：`AutoDetectParser` / `BodyContentHandler` / `Metadata` / `TikaException` 都在这里，
+          rag/parse 包**直接 import** ⇒ 按本模块既有原则显式声明（自己 import 的类型自己声明，
+          不靠传递依赖决定"本模块能不能编译"）。
+          ⚠️ TXT **不走 Tika**：它是 JDK 直读 + 编码探测（UTF-8 → GBK，决策 D13），
+          Tika 只为 PDF 这类二进制格式服务。
+        -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+        </dependency>
+        <!--
+          PDF 解析器实现（PDFBox 及其传递依赖随它进来）。
+          **runtime 作用域**：代码里不 import 它的任何类型，是 Tika 在运行期经 SPI 服务加载机制发现的
+          —— 声明它的目的只有一个：让解析器实现出现在运行期 classpath 上。
+          （compile 作用域在功能上等价，取 runtime 是为了把这个意图写进依赖表：谁都不该 import 它。）
+          只引 PDF 模块：Office / 图片 / 音频模块本轮用不到，见父 POM 的注释与设计 §10.1（Word 的开启成本）。
+        -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parser-pdf-module</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!--
+          MyBatis-Plus：rag 包要用 `BaseMapper` / `@TableName` / `@TableId` / `Page` 等类型
+          （**直接 import** ⇒ 显式声明，同 Tika 与 jackson 的取舍）。
+          它其实已由 nexus-infrastructure 传递进来（nexus-start 里那份 fat jar 靠的就是这条链），
+          显式声明**不是为了修一个缺依赖，而是为了不让本模块的编译成功与否取决于上游模块的依赖表**。
+          ⚠️ 现存不一致：nexus-module-system 未显式声明同类依赖 —— 对齐它属阶段1 的技术债，
+          本轮不动（设计 §10.7 已记）。
+        -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
         </dependency>
     </dependencies>
 </project>
