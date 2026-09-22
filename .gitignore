@@ -59,6 +59,15 @@ docker-compose/data/
 # 体积约 15MB，纯只读参考，不属于任何构建链路 —— 删掉不影响构建，需要时重下即可。
 .deps-src/
 
+# ── Agent 临时工作区（脚本 / 检查产物，**不进仓库**）──
+# 约定：临时脚本一律放 .tmp/<agent 名>/（如 .tmp/backend-engineer/check_static.py），
+#      **不要**写系统临时目录（/tmp、%TEMP%）与仓库外的任何路径 ——
+#      blockReadsOutsideWorkingDirectories 会拦下它们，且每次都要人工批准；
+#      放仓库内 → Read/Grep/Glob 零审批、离线可用、随手可查。
+# 纪律：它**不属于任何生产链路**（up.sh / 镜像构建 / db-patch 迁移都不读它），随时可整个删掉。
+#      要留下来的结论请写进 docs/agent-log/ 或 TC-XX，而不是留在 .tmp/ 里。
+.tmp/
+
 # ── 测试运行的临时捕获（含登录 token，严禁提交）──
 # 用例脚本的输出重定向到这里（如 .result/tmp-result.txt）。它只是"取证现场"：
 # 关键行（响应头、meta/done 帧、日志、指纹）应**摘录进 TC-XX 的「实测」栏**，

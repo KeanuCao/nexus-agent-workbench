@@ -4,3 +4,4 @@
 - [maven.test.skip 不省依赖解析](maven_test_skip_resolution.md) — 执行器级预解析先于 mojo；看报错行带不带 goal 坐标来判定
 - [agent-log 与草稿复核](agent-log-cross-session-lessons.md) — docs/agent-log/ 是教训入口；草稿/子代理结论先实测复核再采用
 - [文档写"单一真源"的三档口径](feedback_doc-single-source.md) — 判据写「等于真源」+取数命令；样例标注"示例值"；文件名走通配；别只判 semver 正则
+- [临时工作区 .tmp/<agent>/](feedback_tmp-workspace.md) — 脚本放仓库内免审批；看源码走 Grep/Read 工具，Bash 复合命令必被拦
