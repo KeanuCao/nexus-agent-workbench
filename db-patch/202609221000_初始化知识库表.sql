@@ -93,12 +93,18 @@ CREATE INDEX idx_kb_chunk_document_id ON t_kb_chunk (document_id);
 --     小数据量上召回更稳；写入慢一点的代价在"离线入库"场景下无所谓（设计 §4.2）。
 --   依赖：pgvector ≥ 0.5.0（2026-09-22 探针 D 实测 0.8.6，满足）。
 --   判据（建表后必须能看到它）：SELECT indexname FROM pg_indexes WHERE tablename='t_kb_chunk';
---   以及 EXPLAIN 走索引：EXPLAIN SELECT chunk_id FROM t_kb_chunk
---       ORDER BY embedding <=> (SELECT embedding FROM t_kb_chunk LIMIT 1) LIMIT 5;
---       → 必须出现 Index Scan using idx_kb_chunk_embedding_hnsw。
---   ⚠️ 想走这个索引，检索 SQL 必须写成"操作符直接作用在列上"（ORDER BY embedding <=> ?），
---      不能写成 ORDER BY score DESC（别名）或包一层函数，也不能把相似度阈值放进 WHERE
---      —— 三种写法都会退化成全表扫描 + 排序（数据量小时看不出差别，正是最危险的那种坑）。
+--   以及 EXPLAIN 走索引 —— ★ 2026-09-22 沙箱实测订正：**必须先关顺序扫描**，否则表小时规划器会按
+--   代价选 Seq Scan（HNSW 是近似索引），照字面断言会**假失败**：
+--       SET enable_seqscan = off;
+--       EXPLAIN SELECT chunk_id FROM t_kb_chunk
+--           ORDER BY embedding <=> (SELECT embedding FROM t_kb_chunk LIMIT 1) LIMIT 5;
+--       → 必须出现 Index Scan using idx_kb_chunk_embedding_hnsw（沙箱库实测：确实是这个计划）。
+--   ⚠️ 想走这个索引，检索 SQL 必须写成"操作符直接作用在列上"（ORDER BY embedding <=> ?）；
+--      不能写成 ORDER BY score DESC（别名）或包一层函数 —— 实测这两种退化成 Sort + Seq Scan。
+--      ⚠️ 但"相似度阈值放进 WHERE"是**例外**：2026-09-22 沙箱实测它仍是 Index Scan + Filter
+--      （索引照样用于排序）⇒ 本项目仍走应用层过滤，理由是**语义**（TopK 的定义：最相似的 K 条再按
+--      阈值收紧），**不是**索引。初版注释把三种写法一律说成"退化成全表扫描"，已按实测订正。
+--      数据量小时这些差别都看不出来，正是最危险的那种坑 —— 判据一律先 SET enable_seqscan = off。
 --      阈值改在应用层过滤（设计 §4.6 第 1、2 条）。
 CREATE INDEX idx_kb_chunk_embedding_hnsw ON t_kb_chunk USING hnsw (embedding vector_cosine_ops);
 

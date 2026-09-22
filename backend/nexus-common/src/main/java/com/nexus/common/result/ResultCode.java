@@ -52,17 +52,20 @@ public enum ResultCode {
     CHAT_MODEL_UNSUPPORTED(10200, "不支持的模型类型"),
 
     /**
-     * 不支持的文件类型（阶段3 知识库）：扩展名不在白名单（{@code nexus.ai.rag.allowed-extensions}，
-     * 默认 {@code txt,pdf}），或扩展名与内容检测不符（{@code .pdf} 的扩展名但内容检测为纯文本之类）。
+     * 不支持的文件类型（阶段3 知识库）：扩展名不在白名单（{@code TikaDocumentParser} 里的常量
+     * {@code Set.of("txt", "pdf")} —— <b>刻意不做成配置键</b>，理由见下方），
+     * 或扩展名与内容检测不符（{@code .pdf} 的扩展名但内容检测为纯文本之类）。
      *
      * <p>归 1xxxx 而非 4xxxx：与 {@link #CHAT_MODEL_UNSUPPORTED} 同一条取舍 —— 它由
      * {@link com.nexus.common.exception.BusinessException} 抛出（HTTP 200 出口，文案可直接展示），
      * 且 4xxxx 那一段在本项目里已被"参数不合法 / 媒体类型 / 文件过大"占满，再塞一条会把
      * "客户端传参问题"与"上传内容的业务规则"混成一类。契约见 {@code docs/api/README.md} §7.8。
      *
-     * <p>⚠️ <b>msg 里的 "TXT / PDF" 是写死的，而白名单可配</b>：改 {@code allowed-extensions}
-     * 之后本码的文案会失真（比如加了 Word 支持，文案仍说"仅支持 TXT / PDF"）。
-     * 这是"文案一眼可读"与"配置单一真源"之间的取舍，本轮按契约取前者，记在明处。
+     * <p><b>为什么白名单是常量而不是配置键</b>（初版设计曾写 {@code nexus.ai.rag.allowed-extensions}，
+     * 实施时改掉）：白名单一旦可配，本码写死的文案"仅支持 TXT / PDF"就会<b>说谎</b> —— 除非把文案也
+     * 做成运行期可变的，而那会把"接口文案"变成动态值。而"支持哪几种格式"本来就是<b>范围决策</b>
+     * （加 Word 要同时加 Tika 模块与用例，设计 §10.1），不是运维旋钮。常量 + 写死文案 ⇒ 两处同源，
+     * 改一次全对。
      */
     KB_FILE_TYPE_UNSUPPORTED(10201, "不支持的文件类型，仅支持 TXT / PDF"),
 

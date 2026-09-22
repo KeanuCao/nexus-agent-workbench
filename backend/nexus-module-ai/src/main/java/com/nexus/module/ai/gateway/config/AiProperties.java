@@ -80,6 +80,20 @@ public class AiProperties {
         /** 对话接口路径（Ollama 的 NDJSON 流式接口）。 */
         private String chatPath = "/api/chat";
 
+        /**
+         * 向量化接口路径（阶段3 新增，RAG 的 {@code OllamaEmbeddingService} 用它）。
+         *
+         * <p>它与 {@link #chatPath} 同类：都是 Ollama 的上游路径。写在 yml 的
+         * {@code nexus.ai.ollama} 下而不是 {@code rag} 下，是为了让<b>两条上游配置同处一地</b>
+         * —— base-url 是两者共用的，把同一个上游拆到两个配置块里，将来换 Ollama 版本时
+         * 就得记住改两个地方。
+         *
+         * <p>单独做成配置项（而不是写死在实现里）的理由：换 Ollama 版本时若端点改了名字，
+         * 只改这一行；实现内部那条"退化为旧的 {@code /api/embeddings} 逐条调用"的退路也由它兜底。
+         * <p>✅ 2026-09-22 探针 A/B 实测：该端点存在、响应形状 {@code {"embeddings":[[...]]}}、支持批量。
+         */
+        private String embedPath = "/api/embed";
+
         /** 模型名（会原样出现在 {@code meta.model} 里，也是验收 2.2-1 的判据）。 */
         private String model = "qwen2.5:7b";
 
@@ -97,6 +111,14 @@ public class AiProperties {
 
         public void setChatPath(String chatPath) {
             this.chatPath = chatPath;
+        }
+
+        public String getEmbedPath() {
+            return embedPath;
+        }
+
+        public void setEmbedPath(String embedPath) {
+            this.embedPath = embedPath;
         }
 
         public String getModel() {

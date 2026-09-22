@@ -172,31 +172,34 @@ tc_grep_lines() { _tc_grep -F "${1:-}"; }     # 固定字符串
 tc_grep_lines_re() { _tc_grep -E "${1:-}"; }  # 扩展正则
 
 # ── HTTP 动作（只发请求、原样打印，不做任何判断）────────────────────────────────
-tc_post_login() {  # <请求体> <响应写到这个文件>
-  local body="$1" outfile="$2" http
+# 三个函数都带一个**可选的**基地址参数（缺省 = TC_BASE_URL 即直连后端）：TC-03 的用例要能
+# 整条链路走 nginx（FRONTEND_PORT，见契约 §7.9 与设计 §5.1），而"登录"这一步也必须走同一个
+# 入口才叫整条链路。既有调用方一律只传原来的参数，行为不变。
+tc_post_login() {  # <请求体> <响应写到这个文件> [基地址]
+  local body="$1" outfile="$2" base="${3:-$TC_BASE_URL}" http
   http="$(curl -s -o "$outfile" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-        -d "$body" "${TC_BASE_URL}/api/auth/login" || true)"
-  printf 'POST %s/api/auth/login\n  body: %s\n  → HTTP %s\n  body(原样): ' "$TC_BASE_URL" "$body" "$http"
+        -d "$body" "${base}/api/auth/login" || true)"
+  printf 'POST %s/api/auth/login\n  body: %s\n  → HTTP %s\n  body(原样): ' "$base" "$body" "$http"
   tc_show_body "$outfile"; printf '\n'
 }
 
-tc_get_me() {  # <标签> <token> <响应写到这个文件>
-  local label="$1" token="$2" outfile="$3" http
+tc_get_me() {  # <标签> <token> <响应写到这个文件> [基地址]
+  local label="$1" token="$2" outfile="$3" base="${4:-$TC_BASE_URL}" http
   http="$(curl -s -o "$outfile" -w '%{http_code}' -H "Authorization: Bearer ${token}" \
-        "${TC_BASE_URL}/api/auth/me" || true)"
-  printf 'GET %s/api/auth/me   [%s]\n  → HTTP %s\n  body(原样): ' "$TC_BASE_URL" "$label" "$http"
+        "${base}/api/auth/me" || true)"
+  printf 'GET %s/api/auth/me   [%s]\n  → HTTP %s\n  body(原样): ' "$base" "$label" "$http"
   tc_show_body "$outfile"; printf '\n'
 }
 
-tc_post_logout() {  # <标签> <token>（token 为空则跳过 —— 幂等）
+tc_post_logout() {  # <标签> <token> [基地址]（token 为空则跳过 —— 幂等）
   if [ -z "$2" ]; then
     printf '  [%s] 没有 token，跳过登出\n' "$1"
     return 0
   fi
-  local out
+  local out base="${3:-$TC_BASE_URL}"
   out="$(curl -s -X POST -H "Authorization: Bearer $2" -w '\n  → HTTP %{http_code}' \
-        "${TC_BASE_URL}/api/auth/logout" || true)"
-  printf '  [%s] POST %s/api/auth/logout\n  body(原样): %s\n' "$1" "$TC_BASE_URL" "$out"
+        "${base}/api/auth/logout" || true)"
+  printf '  [%s] POST %s/api/auth/logout\n  body(原样): %s\n' "$1" "$base" "$out"
 }
 
 # ── 字段对照表（**只打印、不比对**；值取不到时打「（取不到）」，绝不静默留空）──────

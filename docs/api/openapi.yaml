@@ -80,8 +80,10 @@ info:
     > 五个码都配套 **HTTP 200**：与 `40001` 同一条理由（业务失败不污染前端的失败分支）。
     > 知识库链路的**每个失败点都有确定的 HTTP 载体**（没有 SSE 那样的"响应头已发"问题）——
     > 唯一的非 200 是上游模型不可达：**503 + 20100**（复用既有码），完整表见 `docs/api/README.md` §7.7。
-    > ⚠️ `40003` 与 `10201` 的 `msg` 里写死了"10MB"与"TXT / PDF"，而这两处的真源都是配置
-    > （`spring.servlet.multipart.max-file-size` / `nexus.ai.rag.allowed-extensions`）—— 已知成本，记在明处。
+    > ⚠️ `40003` 的 `msg` 里写死了"10MB"，其真源是配置 `spring.servlet.multipart.max-file-size`
+    > —— 改配置时要连文案一起改，属已知成本。
+    > `10201` 的"仅支持 TXT / PDF"则**没有**这个问题：白名单是后端常量（`TikaDocumentParser`），
+    > 与文案同源（初版设计曾想做配置键，实施时改掉 —— 可配的白名单会让写死的文案说谎）。
 
     ## 认证机制（阶段1）
     1. `POST /api/auth/login` 换取 `data.token`（JWT，有效期 `data.expiresIn` 秒）；
@@ -996,8 +998,11 @@ components:
           format: date-time
           description: |
             生成时刻，ISO-8601 带时区偏移，格式固定为 `yyyy-MM-dd'T'HH:mm:ssXXX`
-            （秒级精度、无小数秒）。偏移量取服务端默认时区 —— 容器内通常为 `+00:00`，
-            Windows 本地直跑为 `+08:00`。前端按字符串展示即可，需要 Date 对象时可 `new Date(timestamp)`。
+            （秒级精度、无小数秒）。偏移量取服务端默认时区。
+            ⚠️ **零偏移渲染成 `Z` 而不是 `+00:00`**（2026-09-22 实测：容器内是
+            `2026-09-22T12:59:02Z`，本地直跑是 `+08:00`）—— 两者都是合法的 ISO-8601，
+            消费方**不要断言时区**（`scripts/check-health.sh` 本就如此）。
+            前端按字符串展示即可，需要 Date 对象时可 `new Date(timestamp)`。
           example: '2026-09-03T10:00:00+08:00'
         checks:
           $ref: '#/components/schemas/HealthChecks'
@@ -1358,7 +1363,9 @@ components:
           format: date-time
           description: |
             入库时间，格式与 `/api/health` 的 `timestamp` **同款**：`yyyy-MM-dd'T'HH:mm:ssXXX`
-            （秒级、无小数秒）。偏移量随服务端时区 —— 容器内通常为 `+00:00`，不是 `+08:00`。
+            （秒级、无小数秒）。偏移量随服务端时区。
+            ⚠️ **零偏移渲染成 `Z` 而不是 `+00:00`**（2026-09-22 实测）：容器内是 `2026-09-22T02:30:00Z`，
+            本地直跑是 `+08:00` —— `Z` 与 `+00:00` 是等价的 ISO-8601 写法，**判据不要写死 `+00:00`**。
           example: '2026-09-22T10:30:00+08:00'
 
     KbDocumentListVO:
