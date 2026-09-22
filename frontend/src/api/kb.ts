@@ -148,10 +148,36 @@ const ASK_TIMEOUT_MS = 120_000
  *
  * 三条硬约束（每条都对应一次真实踩坑，见设计 §5.1）：
  *  ① **字段名必须是 `file`**：写成 `upload` 之类 → 后端 `MissingServletRequestPartException` → `40001`。
- *  ② **不要手工设置 `Content-Type`**：axios 1.x 在 `data` 是 `FormData` 时会主动**删掉**实例上的
- *     `application/json` 头、让浏览器自己带上 `boundary`；手工写死成 `multipart/form-data` 会
- *     **丢掉 boundary** → 后端 `MultipartException` → `40001`。所以下面**没有任何 headers 字段** ——
- *     这不是"忘了设置"，是刻意的。（`request.ts` 的实例默认头由 axios 自己处理，无需本文件干预。）
+ *  ② **必须显式声明 `Content-Type: multipart/form-data`**（下方 `headers` 那一行）——
+ *     **2026-09-22 手工走查 415（`code 40002`）事故的修复口径，与本节早先的写法相反**，三句说清：
+ *
+ *     (a) **不能在实例上设 `application/json`**（`request.ts` 目前就是），否则 axios 会顺着它
+ *         把 FormData 用错：`transformRequest` 一见请求头含 `application/json`，就对 FormData 走
+ *         `JSON.stringify(formDataToJSON(data))`（`axios/lib/defaults/index.js:57`）⇒ 真正发出去的
+ *         是**字符串** `{"file":{}}`，**文件字节一个都没发**；且 data 到适配器时已不是 FormData，
+ *         适配器里"摘掉该头、交给浏览器"的逻辑（`helpers/resolveConfig.js:65-73`）**永不触发** ⇒
+ *         后端按 `application/json` 收到 ⇒ 415。
+ *         （本机 axios 1.20.0 实测原样输出：`{"file":{}}`，`typeof` = `string`，长度 11。）
+ *         ⚠️ 早先那句"axios 见 FormData 会自动删掉 `application/json`"**是错的** —— 漏了上面这个
+ *         前置条件，而"删头"只发生在**适配器阶段**、救不了在**transform 阶段**已经被 JSON 化的 data。
+ *         头不存在时才有"自动"可言，所以修复点选在"别让它带上 application/json"。
+ *
+ *     (b) 因此这里**显式写 `multipart/form-data` 是安全的、不会丢 boundary**，逐阶段如下：
+ *         · transform 阶段：头不含 `application/json` ⇒ 走 `defaults/index.js:57` 的 false 分支，
+ *           原样返回 FormData（实测仍是 `FormData`，`file` 条目 34 字节）；
+ *         · `core/dispatchRequest.js:48-50` 的兜底 `setContentType('application/x-www-form-urlencoded', false)`
+ *           因 `rewrite=false`（= "仅在缺失时才设"）**不覆盖**已有值；
+ *         · 适配器入口：`resolveConfig`（xhr 见 `adapters/xhr.js:19`、fetch 见 `adapters/fetch.js:222`，
+ *           两个适配器都调）发现 `isFormData(data)` 为真且在浏览器环境，**主动摘掉该头**（`:65-73`）
+ *           ⇒ boundary 由浏览器在发送时补上。（fetch 适配器另有第二道同类保险：`adapters/fetch.js:423-434`。）
+ *
+ *     (c) **绝不能自己拼 `; boundary=…`**：boundary 由浏览器随机生成，前端无从得知该写什么，写死的
+ *         值必然与 body 实际用上的对不上。实测本版 axios 会把带 boundary 的头**一并摘掉**，所以拼死它
+ *         目前"侥幸不炸" —— 但那是靠 axios 兜底、不是靠写法正确，**别据此认为它是可选项**。
+ *
+ *     叠加说明：`request.ts` 的请求拦截器对 FormData 请求也会摘掉该头（通用防线，见那里的注释）。
+ *     两者同时生效时结果是**同一形态**（终局都是"头被摘掉、浏览器补 boundary"），本行不是冗余保险。
+ *
  *  ③ **逐请求覆盖超时**：见 `UPLOAD_TIMEOUT_MS` 的注释。
  *
  * 响应不是"已受理"而是"已入库"（§7.1）：返回 200 时入库**已经全部完成**，`data.chunkCount`
@@ -166,6 +192,9 @@ export function uploadDocument(file: File): Promise<KbDocumentVO> {
     url: '/kb/documents',
     method: 'post',
     data: formData,
+    // ★ 见上面 ②(b)：显式声明是安全的（适配器会摘掉它、让浏览器补 boundary）；
+    //   不写则实例默认头 application/json 会让 FormData 被 JSON 化 —— 那正是 415 的根因
+    headers: { 'Content-Type': 'multipart/form-data' },
     // ★ 逐请求覆盖：上传是本组唯一可能跑到分钟级的接口（'把超时放在实例上'会连累其他接口）
     timeout: UPLOAD_TIMEOUT_MS
   })
