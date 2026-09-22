@@ -36,7 +36,7 @@ import java.util.List;
  *   → 预检（文件名长度）    ← 失败 40001；与控制器那条"文件为空"同一层，失败得越早越好
  *   → 解析（事务外）        ← 失败 10201 / 10203，此时还没开事务，也不该有事务开销
  *   → 分块（事务外）
- *   → 上限检查（★ 向量化之前）← 失败 10204，几秒内发生而不是几分钟后
+ *   → 上限检查（★ 向量化之前）← 失败 10204，几秒内发生；不判则 ≈ 75 分钟（算式见 10204 的注释）
  *   → 事务 { 写文档 → 每批(向量化 + 写分块) }   ← 要么全成、要么全不成
  *   → 入库完成（日志）
  * </pre>
@@ -166,8 +166,9 @@ public class KbDocumentServiceImpl implements KbDocumentService {
         }
         int maxChunks = ragProperties.getMaxChunksPerDocument();
         if (chunks.size() > maxChunks) {
-            // 10MB 的 TXT ≈ 2 万块 ≈ 上万次 embedding —— 在这里停住，失败在几秒内发生；
-            // 否则用户看到的是一次"像上游超时"的失败，排查方向整个是错的
+            // 10MB 的 TXT ≈ 2 万块 ÷ 每批 16 块 = 1250 批 ≈ 75 分钟（实测 3.6 s/批）—— 在这里停住：
+            // 分块刚结束就失败，一行向量都还没算；否则用户看到的是一次"像上游超时"的失败，
+            // 排查方向整个是错的
             log.warn("[kb] 分块数超限: fileName={} chunks={} max={}", fileName, chunks.size(), maxChunks);
             throw new BusinessException(ResultCode.KB_CONTENT_TOO_LARGE);
         }

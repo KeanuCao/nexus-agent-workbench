@@ -55,8 +55,11 @@ public class RagProperties {
      * 单文档分块数上限，超过即 {@code BusinessException(10204)}。
      *
      * <p><b>它判在向量化之前</b>（决策 D15）：先分块、数一眼、再决定要不要调 embedding ——
-     * 10MB 的 TXT ≈ 2 万块 ≈ 上万次 embedding 调用，超限在几秒内失败，
-     * 而不是"跑到一半才发现太大"（那时用户看到的形态是一次像上游故障的超时，排查方向是错的）。
+     * 10MB 的 TXT ≈ 2 万块（÷ 每批 16 块 = 1250 批，按实测 ≈ 3.6 s/批 即 <b>≈ 75 分钟</b>），
+     * 故这道闸让它在<b>几秒内</b>失败，而不是"跑到一半才发现太大"
+     * （那时用户看到的形态是一次像上游故障的超时，排查方向是错的）。
+     * 算式与实测口径<b>只写一处</b>：{@link com.nexus.common.result.ResultCode#KB_CONTENT_TOO_LARGE}，
+     * 本条不重复推导（两处各写一份，早晚会漂成两个数）。
      *
      * <p>注意它与上传<b>字节数</b>上限是两回事：那个的唯一真源是
      * {@code spring.servlet.multipart.max-file-size}（10MB），业务侧不重复判。

@@ -190,7 +190,8 @@ nexus:
       chunk-overlap: 50
       # 文档上限（**不是**上传大小上限 —— 那个的唯一真源是下面 spring.servlet.multipart.max-file-size）
       # 先分块、再判上限、最后才向量化（决策 D15）：超限报 10204 在几秒内发生，
-      # 而不是"调了几千次 embedding 之后"才失败（那时用户看到的是一个像上游故障的超时）
+      # 而不是"把这份文档的向量全算完"才失败（那时用户看到的是一个像上游故障的超时）。
+      # 量级：2 万块的 TXT ÷ 每批 16 块 × 实测 3.6 s/批 ≈ 75 分钟（算式见 ResultCode.KB_CONTENT_TOO_LARGE）
       max-chunks-per-document: 3000
       # 检索
       top-k: 5
