@@ -201,7 +201,7 @@ nexus-agent-workbench/
 | 后端 | Java 17 · Spring Boot 3.3.13 · MyBatis-Plus 3.5.9 · Maven 多模块 |
 | 数据库 | PostgreSQL 16 + pgvector（向量检索） |
 | 缓存 | Redis 7 |
-| AI 能力 | Ollama 本地 CPU 推理：`qwen2.5:7b`（对话）+ `nomic-embed-text`（向量化）；统一网关后续规划接入云端模型（DeepSeek） |
+| AI 能力 | Ollama 本地 CPU 推理：`qwen2.5:7b`（对话）+ `bge-m3`（向量化，2026-09-22 由 `nomic-embed-text` 更换 —— 起因是中文检索召回不足，见 `docs/design/03-RAG知识库.md` §0.3）；统一网关后续规划接入云端模型（DeepSeek） |
 | 前端 | Vue 3 (script setup) + TypeScript · Vite 5 · Element Plus · Pinia · Vue Router · Axios |
 | 部署 | Docker Compose（WSL2 内运行）· `builder` 容器内构建 → 产物落共享卷 `build-artifacts` → 前后端挂载消费 · nginx 反代 |
 | 测试（规划中） | JUnit 5 + Mockito（后端）· Vitest + Playwright（前端） |

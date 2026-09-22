@@ -468,6 +468,13 @@ curl -s --max-time 10 http://localhost:8089/api/health
 
 ### 4.5 模型就绪的独立判据（**ollama 健康 ≠ 模型就绪**）
 
+> ⚠️ **2026-09-22 晚：期望模型清单已变更** —— 向量化模型由 `nomic-embed-text` 换为 **`bge-m3`**
+> （起因见 `docs/design/03-RAG知识库.md` §0.3：中文检索召回不足，答案块在 587 块中排第 27 名）。
+> ⇒ 本节所有"就绪"判据里的期望模型名，一律读作 **`qwen2.5:7b` + `bge-m3`**；唯一真源同步变为
+> `docker-compose.yml` 的 `ollama-init` 命令与 `scripts/lib/probe.sh` 的默认清单（两处由 devops 同步）。
+> 下面保留 nomic 时代的原文与 `:latest` 归一化陷阱的实例 —— **那部分与具体模型名无关，仍然适用**
+> （新模型同样可能以 `bge-m3:latest` 出现）。
+
 > **这是本次审查暴露出的最大盲区，务必按本节实现。**
 
 已核实的事实（不是推测）：
@@ -490,7 +497,7 @@ curl -s --max-time 5 "http://localhost:${OLLAMA_PORT}/api/tags"
 #              {"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","size":...}]}
 ```
 
-- **就绪**：`models` 数组里**同时**存在 `qwen2.5:7b` 和 `nomic-embed-text` 两项。
+- **就绪**：`models` 数组里**同时**存在 `qwen2.5:7b` 和 `bge-m3`（2026-09-22 晚之前为 `nomic-embed-text`）两项。
 - **未就绪**：`{"models":[]}` 或 `models` 字段缺失 → WARN + 继续（或按 30 min 轮询等待），
   **不要报成"ollama 挂了"**，两者处置完全不同。
 - 期望模型名的唯一来源：`docker-compose/docker-compose.yml` 的 `ollama-init` 命令

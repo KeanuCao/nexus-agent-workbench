@@ -104,6 +104,23 @@
 - **官方文档出处**：npm 文档（docs.npmjs.com：`package.json` 的 `engines` 字段、`engine-strict` 配置项）；Node.js 官方 Release 日程表（github.com/nodejs/Release）。本机无外网（docs.docker.com / github.com 均超时）**未在线复核** —— "engine-strict 默认 false、EBADENGINE 仅告警"已用**本机最小复现**代替在线文档取证。
 - **结论**：**不构成风险**，两层兜底：① 依赖锁定的 engines 兼容范围覆盖 Node 20（主链路全绿）；② 唯一不匹配者只是 rollup 的可选依赖且运行时零引用。**关键：不是靠"版本对齐"** —— 排查构建问题不要往这条使劲。附 watch item：**Node 20 的官方维护期已于 2026-04-30 结束**（演示项目不阻塞；将来升级只需改 `builder/Dockerfile` 一处）。
 
+### 3.8 Git Bash 调 `wsl -- bash -c` 时的参数/路径破坏（2026-09-22 实测）
+
+**现象**：把脚本内容塞进 `wsl -d X -- bash -c '…'` 时，内层的 `2>/dev/null`、`$(( ))`、`$p` 会被
+Git Bash 的参数与路径处理打乱 —— 实测报 `syntax error near unexpected token '2'` 与
+`sed: -e expression #1, char 15: unexpected ','`。同类问题还有：**`/mnt/c/...` 裸路径被转成
+`C:/Program Files/Git/mnt/...`**（报 `bash: …: No such file or directory`）。
+
+**判据**：命令里出现 `$`、重定向、算术展开、或 `/mnt/` 裸路径时，**不要**用一层 `bash -c '…'` 硬扛。
+
+**稳的写法**（2026-09-22 晚，三个不同 agent 各自踩过之后统一）：
+1. **脚本落盘**（放仓库内 `.tmp/<agent>/`），执行用
+   `MSYS_NO_PATHCONV=1 wsl -d <发行版> -- bash /mnt/c/.../x.sh`；
+2. 只有在**命令里完全没有 `$`** 时，才用 `wsl -d X -- bash -c "…"`（既有纪律，见 §3.5 / §3.6）；
+3. **别用 `bash -s < 脚本`**：`bash -s` 从 stdin 读脚本，而脚本里若嵌了喂给 `docker exec -i` 的 heredoc，
+   两者会**争用同一个 stdin** ⇒ 症状是**输出为空、脚本静默半途而废**（还可能留下沙箱库/半截状态，
+   本项目实测踩到两次）。需要"脚本内容"时落盘，不要走 stdin。
+
 ## 4. 常见问题预案（占位，遇到实际问题后填充）
 
 | 问题 | 预案思路 |
