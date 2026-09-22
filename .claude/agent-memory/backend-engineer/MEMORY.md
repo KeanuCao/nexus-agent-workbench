@@ -5,3 +5,4 @@
 - [agent-log 与草稿复核](agent-log-cross-session-lessons.md) — docs/agent-log/ 是教训入口；草稿/子代理结论先实测复核再采用
 - [文档写"单一真源"的三档口径](feedback_doc-single-source.md) — 判据写「等于真源」+取数命令；样例标注"示例值"；文件名走通配；别只判 semver 正则
 - [临时工作区 .tmp/<agent>/](feedback_tmp-workspace.md) — 脚本放仓库内免审批；看源码走 Grep/Read 工具，Bash 复合命令必被拦
+- [KB 上传 415/40002 根因](project_kb-upload-multipart-415.md) — 实例默认头 application/json 让 axios 把 FormData 转成 JSON；假断言抄在 5 处文档里
