@@ -32,6 +32,8 @@ import java.util.List;
  *     <caption>异常分类与出口</caption>
  *     <tr><th>异常类型</th><th>HTTP</th><th>code</th><th>日志级别</th><th>msg 是否可展示</th></tr>
  *     <tr><td>{@link BusinessException}</td><td>200</td><td>业务码（非 0）</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link BusinessException} 且 {@code code=20100}</td><td><b>503</b></td>
+ *         <td>{@code CHAT_UPSTREAM_UNAVAILABLE}</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link UnauthorizedException}</td><td>401</td><td>40100 / 40101 / 40102</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link MethodArgumentNotValidException}</td><td>200</td><td>40001</td><td>warn（打字段级明细，不打堆栈）</td><td>是</td></tr>
  *     <tr><td>{@link HttpMessageNotReadableException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
@@ -48,6 +50,11 @@ import java.util.List;
  * <p>业务异常为何用 HTTP 200：本项目以"统一响应体 + 业务码"作为前端的判定依据
  * （前端拦截器按 {@code code === 0} 判成功），HTTP 状态码留给传输/可用性语义
  * （如 /api/health 的 503）。该约定已写入 docs/api/README.md，前后端一致。
+ *
+ * <p><b>唯一的例外是 {@code code=20100}</b>（阶段3 知识库链路）：契约 §7.7 把
+ * "向量化 / 生成时上游不可达"写死为 <b>503 + 20100</b>，且那条链路全程同步 ——
+ * 20100 只有一种载体，不像对话接口还能走 {@code event: error} 帧。
+ * 例外只在这一处、且由码判定（见 {@link #handleBusinessException} 的注释）。
  *
  * <p>未认证异常为何是 HTTP 401（阶段1 新增）：认证失败是<b>传输层</b>语义 ——
  * 前端 {@code request.ts} 的 401 分支负责"清 token + 跳登录"，契约在先。
@@ -76,13 +83,37 @@ public class GlobalExceptionHandler {
     /**
      * 业务异常：可预期、可展示。
      *
+     * <p><b>默认出口 HTTP 200 + 非 0 业务码</b>，但有<b>一个按码分流的特例</b>：
+     * {@link ResultCode#CHAT_UPSTREAM_UNAVAILABLE}（20100）走 <b>HTTP 503</b> ——
+     * 见方法内的注释（依据是契约 {@code docs/api/README.md} §7.7）。
+     *
      * @param ex 业务异常
-     * @return HTTP 200 + 非 0 业务码
+     * @return HTTP 200 + 非 0 业务码；{@code code=20100} 时为 HTTP 503
      */
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<Result<Void>> handleBusinessException(BusinessException ex) {
         // 业务异常不打堆栈：它是"规则没通过"，不是程序缺陷
         log.warn("业务异常：code={} msg={}", ex.getCode(), ex.getMessage());
+        if (ex.getCode() == ResultCode.CHAT_UPSTREAM_UNAVAILABLE.getCode()) {
+            // ★ 有意为之的**按码分流**（依据：契约 docs/api/README.md §7.7 与设计 §3.7）：
+            //   知识库链路（阶段3）全程同步，20100 的载体**只有 503 一种**
+            //   （不像对话接口那样还有 event: error 帧）—— 契约把"向量化 / 生成时上游不可达"
+            //   写死为 HTTP 503 + 20100，故这里不能沿用"业务异常一律 200"的默认出口。
+            //   本类其余出口一概不动。
+            //
+            // 为什么不新建一个异常类型：那要改所有抛出点（含阶段2 的两个 provider），
+            //   而"码即语义"在本项目已经成立（ResultCode 就是码的唯一真源），四行分流代价最小。
+            //
+            // 为什么不影响阶段2（已逐点复核，2026-09-22）：
+            //   ① 池满 → chatExecutor.execute(...) 在**请求线程**上抛 TaskRejectedException，
+            //      由本类下方那个出口给 503 + 20100，不经过这里；
+            //   ② 上游不可达 / 超时 / 中途报错 → 发生在 ChatServiceImpl 的**工作线程**里，
+            //      被原地 catch 成 error 帧（响应头早已发出，异常根本没有出口）。
+            //   ⇒ 能走到本分支的生产路径只有知识库链路（OllamaEmbeddingService 的 3 处、
+            //     KbAskServiceImpl 的 1 处，以及 ModelAnswerGenerator 对 provider 20100 的透传）。
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Result.failure(ex.getCode(), ex.getMessage()));
+        }
         return ResponseEntity.ok(Result.failure(ex.getCode(), ex.getMessage()));
     }
 
