@@ -44,8 +44,11 @@ public class ChatController {
      * {@code POST /api/chat/stream}：把会话历史全量上送，以 SSE 事件流逐片返回回答。
      *
      * <p>{@code produces} / {@code consumes} 显式声明（宪法要求）：前者不仅是文档 ——
-     * Spring 会据此把响应 {@code Content-Type} 设成 {@code text/event-stream;charset=UTF-8}，
-     * 而**前端就是靠它**区分"事件流"与"开流前的普通 Result"（20100 有两种载体，见 README §6.3）。
+     * Spring 会据此把响应 {@code Content-Type} 设为 {@code text/event-stream}（**裸值，不带
+     * {@code ;charset=UTF-8}**：SSE 恒为 UTF-8，该参数按规范只是为兼容遗留服务端而保留，本项目
+     * 刻意不加；2026-09-21 实测），而**前端就是靠它**区分"事件流"与"开流前的普通 Result"
+     * （20100 有两种载体，见 README §6.3 —— 前端用 {@code includes('application/json')} 判，
+     * 不能全等：失败形态的 json 带 charset，两边形态本就不一致）。
      *
      * @param request 请求体（{@code messages} + 可空的 {@code modelType}）
      * @return SSE 出口（返回后响应头即已发出）

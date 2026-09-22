@@ -62,6 +62,22 @@ spring:
       # 不依赖这里的全局默认值兜底（两处同源，避免"配了个值却不生效"）。
       request-timeout: 300000
 
+  # ── 文件上传（阶段3 知识库：POST /api/kb/documents 的 multipart 上限）──
+  servlet:
+    multipart:
+      # ★ 必须显式配：Spring Boot 的 max-file-size 默认是 **1MB**。
+      #   不配的话一份 2MB 的年报 PDF 会直接失败（表现为 40003，或 §6.2 记的"连接被重置"）。
+      #   这是"配置漏了、症状却像代码 bug"的典型：1MB 以下的上传全部正常，一过线就报错 ——
+      #   本值是"单文件 10MB"这个业务上限的**唯一真源**，服务层刻意不重复判一遍。
+      max-file-size: 10MB
+      # 请求总体上限比 file-size 大一档：multipart 信封（boundary、各 part 的头部）本身要占字节，
+      # 两者取相同值时"刚好 10MB 的文件"会被信封顶出去而失败
+      max-request-size: 12MB
+      # ⚠️ 待实测（刻意先不配）：Tomcat 默认只"吞掉"约 2MB 的超限请求体，超出部分会让容器直接断连，
+      #    症状是"上传 11MB 文件时连接被重置"而不是 40003。判据：故意传一个 11MB 的文件看拿到哪个；
+      #    若为连接错误，再在 server: 段加 max-swallow-size: 12MB（或 -1 表示不限制）。
+      #    本条与上面 ai.* / rag.* 一样**不在** compose 的 environment 里，改了同样要重打包 + 重启。
+
 # ── MyBatis-Plus：阶段0 只接入依赖、不写 Mapper；多租户拦截器 / 分页 / 主键策略在阶段1 按设计文档补充 ──
 mybatis-plus:
   global-config:
@@ -143,6 +159,11 @@ nexus:
       base-url: ${OLLAMA_BASE_URL:http://ollama:11434}
       chat-path: /api/chat
       model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+      # ── 阶段3 新增：embedding 端点（对话与向量化是两条不同的上游路径）──
+      # ✅ 2026-09-22 探针 A/B 实测：端点存在、响应形状 {"embeddings":[[...]]}、**支持批量入参**。
+      # 单独做成配置项的理由：将来换 Ollama 版本时若该端点改了名字，只改这一行，
+      # OllamaEmbeddingService 内部那条"退化为旧的 /api/embeddings 逐条调用"的退路也由它兜底。
+      embed-path: /api/embed
     deepseek:
       base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
       chat-path: /chat/completions
@@ -157,6 +178,39 @@ nexus:
       core-size: 4
       max-size: 16        # 并发流上限
       queue-capacity: 0   # 不排队：无界队列 + 长连接 = 内存慢性泄漏；满了直接拒绝并返回 503 + 20100
+
+    # ── RAG 知识库（阶段3；绑定见 com.nexus.module.ai.rag.config.RagProperties）──
+    # ⚠️ 本块所有键**都不在** docker-compose 的 nexus-backend.environment 里（与上面 ai.* 同一类坑）：
+    #    在 .env 里改它们容器收不到，只能改本文件的默认值 = **重打包 + 重启后端**（配置打进 jar）。
+    rag:
+      # 分块（task.4 3.3 验收点名"可配置"）：窗口 500 字、相邻块重叠 50 字 ⇒ 步长 = 500 - 50 = 450
+      # ⚠️ 改这两个值之后**必须重传文档**才生效 —— 本轮不保存原始文件，无法对已入库的文档重新分块（决策 D8）。
+      #    症状是"改了配置、块数却没变"，非常容易被误判成"配置没生效"
+      chunk-size: 500
+      chunk-overlap: 50
+      # 文档上限（**不是**上传大小上限 —— 那个的唯一真源是下面 spring.servlet.multipart.max-file-size）
+      # 先分块、再判上限、最后才向量化（决策 D15）：超限报 10204 在几秒内发生，
+      # 而不是"调了几千次 embedding 之后"才失败（那时用户看到的是一个像上游故障的超时）
+      max-chunks-per-document: 3000
+      # 检索
+      top-k: 5
+      max-top-k: 20
+      # 相似度阈值（余弦）：低于它的检索结果一律丢弃；全部低于 → grounded=false 且**不调用大模型**
+      # 初值 0.5 是**起点不是结论** —— 标定五步见设计文档 §3.9（问文档里有的问题记 S_hit、
+      # 问一定没有的问题记 S_miss，取 (S_miss+S_hit)/2 附近），跑完把结果写进 TC-03 备注
+      score-threshold: 0.5
+      # 问答生成用哪个模型（取值即 ModelType 枚举名）。默认云端：中文问答质量与速度都更好（约 4s vs CPU 上 30s+）
+      # 无 DEEPSEEK_API_KEY 时选 DEEPSEEK 会直接 20100（阶段2 既定行为）；离线演示可改成 OLLAMA
+      answer-model-type: DEEPSEEK
+      # 问题长度上限（按**字符**计，不是字节）：与对话接口的 8KB 字节口径不同是**有意的**（契约 §7.4）——
+      # 问题天然是短的，500 字符 ≈ 500 个汉字，口径简单可读即可；超出 → 40001
+      max-question-length: 500
+      # embedding（nomic-embed-text 的检索侧任务前缀，决策 D14）：入库侧加 document-prefix、查询侧加 query-prefix
+      # ⚠️ 改这两个前缀之后**必须重灌全部文档**：存量向量与新查询向量会不在同一个空间，
+      #    而且**不报错、只是检索质量静默劣化** —— "改了没生效 / 生效了反而变差"是本仓库最防的失效形态。
+      #    两个前缀必须成对同源地改：只改一侧，等于把两侧的向量按比例拉偏（同样不报错）
+      document-prefix: "search_document: "
+      query-prefix: "search_query: "
 
   # ── 请求侧安全（阶段1；绑定见 SecurityProperties）──
   security:
@@ -182,3 +236,8 @@ logging:
     #    这是"任何查询都自动带租户条件"唯一可见、可截图、可演示的证据。
     #    验收通过后可改回 info（届时 SQL 日志消失，属预期）。
     com.nexus.module.system.mapper: debug
+    # ⚠️ 阶段3 的验收判据之一（TC-03 §3.3-③④）：rag 的 Mapper 包同样要开 debug
+    #    —— 这是"检索 SQL 真的被注入了 tenant_id"唯一可见、可截图、可演示的证据（设计 D11 的判据）。
+    #    要看的是 KbChunkMapper.search 打印出来的最终 SQL 里带没带 tenant_id = ?
+    #    （待实测：jsqlparser 能否改写 CAST(? AS vector) —— 设计 §9 风险 4 有退路，验证就在这一行日志上）。
+    com.nexus.module.ai.rag.mapper: debug

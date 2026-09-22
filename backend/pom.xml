@@ -28,7 +28,7 @@
       install/deploy 前由 flatten-maven-plugin（见下方 <build>）把 ${revision} 落成具体版本号，
       否则装进仓库的 POM 里仍是 ${revision} 字面量，消费者解析不了。
     【生态版本】Spring Boot 生态版本全部由 spring-boot-starter-parent → spring-boot-dependencies(BOM)
-      统一管理；BOM 未覆盖的第三方（MyBatis-Plus / jjwt）在本文件集中声明，子模块引用时禁止再写 <version>。
+      统一管理；BOM 未覆盖的第三方（MyBatis-Plus / jjwt / Tika）在本文件集中声明，子模块引用时禁止再写 <version>。
     【历史故障，勿重演】2026-09-15 实测：父 POM 0.2.1、子模块 <parent><version> 写死 0.2.0 时，
       Maven 在 ../pom.xml 读到 GAV 不匹配（0.2.1 ≠ 被请求的 0.2.0），转而从本地仓库解析
       nexus-parent:0.2.0；因为 builder-m2 是持久卷、里面正好有旧版本，构建成功且零警告，
@@ -95,6 +95,22 @@
           需另行核对，本阶段不引入无收益的核对成本。三个坐标（api/impl/jackson）必须同版本。
         -->
         <jjwt.version>0.12.6</jjwt.version>
+        <!--
+          Tika 版本（阶段3：知识库的 PDF 解析）。选型与核实记录：
+            ✅ 2026-09-22 已核实：tika-core:3.2.3 与 tika-parser-pdf-module:3.2.3 的 .pom / .jar
+              在 **builder 实际使用的那个镜像源**（阿里云 public）上均为 HTTP 200
+              —— 核实命令（宿主即可跑，无需 Maven）：
+                curl -sI https://maven.aliyun.com/repository/public/org/apache/tika/tika-core/3.2.3/tika-core-3.2.3.pom
+              ⚠️ 该核实是"构件在源上存在"，**不等于**一次完整的 Maven 依赖解析（传递依赖未逐一验）；
+              真正的判据是 builder 容器里 `build-backend` 成功。
+            回退链（首次构建若报依赖解析失败再说，那时是响亮报错、不会静默）：
+              ① tika-parser-pdf-module 某个版本不存在 → 换 org.apache.tika:tika-parsers-standard-package
+                 （确定存在，代价是把 Office / 图片 / 音频解析器一并带进来，构建与镜像都变重）；
+              ② 整条 3.x 不可用 → 降到 2.9.2（坐标相同，版本号改这一行 + tika-parser-pdf-module 同步）。
+            不取更新的 4.0.0（2026-08 发布）：跨大版本的 API 差异要另行核对，本阶段不引入无收益的核对成本
+            （与 jjwt 不取 0.13.0 是同一条取舍）。
+        -->
+        <tika.version>3.2.3</tika.version>
     </properties>
 
     <dependencyManagement>
@@ -160,6 +176,26 @@
                 <groupId>io.jsonwebtoken</groupId>
                 <artifactId>jjwt-jackson</artifactId>
                 <version>${jjwt.version}</version>
+            </dependency>
+
+            <!--
+              Tika（阶段3 知识库：PDF 解析）。只引 PDF 解析模块，**不引** tika-parsers-standard-package
+              —— 后者会带进 Office / 图片 / 音频等一大批本项目用不到的解析器，构建与镜像都变重，
+              而本轮只需要"PDF → 纯文本"（TXT 走 JDK 直读 + 编码探测，决策 D13）。
+              将来加 Word 支持时，成本是"多一行依赖"（tika-parser-microsoft-module），
+              解析代码一行都不用改（Tika 按内容自选解析器）—— 路径见设计 §10.1。
+              版本与核实/回退记录见上方 properties 里的 tika.version 注释。
+            -->
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-core</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <!-- PDF 解析器实现（含 PDFBox）：运行期由 Tika 的服务加载机制发现，故子模块里是 runtime 作用域 -->
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-parser-pdf-module</artifactId>
+                <version>${tika.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

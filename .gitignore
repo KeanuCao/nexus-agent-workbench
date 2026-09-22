@@ -10,6 +10,9 @@
 .claude/settings.local.json
 # settings.json 仅含团队共享 hooks（无密钥），随仓库提交
 !.claude/settings.json
+# 技能（skills）默认视为**个人工作流**，不进仓库（如 sync-master：本机 git 同步用）。
+# 若某个技能确实要随项目交付，用 `!.claude/skills/<技能名>/` 显式放行 —— 别为此放开整个目录。
+.claude/skills/
 
 # ── Java / Maven ──
 target/
@@ -55,3 +58,26 @@ docker-compose/data/
 #      下 spring-{core,web,webmvc}-6.1.21-sources.jar 解包而成。
 # 体积约 15MB，纯只读参考，不属于任何构建链路 —— 删掉不影响构建，需要时重下即可。
 .deps-src/
+
+# ── Agent 临时工作区（脚本 / 检查产物，**不进仓库**）──
+# 约定：临时脚本一律放 .tmp/<agent 名>/（如 .tmp/backend-engineer/check_static.py），
+#      **不要**写系统临时目录（/tmp、%TEMP%）与仓库外的任何路径 ——
+#      blockReadsOutsideWorkingDirectories 会拦下它们，且每次都要人工批准；
+#      放仓库内 → Read/Grep/Glob 零审批、离线可用、随手可查。
+# 纪律：它**不属于任何生产链路**（up.sh / 镜像构建 / db-patch 迁移都不读它），随时可整个删掉。
+#      要留下来的结论请写进 docs/agent-log/ 或 TC-XX，而不是留在 .tmp/ 里。
+.tmp/
+
+# ── 测试运行的临时捕获（含登录 token，严禁提交）──
+# 用例脚本的输出重定向到这里（如 .result/tmp-result.txt）。它只是"取证现场"：
+# 关键行（响应头、meta/done 帧、日志、指纹）应**摘录进 TC-XX 的「实测」栏**，
+# 原始捕获本身不入库 —— 它内含真实 JWT，且体积随帧数增长。删掉不影响任何链路。
+.result/
+
+# ── 阶段验收夹具（体积大 / 第三方材料，**不入库**）──
+# qa/fixtures/rag/公司年报.pdf 是阶段3 的验收夹具（2026-09-22 用户提供），刻意不入库，两条理由：
+#   ① 它是一份真实的第三方公开材料（年报），本仓库是**公开**仓库，再分发有来源与版权问题；
+#   ② 1.6MB 且只在**宿主侧**被上传时用到，不参与任何构建链路（builder / up.sh / db-patch 都不读它）。
+# 复现方式：自备一份中文、含财务数字的 PDF，放到该目录、保持同名即可（判据与期望答案见 TC-03）。
+# 注意：**只忽略 PDF** —— qa/fixtures/rag/ 下的说明文件与生成脚本仍照常入库。
+qa/fixtures/rag/*.pdf

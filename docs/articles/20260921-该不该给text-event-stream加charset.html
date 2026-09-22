@@ -1,0 +1,440 @@
+<!--
+  本页是同一份正文的**排版版**：正文源在同目录的 20260921-该不该给text-event-stream加charset.md
+  （Markdown，适合贴到掘金/知乎等平台）。**改正文请改 .md，再同步到这里** —— 别只改一边。
+  自包含：字体走 Google Fonts，其余（CSS）全内联，无脚本、无外部依赖，双击即可用浏览器打开。
+-->
+<title>该不该给 text/event-stream 加 charset</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+
+<style>
+  :root {
+    --ground: #f5f5f1;
+    --surface: #ffffff;
+    --ink: #1a1d1f;
+    --muted: #6a7075;
+    --rule: #e2e2da;
+    --rule-strong: #cfcfc5;
+    --claim: #7d4a63;
+    --real: #2e6b58;
+    --code-bg: #efefe9;
+    --code-ink: #23282b;
+    --shadow: 0 1px 2px rgba(26, 29, 31, .06), 0 8px 24px -18px rgba(26, 29, 31, .35);
+
+    --serif: 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+    --sans: 'Noto Sans SC', -apple-system, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #131619;
+      --surface: #1a1e22;
+      --ink: #e8ebec;
+      --muted: #99a3a9;
+      --rule: #2a3036;
+      --rule-strong: #3a4249;
+      --claim: #c99bb2;
+      --real: #7cc3a6;
+      --code-bg: #0e1114;
+      --code-ink: #cfd6d9;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 28px -20px rgba(0, 0, 0, .9);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #131619;
+    --surface: #1a1e22;
+    --ink: #e8ebec;
+    --muted: #99a3a9;
+    --rule: #2a3036;
+    --rule-strong: #3a4249;
+    --claim: #c99bb2;
+    --real: #7cc3a6;
+    --code-bg: #0e1114;
+    --code-ink: #cfd6d9;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 28px -20px rgba(0, 0, 0, .9);
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16.5px;
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 42rem;
+    margin: 0 auto;
+    padding-block: 3.5rem 5rem;
+    padding-inline: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+  }
+
+  /* ── 报头 ── */
+  .masthead { display: flex; flex-direction: column; gap: 1rem; }
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    margin: 0;
+  }
+  .kicker::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: clamp(1.6rem, 6vw, 2.5rem);
+    line-height: 1.25;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h1 code {
+    font-family: var(--mono);
+    font-size: .78em;
+    font-weight: 600;
+    background: none;
+    padding: 0;
+    color: var(--real);
+    letter-spacing: -.02em;
+  }
+
+  .standfirst {
+    margin: 0;
+    font-size: 1.02rem;
+    color: var(--muted);
+    max-width: 34rem;
+  }
+  .standfirst b { color: var(--ink); font-weight: 500; }
+
+  /* ── 章节 ── */
+  .step { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  .step-head {
+    display: flex;
+    align-items: baseline;
+    gap: .8rem;
+    padding-bottom: .5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .num {
+    font-family: var(--mono);
+    font-size: .8rem;
+    font-weight: 600;
+    color: var(--real);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .04em;
+  }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: 1.22rem;
+    line-height: 1.4;
+    letter-spacing: -.005em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 1rem;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+  }
+  h3::before {
+    content: "";
+    width: .5rem;
+    height: .5rem;
+    border-radius: 1px;
+    background: var(--claim);
+    flex: none;
+  }
+  h3.alt::before { background: var(--real); }
+
+  p { margin: 0; }
+  b, strong { font-weight: 700; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: .12em .38em;
+    border-radius: 3px;
+  }
+
+  /* ── 证据块（实测捕获）── */
+  .evidence {
+    background: var(--code-bg);
+    border-left: 2px solid var(--real);
+    border-radius: 0 4px 4px 0;
+    padding: .9rem 1rem;
+    overflow-x: auto;
+  }
+  .evidence pre {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: .78rem;
+    line-height: 1.75;
+    color: var(--code-ink);
+    white-space: pre;
+    font-variant-numeric: tabular-nums;
+  }
+  .evidence .hi { color: var(--real); font-weight: 600; }
+  .evidence .dim { color: var(--muted); }
+
+  /* ── 规范引文 ── */
+  .spec {
+    border-left: 2px solid var(--claim);
+    padding: .35rem 0 .35rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .45rem;
+  }
+  .spec q {
+    font-family: var(--serif);
+    font-size: 1.02rem;
+    line-height: 1.6;
+    quotes: none;
+  }
+  .spec .gloss { color: var(--muted); font-size: .9rem; }
+  .micro {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .spec .micro { color: var(--claim); }
+
+  /* ── 面板（机制 / 教训 / 提及）── */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 1rem 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .7rem;
+    box-shadow: var(--shadow);
+  }
+  .panel .micro { color: var(--real); }
+  .lesson { border-left: 2px solid var(--claim); }
+  .lesson .micro { color: var(--claim); }
+  .panel p { font-size: .95rem; }
+
+  /* ── 表格 ── */
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  caption { text-align: left; padding: 0 0 .6rem; }
+  th, td {
+    text-align: left;
+    padding: .6rem .8rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  thead th {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
+  .tag {
+    font-family: var(--mono);
+    font-size: .72rem;
+    color: var(--claim);
+    white-space: nowrap;
+  }
+  .tag.real { color: var(--real); }
+
+  /* ── 收尾清单 ── */
+  .rules { display: flex; flex-direction: column; gap: .55rem; margin: 0; padding: 0; list-style: none; }
+  .rules li {
+    display: grid;
+    grid-template-columns: 1.6rem 1fr;
+    gap: .5rem;
+    font-size: .96rem;
+  }
+  .rules .n {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--real);
+    font-variant-numeric: tabular-nums;
+    padding-top: .35rem;
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.4rem;
+    color: var(--muted);
+    font-size: .88rem;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+  }
+  footer .sig { font-family: var(--mono); font-size: .74rem; letter-spacing: .06em; }
+
+  a { color: var(--real); text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--real); outline-offset: 3px; border-radius: 2px; }
+
+  @media (max-width: 560px) {
+    body { font-size: 16px; }
+    .wrap { padding-block: 2.25rem 3rem; gap: 2.25rem; }
+    .evidence pre { font-size: .72rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<main class="wrap">
+
+  <header class="masthead">
+    <p class="kicker">一次真实排查 · 2026-09-21</p>
+    <h1>该不该给 <code>text/event-stream</code> 加 charset</h1>
+    <p class="standfirst">一次从<b>实测</b>到<b>规范</b>、再定下 <b>6 处订正</b>的完整排查。顺带记下同日撞见的两个静默失效 —— 它们都"看着像跑通了"。</p>
+  </header>
+
+  <section class="step">
+    <div class="step-head"><span class="num">01</span><h2>现场：那三行响应头</h2></div>
+    <p>一次流式对话的验收里，我把响应头<b>原样</b>抓了下来 —— 带到达时刻，不加工：</p>
+    <div class="evidence">
+<pre>[09:17:45.522] HTTP/1.1 200
+[09:17:45.525] <span class="hi">Content-Type: text/event-stream</span>
+[09:17:45.527] Transfer-Encoding: chunked
+[09:17:45.529] Date: Mon, 21 Sep 2026 01:17:45 GMT</pre>
+    </div>
+    <p>问题在第二行：<b>没有 <code>;charset=UTF-8</code></b>。而我们自己的测试用例判据里写的是 <code>text/event-stream;charset=UTF-8</code> —— 用例和实测对不上。于是有了这次排查。</p>
+  </section>
+
+  <section class="step">
+    <div class="step-head"><span class="num">02</span><h2>先判"该不该"，再判"谁错了"</h2></div>
+    <p>顺序很重要。如果一上来就去翻代码找"是谁漏了 charset"，很快会掉进"谁改谁对"的扯皮 —— 而这类问题的答案，通常<b>不在代码里，在规范里</b>。</p>
+    <div class="spec">
+      <span class="micro">规范原文 · IANA 注册</span>
+      <q>serves no purpose; it is only allowed for compatibility with legacy servers.</q>
+      <span class="gloss">它不服务于任何目的，只为兼容遗留服务端而保留。</span>
+    </div>
+    <div class="spec">
+      <span class="micro">规范原文 · WHATWG HTML</span>
+      <q>Event streams are always decoded as UTF-8. There is no way to specify another character encoding.</q>
+      <span class="gloss">事件流恒按 UTF-8 解码，无法指定其它编码。</span>
+    </div>
+    <p>⇒ 加它<b>不改变任何行为</b>。而本项目的接口契约声明的就是裸 <code>text/event-stream</code>，实现与契约一致。</p>
+    <div class="panel">
+      <span class="micro">结论 · 不加</span>
+      <p>保持裸值。前端也无需依赖它 —— 它自己 <code>TextDecoder('utf-8')</code> 解码、按 <code>includes('application/json')</code> 分流。</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-head"><span class="num">03</span><h2>那么错的是理由，不是结论</h2></div>
+    <p>文档里原来那句话是这样的（两处文档 + 契约机器版里都有）：</p>
+    <div class="spec">
+      <span class="micro">被订正的原话</span>
+      <q>判断响应类型要用 <code>includes('application/json')</code>，<b>因为 Spring 会给 <code>text/event-stream</code> 带上 <code>;charset=UTF-8</code></b>，全等比较会误判。</q>
+    </div>
+    <p>实测把这句因果拆开了：<b>SSE 那半不带</b>，而<b>失败形态的 <code>application/json</code> 带</b>（<code>application/json;charset=UTF-8</code>，同一天另一次实测）。</p>
+    <p>也就是说 —— <b>"别用全等比较"这个结论是对的，理由却指错了对象</b>：两边形态<b>本就不一致</b>，这才是不能用全等比较的原因。</p>
+    <p>再补一个能讲"为什么"的机制。失败侧是<b>手写响应</b>：</p>
+    <div class="evidence">
+<pre><span class="dim">// JwtAuthenticationFilter.writeUnauthorized()</span>
+response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+response.setCharacterEncoding(StandardCharsets.UTF_8.name());  <span class="dim">// ← 就是这句让容器补上 charset</span></pre>
+    </div>
+    <p>成功侧走 <code>SseEmitter</code> + <code>produces = text/event-stream</code>，<b>没有任何人设置编码</b>。</p>
+    <div class="panel">
+      <span class="micro">机制</span>
+      <p><b>两类不同的写入者 ⇒ 形态不一致是必然，不是偶发。</b>这比"Spring 会怎样怎样"精确得多，也是能拿去讲的那种解释。</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-head"><span class="num">04</span><h2>一句错理由，复制到了 6 处</h2></div>
+    <p>订正范围不是按"文档几处"定的，而是按<b>这句错理由被复制到了几处</b>定的：</p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>位置</th><th>性质</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>api/README.md</code> §6.3</td><td>说明文字</td></tr>
+          <tr><td><code>design/02</code> §5.1-2</td><td>说明文字</td></tr>
+          <tr><td><code>openapi.yaml</code> ×2</td><td><span class="tag">最重</span> 其中一处<b>直接断言成功响应头带 charset</b>，与实测正面冲突</td></tr>
+          <tr><td><code>chat.ts</code> 注释</td><td><span class="tag real">行为对</span> <b>代码注释</b>：理由错、行为对</td></tr>
+          <tr><td><code>ChatController.java</code></td><td><span class="tag real">行为对</span> javadoc：理由错、行为对</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="panel lesson">
+      <span class="micro">最隐蔽的一类错</span>
+      <p><b>"理由错、行为对"。</b>行为正确（用 <code>includes</code>）会让人以为整句话都对，错的理由就顺着注释 → 文档 → 契约一路复制。<b>行为正确不构成理由正确的证据。</b></p>
+    </div>
+    <p>订正的分寸：<b>只换理由半句，结论一字未动</b>；<code>application/json</code> 那半<b>实测存在</b>的 charset 也一个没删 —— 动了就是造假。</p>
+  </section>
+
+  <section class="step">
+    <div class="step-head"><span class="num">05</span><h2>同一天撞见的两个静默失效</h2></div>
+
+    <h3>A. 测试工具漏了一个 <code>return</code></h3>
+    <p>我们的流式捕获工具会把每一行<b>原样</b>打出来（带到达时刻）。跑完一看，那一整段 <b>1065 行全是 <code>None</code></b> —— 连响应头都看不见。</p>
+    <p>而与此同时：<b>汇总统计完全正确、工具自检全绿。</b></p>
+    <p>原因：<code>feed_line()</code> 少了一句 <code>return</code>，调用方拿到的永远是 <code>None</code>。</p>
+    <div class="panel lesson">
+      <span class="micro">教训</span>
+      <p><b>自检只覆盖统计，挡不住"人看到的东西是坏的"。</b>已补两项"逐行回显"检查，并用"故意删掉 <code>return</code> 的副本"验证过它真的会报不通过。</p>
+    </div>
+
+    <h3>B. 环境变量文件里的同名键</h3>
+    <p><code>.env.local</code> 里有两行同名的 API key，而 compose 的 <code>env_file</code> 是<b>后面的行覆盖前面的行</b> ⇒ 容器里生效的是第二个（一个 14 字符的占位值），真密钥被<b>静默遮蔽</b>。</p>
+    <p>更隐蔽的是：<b>启动日志照样打 <code>apiKey已配置=true</code></b> —— 它只判"非空"。直到第一次云端请求，才以 <code>401 → 20100</code> 的形式现形，而现场看起来像"上游挂了"。</p>
+    <div class="panel lesson">
+      <span class="micro">教训</span>
+      <p><b>"非空"不等于"有效"。</b>判环境态时别只看"有没有"，要看"值是什么"。</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-head"><span class="num">06</span><h2>可复用的五条</h2></div>
+    <ol class="rules">
+      <li><span class="n">01</span><span><b>先判"该不该"，再判"谁错了"</b> —— 规范 → 契约 → 依赖方，最后才轮到代码。</span></li>
+      <li><span class="n">02</span><span>文档里每个"<b>因为…</b>"都是<b>待验证的断言</b>，不是背景。被多处引用的那句尤其要核。</span></li>
+      <li><span class="n">03</span><span>发现"结论对、理由错"：<b>只换理由、不动结论</b>，并且<b>一次改完所有副本</b> —— 漏一处，下次还会有人从那处抄回去。</span></li>
+      <li><span class="n">04</span><span><b>判据的措辞必须能追到"实测值"或"规范条文"</b>。追不到的别写进判据 —— 本文里那条判据 ① 就是"照抄文档"的反例：它测的是文档自洽，不是系统行为。</span></li>
+      <li><span class="n">05</span><span>日志说"已配置"、自检说"通过"、统计说"正确"，<b>都不等于</b>"人看到的是对的"。</span></li>
+    </ol>
+  </section>
+
+  <footer>
+    <p>以上都发生在一个真实项目的一次验收里：改动只涉及措辞与注释，<b>代码零行为变更</b>。</p>
+    <p>日期化留档里的同款说法按"不改历史留档"原样保留 —— 改了才是篡改记录。</p>
+    <p class="sig">2026-09-21 · 排查记录 · SSE charset</p>
+  </footer>
+
+</main>

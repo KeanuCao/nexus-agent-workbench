@@ -2,14 +2,14 @@
 # nexus 后端 API 契约（OpenAPI 3.0.3）
 #
 # 来源：docs/design/00-环境与部署.md §5.3 + docs/design/01-多租户与认证.md §5 + docs/design/02-统一AI网关.md §3
-#      （已确认设计，契约逐字对齐；人工速查版见同目录 README.md）
+#      + docs/design/03-RAG知识库.md §3（均已确认设计，契约逐字对齐；人工速查版见同目录 README.md）
 # 面向：frontend-engineer（src/api/*.ts 的类型定义以本文件为准）
 #
 # 约定速记：
 #   - 所有接口返回统一响应体 Result<T>：{ code, msg, data }，code === 0 为成功；
 #   - 业务异常走 HTTP 200 + code≠0（前端拦截器按 code 判定并弹出 msg）；
 #   - HTTP 状态码只用于传输/可用性语义：401 登录态缺失/失效、404 路径不存在、
-#     500 系统异常、503 依赖不可用；
+#     415 请求媒体类型不支持、500 系统异常、503 依赖不可用；
 #   - 阶段1 起除白名单（/api/auth/login、/api/health、/actuator/**）外一律需要
 #     `Authorization: Bearer <token>`（全局 security 见文件末尾的 securitySchemes）。
 # =============================================================================
@@ -24,7 +24,8 @@ info:
   version: 0.2.0
   description: |
     演示项目后端接口契约。阶段0：健康检查；阶段1：多租户 + 认证（登录/登出/取当前用户）；
-    阶段2：统一 AI 网关（SSE 流式对话，见 `paths./api/chat/stream`）。
+    阶段2：统一 AI 网关（SSE 流式对话，见 `paths./api/chat/stream`）；
+    阶段3：RAG 知识库（上传/列表/删除 + 问答，**同步 JSON**，见 `paths./api/kb/documents` 与 `paths./api/kb/ask`）。
 
     ## 统一响应体约定
     所有接口（含错误）一律返回 `Result<T>`：
@@ -66,6 +67,22 @@ info:
     > `20100` 的两种载体是**有意的** —— 池满是同步可判的（能给出真正的 503），
     > 而"上游不可达"只在工作线程上才暴露，那时 `200 + text/event-stream` 的响应头已经发出去了。
 
+    ### 阶段3 新增错误码（知识库接口，见 `paths./api/kb/*`）
+
+    | code | 常量 | HTTP | 含义 |
+    | --- | --- | --- | --- |
+    | 40003 | FILE_TOO_LARGE | **200** | 上传文件超过 multipart 上限（10MB）。**通用码** —— 约束的是 multipart 请求体本身，任何上传接口都会撞上，故也列在 `docs/api/README.md` §1.3 |
+    | 10201 | KB_FILE_TYPE_UNSUPPORTED | 200 | 不支持的文件类型（扩展名不在白名单，或扩展名与内容检测不符） |
+    | 10202 | KB_DOCUMENT_NOT_FOUND | 200 | 文档不存在**或不属于当前租户**（两者刻意同形，不给"某 id 是否存在"的探测口） |
+    | 10203 | KB_PARSE_EMPTY | 200 | 未能从文件中解析出文本（扫描版 PDF / 空文件 / 编码不可识别 / 加密损坏） |
+    | 10204 | KB_CONTENT_TOO_LARGE | 200 | 分块数超过单文档上限（默认 3000），**判在向量化之前** |
+
+    > 五个码都配套 **HTTP 200**：与 `40001` 同一条理由（业务失败不污染前端的失败分支）。
+    > 知识库链路的**每个失败点都有确定的 HTTP 载体**（没有 SSE 那样的"响应头已发"问题）——
+    > 唯一的非 200 是上游模型不可达：**503 + 20100**（复用既有码），完整表见 `docs/api/README.md` §7.7。
+    > ⚠️ `40003` 与 `10201` 的 `msg` 里写死了"10MB"与"TXT / PDF"，而这两处的真源都是配置
+    > （`spring.servlet.multipart.max-file-size` / `nexus.ai.rag.allowed-extensions`）—— 已知成本，记在明处。
+
     ## 认证机制（阶段1）
     1. `POST /api/auth/login` 换取 `data.token`（JWT，有效期 `data.expiresIn` 秒）；
     2. 除白名单（`/api/auth/login`、`/api/health`、`/actuator/**`）外，所有接口都要带
@@ -100,6 +117,12 @@ tags:
       对话接口（阶段2）：SSE 流式输出。**响应是事件流而非一次性 JSON**，
       但每帧的 `data` 仍是统一响应体 `Result<T>`。
       ⚠️ 事件帧的完整格式 OpenAPI 3.0.3 描述不了，见 `docs/api/README.md` §6.2。
+  - name: Kb
+    description: |
+      知识库接口（阶段3）：上传 / 列表 / 删除 + 问答。**四个接口全部同步**（不是 SSE），
+      返回即代表工作已完成（上传＝已入库、问答＝答案已生成）。
+      ⚠️ 本组接口的失败形态与 `Chat` 那组**相反**：每个失败点都有确定的 HTTP 载体，
+      详见 `docs/api/README.md` §7.7。边界：一个租户一个知识库、单轮问答、只支持 TXT + PDF。
   - name: System
     description: 系统级接口（健康检查、运行信息），无需鉴权
 
@@ -307,7 +330,8 @@ paths:
         | 客户端主动断开 | 无（连接已没了） | — | 服务端据此取消上游调用 |
 
         前端须同时处理 `20100` 的两种载体：**先看 `Content-Type`**
-        （用 `includes('application/json')` 判断，Spring 会给 `text/event-stream` 带 `;charset=UTF-8`，全等比较会误判），
+        （用 `includes('application/json')` 判断：失败形态的 `application/json` 实测带 `;charset=UTF-8`，
+        成功形态的 `text/event-stream` 不带 —— 两边形态不一致，全等比较会误判），
         再按帧解析。流的出口有三个：收到 `done`、收到 `error`、**或底层流 EOF**
         （后端崩溃/nginx 断流时不会有终止帧，只认前两个会让页面永久停在"生成中"）。
       parameters:
@@ -339,7 +363,7 @@ paths:
       responses:
         '200':
           description: |
-            成功开流：`Content-Type: text/event-stream`（Spring 会带上 `;charset=UTF-8`），
+            成功开流：`Content-Type: text/event-stream`（**裸的，不带 `;charset=UTF-8`**；2026-09-21 实测），
             响应体是 §description 所述的事件流。
             ⚠️ **也为 `code=40001 / 10200` 的业务失败所用** —— 那两种情况下响应体是普通的
             `application/json` + `Result`（`code` 非 0），而不是事件流。
@@ -391,6 +415,366 @@ paths:
                 $ref: '#/components/schemas/Result'
               examples:
                 executorSaturated:
+                  value:
+                    code: 20100
+                    msg: 模型服务暂时不可用，请稍后重试
+                    data: null
+
+  /api/kb/documents:
+    get:
+      tags:
+        - Kb
+      operationId: listKbDocuments
+      summary: 文档列表（当前租户）
+      description: |
+        返回当前租户已入库的文档，供页面表格展示。
+
+        **只返回当前租户的文档**：`tenant_id` 条件由 `TenantLineHandler` 自动注入，业务 SQL 里
+        不手写（设计决策 D11）—— 跨租户的表现是"看不见"，不是报错（用 `demo` 账号看不到
+        `admin` 上传的文档，这是正确行为）。
+
+        `total` 与 `items.length` 本轮**恒等**（无分页）；仍保留 `total` 是为了将来加分页时不改契约。
+        ⚠️ **排序未约定**：契约不保证 `items` 顺序，前端不要依赖（需要固定顺序时自行排序）。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: 成功（`data` 为 `KbDocumentListVO`）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Result'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/KbDocumentListVO'
+              examples:
+                ok:
+                  summary: 当前租户有一份文档
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      items:
+                        - documentId: 7
+                          fileName: 公司年报.pdf
+                          fileType: PDF
+                          fileSize: 1048576
+                          charCount: 12480
+                          chunkCount: 28
+                          createdAt: '2026-09-22T10:30:00+08:00'
+                      total: 1
+                empty:
+                  summary: 当前租户还没有文档（页面空态）
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      items: []
+                      total: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags:
+        - Kb
+      operationId: uploadKbDocument
+      summary: 上传文档（**同步**：返回即已入库）
+      description: |
+        上传一份 TXT / PDF：后端在**请求线程**上完成 解析 → 分块 → 向量化 → 入库（单事务），
+        返回 200 时全部已完成（设计决策 D7 的同步口径）。`data.chunkCount` 即本次写入的分块数。
+
+        ## 请求形状的三条硬约定（踩了就是 40001 或一次超时误判）
+
+        1. **字段名必须是 `file`**（multipart 里只有一个 part）；写错 → `MissingServletRequestPartException`
+           → `40001`；
+        2. **不要手工设置 `Content-Type`**：axios 在 `data` 是 `FormData` 时会主动删掉该头，让浏览器
+           自己带 `boundary`；写死 `multipart/form-data` 会**丢掉 boundary** → 后端 `MultipartException`
+           → `40001`（前端若用 `el-upload`，还要用 `:http-request` 自定义，否则它的默认 XHR 绕过拦截器）；
+        3. **超时 ≠ 失败**：上传耗时取决于文件大小与 CPU（数十秒量级）。前端要逐请求覆盖超时（120s），
+           超时文案写成"服务端可能仍在处理，请刷新列表确认后再重试"——直接重传会留下两份同名文档
+           （重名不去重是已知行为）。
+
+        ## 失败形态
+
+        全部为 **HTTP 200 + 非 0 业务码**（见 examples 与 `docs/api/README.md` §7.7）；唯一的例外是
+        **向量化时 Ollama 不可达 → HTTP 503 + `20100`**（事务回滚，文档不落库）。
+        ⚠️ "文件超过 10MB"返回 `40003` 这一格**待实测**：Tomcat 的 `max-swallow-size` 可能让超限请求
+        表现为"连接被重置"而不是这个码（设计 §6.2 记了该风险与判据）。
+
+        ## 改配置的连带后果
+
+        本轮**不保存原始文件**（决策 D8）⇒ 改 `nexus.ai.rag.chunk-size` / `chunk-overlap` 之后，
+        已入库的文档无法重新分块，**必须重传**才生效。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    单个文件。扩展名 `.txt` / `.pdf`（大小写不敏感），**按扩展名 + 内容检测双重判断**
+                    （设计决策 D12：只看扩展名会被改后缀骗过，只看内容则区分不出 `.txt` 是否真是文本）；
+                    大小 ≤ 10MB（上限真源 = `spring.servlet.multipart.max-file-size`）。
+                  example: 公司年报.pdf
+      responses:
+        '200':
+          description: |
+            成功：**已入库**（`data` 为 `KbDocumentVO`）。
+            ⚠️ **本响应也承载全部业务失败**（HTTP 200 + 非 0 码）：`40001` / `40003` / `10201` /
+            `10203` / `10204`，见下方 examples；此时 `data` 为 `null`。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Result'
+                  - type: object
+                    properties:
+                      data:
+                        description: 成功时是 `KbDocumentVO`；业务失败时是 `null`（业务码见同一响应的 examples）
+                        nullable: true
+                        allOf:
+                          - $ref: '#/components/schemas/KbDocumentVO'
+              examples:
+                ok:
+                  summary: 上传成功（已入库）
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      documentId: 7
+                      fileName: 公司年报.pdf
+                      fileType: PDF
+                      fileSize: 1048576
+                      charCount: 12480
+                      chunkCount: 28
+                      createdAt: '2026-09-22T10:30:00+08:00'
+                paramInvalid:
+                  summary: 缺 `file` 字段 / 文件为空 / 请求不是 multipart（缺 Content-Type 或 boundary）
+                  value:
+                    code: 40001
+                    msg: 请求参数不合法
+                    data: null
+                fileTooLarge:
+                  summary: 文件超过 10MB（**待实测**：也可能表现为连接被重置）
+                  value:
+                    code: 40003
+                    msg: 文件过大，最大支持 10MB
+                    data: null
+                fileTypeUnsupported:
+                  summary: 扩展名不在白名单 / 扩展名与内容检测不符
+                  value:
+                    code: 10201
+                    msg: 不支持的文件类型，仅支持 TXT / PDF
+                    data: null
+                parseEmpty:
+                  summary: 解析不出文本（扫描版 PDF / 空文件 / 编码不可识别）
+                  value:
+                    code: 10203
+                    msg: 未能从文件中解析出文本（可能是扫描版 PDF 或空文件）
+                    data: null
+                contentTooLarge:
+                  summary: 分块数超过 3000（判在向量化之前）
+                  value:
+                    code: 10204
+                    msg: 文档内容过长，超出单文档分块上限，请拆分后上传
+                    data: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            向量化时上游（Ollama）不可达 / 超时 / 报错：**整个上传失败并回滚**（文档不落库），
+            不会留下"半份文档"。与 `Chat` 那组不同，本链路同步，所以能给出真正的 503。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              examples:
+                embeddingUnavailable:
+                  value:
+                    code: 20100
+                    msg: 模型服务暂时不可用，请稍后重试
+                    data: null
+
+  /api/kb/documents/{documentId}:
+    delete:
+      tags:
+        - Kb
+      operationId: deleteKbDocument
+      summary: 删除文档（连带其全部分块）
+      description: |
+        删除一份文档，**其全部分块与向量一并删除**（`t_kb_chunk.document_id` 上带 `ON DELETE CASCADE`，
+        级联由数据库保证，业务代码不做两次删除）。
+
+        ## 两个刻意的约定
+
+        1. **文档不存在时不返回 404，而是 HTTP 200 + `10202`**：本项目的 HTTP 状态码只承载
+           传输/可用性语义（见文件头部约定），业务拒绝一律 200 + 业务码。
+           且**另一个租户的文档与"不存在"完全同形**（都返回 `10202`）—— 这是有意的：
+           区分开就等于给出一个"某 id 是否存在"的探测口。
+        2. 删除**无法恢复**：本轮不保存原始文件，删掉就重灌不出那一批分块 ——
+           前端二次确认的文案要写明这一点。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - name: documentId
+          in: path
+          required: true
+          description: 文档 ID（取自列表接口的 `data.items[].documentId`）
+          schema:
+            type: integer
+            format: int64
+          example: 7
+      responses:
+        '200':
+          description: |
+            成功：`code=0` + `data=null`（注意**成功时 `data` 也是 `null`**，前端不要以"有没有 data"判成败）；
+            文档不存在或不属于当前租户时同样是 HTTP 200，但 `code=10202`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              examples:
+                ok:
+                  summary: 删除成功
+                  value:
+                    code: 0
+                    msg: success
+                    data: null
+                notFound:
+                  summary: 文档不存在 **或不属于当前租户**（两者同形）
+                  value:
+                    code: 10202
+                    msg: 文档不存在或已被删除
+                    data: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/kb/ask:
+    post:
+      tags:
+        - Kb
+      operationId: askKb
+      summary: 知识库问答（**同步**：返回即答案已生成）
+      description: |
+        问题 → 向量化 → 在**当前租户的全部文档**里做向量 TopK 检索 → 拼 Prompt → 复用阶段2 的统一
+        网关生成答案 → 连同**引用片段**一起返回（设计决策 D6：同步 JSON，不是 SSE）。
+
+        ## 三条补充约束
+
+        1. **`topK` 越界返回 `40001` + 可读文案**（不是 Bean Validation 的英文消息）：后端用 `Integer`
+           承接、业务侧判边界，因为 `@Min/@Max` 的默认消息会被前端拦截器直接弹给用户；
+        2. **`question` 的上限按字符计（500），与对话接口的 8KB 字节口径不同是刻意的**：那个口径防的是
+           "误贴大段文本撑爆上游上下文"，而问题天然是短的；
+        3. **问题不带任何"文档范围"参数**：本轮检索范围 = 当前租户的全部文档（一个租户一个知识库，
+           多知识库是 backlog）。
+
+        ## 检索不到时**不调用大模型**
+
+        `grounded=false` 表示检索（阈值筛完后）0 条命中 —— 此时后端**短路返回固定文案**，
+        不消耗上游额度，也不存在"编一个答案"的可能。答案的三种闸门（相似度阈值 → 空结果短路 →
+        prompt 约束）见设计 §2 的 D9。
+
+        ⚠️ `sources[].content` 与 `answer` 都是用户上传的外部文本，前端必须用插值渲染
+        （`{{ }}` / `v-text`），**绝不用 `v-html`**。
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KbAskRequest'
+            examples:
+              withTopK:
+                summary: 指定 topK
+                value:
+                  question: 去年利润是多少
+                  topK: 5
+              defaultTopK:
+                summary: 不带 topK（用后端配置值，默认 5）
+                value:
+                  question: 去年利润是多少
+      responses:
+        '200':
+          description: |
+            成功（`data` 为 `KbAnswerVO`）：`grounded=true` 时带引用片段与 `generation` 观测块；
+            `grounded=false` 时 `sources` 为空数组、`generation` 为 **`null`**（没调模型）。
+            ⚠️ 本响应也为 `40001`（校验失败）所用。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Result'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/KbAnswerVO'
+              examples:
+                grounded:
+                  summary: 检索到资料并生成了答案
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      answer: 根据资料，去年（2025 年）净利润为 1.23 亿元 [资料1]。
+                      grounded: true
+                      sources:
+                        - documentId: 7
+                          fileName: 公司年报.pdf
+                          chunkIndex: 12
+                          score: 0.8241
+                          content: 2025 年度归属于母公司股东的净利润为 123,000,000.00 元……
+                      retrieval:
+                        topK: 5
+                        hits: 1
+                        threshold: 0.5
+                        durationMs: 48
+                      generation:
+                        modelType: DEEPSEEK
+                        model: deepseek-chat
+                        durationMs: 4034
+                notGrounded:
+                  summary: 检索不到（未调用大模型）—— 注意 sources 是空数组、generation 是 null
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      answer: 知识库中未找到相关内容，请换一种问法，或先上传相关文档。
+                      grounded: false
+                      sources: []
+                      retrieval:
+                        topK: 5
+                        hits: 0
+                        threshold: 0.5
+                        durationMs: 31
+                      generation: null
+                paramInvalid:
+                  summary: question 为空/超长，或 topK 越界（不在 1..20）
+                  value:
+                    code: 40001
+                    msg: 请求参数不合法
+                    data: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            上游模型不可达 / 超时 / 报错（`question` 的向量化、或答案的生成）。
+            ⚠️ **生成失败不降级**：即使检索结果已经拿到，也整体失败 —— 返回"引用片段有、答案空"的响应
+            会让前端把"没答"与"检索不到"（`grounded=false`）混淆，把排查方向带偏（契约 §7.7）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              examples:
+                upstreamUnavailable:
                   value:
                     code: 20100
                     msg: 模型服务暂时不可用，请稍后重试
@@ -647,6 +1031,130 @@ components:
         - DOWN
 
     # ── POST /api/chat/stream 的请求体（对应后端 dto/ChatRequest + dto/ChatMessage）──
+    # ── 认证接口（阶段1：POST /api/auth/login|logout、GET /api/auth/me）──
+    #   ⚠️ 这 6 个 schema **从阶段1 起一直是缺失的**：LoginRequest / ResultLoginResponse /
+    #      ResultVoid / ResultUserInfoVO 这 4 个 $ref 悬空（README §5 的字段表却一直是完整的
+    #      ⇒ 两份契约不同步）。2026-09-22 由阶段3 实施复核发现并补齐，见 README §8 变更记录。
+    #      字段以 README §5.2 / §5.4 为准，并与 nexus-module-system 的 DTO 逐一核对过。
+    LoginRequest:
+      type: object
+      description: |
+        登录请求体（契约：`docs/api/README.md` §5.2）。对应后端 `com.nexus.module.system.dto.LoginRequest`。
+        **刻意不带校验注解**：登录接口的契约是"失败一律 200 + 10100"（防账号枚举），
+        若在入参上做 Bean Validation，空口令会先被抛成 `40001`，与契约不符。
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          description: 登录名，**全局唯一**（登录只收用户名：先查出用户，才知道它属于哪个租户）
+          example: admin
+        password:
+          type: string
+          description: 明文口令（服务端只做 BCrypt 比对；空值按 `10100` 处理）
+          example: admin123
+
+    UserInfoVO:
+      type: object
+      description: |
+        当前用户信息（契约：`docs/api/README.md` §5.2 / §5.4）。对应后端 `UserInfoVO` record。
+        `POST /api/auth/login` 的 `data.user` 与 `GET /api/auth/me` 的 `data` **同构**（就是同一个类）。
+      required:
+        - userId
+        - username
+        - nickname
+        - tenantId
+        - tenantCode
+        - tenantName
+      properties:
+        userId:
+          type: integer
+          format: int64
+          description: 用户 ID
+          example: 1
+        username:
+          type: string
+          description: 登录名
+          example: admin
+        nickname:
+          type: string
+          nullable: true
+          description: 展示名（**可为 `null`**）
+          example: 默认租户管理员
+        tenantId:
+          type: integer
+          format: int64
+          description: 租户 ID
+          example: 1
+        tenantCode:
+          type: string
+          description: 租户编码（`default` / `demo`）
+          example: default
+        tenantName:
+          type: string
+          description: 租户名称（前端展示用）
+          example: 默认租户
+
+    LoginResponse:
+      type: object
+      description: 登录成功的数据（契约：`docs/api/README.md` §5.2）。对应后端 `LoginResponse` record。
+      required:
+        - token
+        - tokenType
+        - expiresIn
+        - user
+      properties:
+        token:
+          type: string
+          description: 'JWS 紧凑序列化串；之后每个请求带 `Authorization: <tokenType> <token>`'
+        tokenType:
+          type: string
+          description: |
+            目前恒为 `Bearer`。前端拼 `Authorization: ${tokenType} ${token}` —— **用返回值而非硬编码**
+            （行为等价，但更贴合 RFC 6750 的语义）。⚠️ 本字段在本仓库曾同时写着"固定 Bearer"与
+            "不要硬编码"两种口径，已按**用返回值**收口（见 README 头部与 §5.2）。
+          example: Bearer
+        expiresIn:
+          type: integer
+          format: int64
+          description: 有效期（秒），与 Redis 白名单 TTL 一致
+          example: 7200
+        user:
+          $ref: '#/components/schemas/UserInfoVO'
+
+    ResultLoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/LoginResponse'
+
+    ResultUserInfoVO:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/UserInfoVO'
+
+    ResultVoid:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              type: object
+              nullable: true
+              description: 恒为 `null` —— 登出没有业务数据（契约 §5.3）
+
     ChatRequest:
       type: object
       description: |
@@ -793,3 +1301,239 @@ components:
           format: int32
           description: 出错前已经发出的 `delta` 帧数；一个都没发出时为 `0`
           example: 12
+
+    # ── 阶段3 知识库的四个接口（Kb*，契约：docs/api/README.md §7.1~§7.6）──
+    #    对应后端 com.nexus.module.ai.rag.dto 下的五个类型
+    #    （四个 record：KbDocumentVO / KbDocumentListVO / KbAnswerVO / KbSourceVO，一个可变 POJO：KbAskRequest）。
+    #    ⚠️ `Result<T>` 的包装在这里是**内联 allOf**（与 HealthReport 的 ResultHealthReport 写法不同）——
+    #    为了不给每个接口多造一个 wrapper schema；语义完全等价：data 的类型就是下面的 schema。
+    KbDocumentVO:
+      type: object
+      description: |
+        一份已入库的文档（契约：`docs/api/README.md` §7.5）。
+        **上传响应与列表项同构** —— 前端只需要写一个类型。
+      required:
+        - documentId
+        - fileName
+        - fileType
+        - fileSize
+        - charCount
+        - chunkCount
+        - createdAt
+      properties:
+        documentId:
+          type: integer
+          format: int64
+          description: 文档 ID（删除接口的路径参数）
+          example: 7
+        fileName:
+          type: string
+          description: 原始文件名。**仅回显，不落盘**（本轮不保存原始文件，见设计决策 D8）
+          example: 公司年报.pdf
+        fileType:
+          type: string
+          description: 文件类型（大写，由扩展名归一化而来）
+          enum:
+            - TXT
+            - PDF
+        fileSize:
+          type: integer
+          format: int64
+          description: 上传字节数
+          example: 1048576
+        charCount:
+          type: integer
+          format: int32
+          description: |
+            解析出的正文字符数 —— **排查解析质量的第一眼数据**：与预期量级差太远（如只有几百字）
+            就说明解析出了问题。空内容 / 扫描版 PDF 会在入库之前就被 `10203` 拦掉，不会走到这里。
+          example: 12480
+        chunkCount:
+          type: integer
+          format: int32
+          description: 入库的分块数（即"单文档 3000 块"上限判据的实测值）
+          example: 28
+        createdAt:
+          type: string
+          format: date-time
+          description: |
+            入库时间，格式与 `/api/health` 的 `timestamp` **同款**：`yyyy-MM-dd'T'HH:mm:ssXXX`
+            （秒级、无小数秒）。偏移量随服务端时区 —— 容器内通常为 `+00:00`，不是 `+08:00`。
+          example: '2026-09-22T10:30:00+08:00'
+
+    KbDocumentListVO:
+      type: object
+      description: |
+        文档列表（契约：`docs/api/README.md` §7.2）。
+        `total` 与 `items.length` 本轮**恒等**（无分页），保留 `total` 只为将来加分页时不改契约。
+        ⚠️ **排序未约定**：前端不要依赖 `items` 的顺序。
+      required:
+        - items
+        - total
+      properties:
+        items:
+          type: array
+          description: 当前租户的文档（跨租户的看不见 —— `tenant_id` 条件由拦截器自动注入，设计决策 D11）
+          items:
+            $ref: '#/components/schemas/KbDocumentVO'
+        total:
+          type: integer
+          format: int32
+          description: 文档总数（本轮 = `items.length`）
+          example: 3
+
+    KbAskRequest:
+      type: object
+      description: 知识库问答请求体（契约：`docs/api/README.md` §7.4）
+      required:
+        - question
+      properties:
+        question:
+          type: string
+          description: |
+            问题文本。非空、去空白后非空；**≤ 500 字符**（按**字符**计，不是字节 ——
+            与对话接口的 8KB 字节口径不同是刻意的，理由见契约 §7.4）。超出 → `40001`。
+          example: 去年利润是多少
+        topK:
+          type: integer
+          format: int32
+          nullable: true
+          minimum: 1
+          maximum: 20
+          description: |
+            本次检索取回的分块数。**缺省 / `null` = 用后端配置值**（`nexus.ai.rag.top-k`，默认 5）；
+            取值域 `1..20`，越界 → `40001`（后端刻意用 `Integer` 承接、业务侧判边界：
+            `@Min/@Max` 的英文默认消息会被前端拦截器直接展示给用户）。
+          example: 5
+
+    KbAnswerVO:
+      type: object
+      description: |
+        问答响应（契约：`docs/api/README.md` §7.6）。
+        `grounded=false` 时三件事同时成立：`answer` 是后端**固定文案**、`sources` 是**空数组**（不是 `null`）、
+        `generation` 是 **`null`**（检索为空 ⇒ 未调用大模型）。
+      required:
+        - answer
+        - grounded
+        - sources
+        - retrieval
+        - generation
+      properties:
+        answer:
+          type: string
+          description: |
+            模型生成的答案；`grounded=false` 时是固定文案
+            「知识库中未找到相关内容，请换一种问法，或先上传相关文档。」（后端常量，前端不必自己拼）。
+            ⚠️ 与 `sources[].content` 同属**用户上传的外部文本**，必须插值渲染，**绝不用 `v-html`**。
+          example: 根据资料，去年（2025 年）净利润为 1.23 亿元 [资料1]。
+        grounded:
+          type: boolean
+          description: |
+            答案是否**基于检索到的资料**。`false` = 阈值筛完后 0 条命中 ⇒ **未调用大模型**
+            —— 这是"检索不到就说不知道"的结构性保证（空结果短路，设计决策 D9 的第二道闸）。
+          example: true
+        sources:
+          type: array
+          description: 引用片段，按 `score` **降序**；`grounded=false` 时为空数组（不是 `null`）
+          items:
+            $ref: '#/components/schemas/KbSourceVO'
+        retrieval:
+          type: object
+          description: |
+            检索侧观测值。**排查顺序**：先看这里（`hits=0` ⇒ 阈值/检索问题），
+            再看 `sources[].content` 本身乱不乱（乱 = 解析问题，不乱 = 检索或阈值问题）。
+          required:
+            - topK
+            - hits
+            - threshold
+            - durationMs
+          properties:
+            topK:
+              type: integer
+              format: int32
+              description: 本次生效的 topK（请求里带的就是它，没带则是配置值 `nexus.ai.rag.top-k`）
+              example: 5
+            hits:
+              type: integer
+              format: int32
+              description: 过相似度阈值的条数（= `sources.length`；为 `0` 时 `grounded=false`）
+              example: 1
+            threshold:
+              type: number
+              format: double
+              description: |
+                本次生效的相似度阈值（`nexus.ai.rag.score-threshold`）。
+                初值 0.5 是**起点不是结论，必须标定**（步骤见设计 §3.9），标定结果回写 TC-03。
+              example: 0.5
+            durationMs:
+              type: integer
+              format: int64
+              description: 检索耗时（含问题的向量化），毫秒
+              example: 48
+        generation:
+          type: object
+          nullable: true
+          description: |
+            生成侧观测值；**`grounded=false` 时为 `null`**（没调模型，所以没有可报的数字）。
+            前端要按"可为 null"处理，不要直接取 `.model`。
+          required:
+            - modelType
+            - model
+            - durationMs
+          properties:
+            modelType:
+              type: string
+              description: 实际使用的模型类型（枚举名），取值由 `nexus.ai.rag.answer-model-type` 决定
+              enum:
+                - OLLAMA
+                - DEEPSEEK
+            model:
+              type: string
+              description: 上游**真实模型名**
+              example: deepseek-chat
+            durationMs:
+              type: integer
+              format: int64
+              description: 生成耗时，毫秒
+              example: 4034
+
+    KbSourceVO:
+      type: object
+      description: |
+        一条引用片段（契约：`docs/api/README.md` §7.6）。`content` 是**分块原文**：
+        引用即原文，不截断、不摘要 —— 这是"答案可当场核对"的前提。
+      required:
+        - documentId
+        - fileName
+        - chunkIndex
+        - score
+        - content
+      properties:
+        documentId:
+          type: integer
+          format: int64
+          description: 来源文档 ID
+          example: 7
+        fileName:
+          type: string
+          description: 来源文件名（展示用；该文件并不落盘）
+          example: 公司年报.pdf
+        chunkIndex:
+          type: integer
+          format: int32
+          description: 该分块在文档内的序号，**0 起** ⇒ 前端展示「第 N 段」时用 `chunkIndex + 1`
+          example: 12
+        score:
+          type: number
+          format: double
+          description: |
+            余弦相似度 = `1 - (embedding <=> query)`，**保留 4 位小数**；取值域 `[-1, 1]`，结果按它降序。
+            阈值在**应用层**过滤 —— 写进 SQL 的 `WHERE` 会让 HNSW 近似索引失效（设计 §4.6 第 2 条）。
+          example: 0.8241
+        content:
+          type: string
+          description: |
+            该分块的原文。段落内的换行原样保留 ⇒ 渲染要 `white-space: pre-wrap`
+            （否则会被压成一整行，看起来像"解析坏了"）。属**用户上传的外部文本**，
+            必须插值渲染，**绝不用 `v-html`**。
+          example: 2025 年度归属于母公司股东的净利润为 123,000,000.00 元……

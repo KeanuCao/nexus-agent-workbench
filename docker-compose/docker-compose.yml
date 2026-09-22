@@ -204,6 +204,17 @@ services:
       POSTGRES_PASSWORD: ${PG_PASSWORD:-nexus123}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+    # ★ 阶段2 新增：把 AI 密钥从 gitignored 文件注入容器。
+    #   为什么用 env_file 而不是 ${DEEPSEEK_API_KEY:-} 插值：插值走"宿主 shell + docker-compose/.env"
+    #   两个来源，而 .env 是【提交进仓库】的（.gitignore 第 6 行的例外），密钥绝不能放；
+    #   放 shell 则要求每次开新终端都 export，而 scripts/up.sh 经 `wsl -d … -- bash -c` 调起，
+    #   是【非交互 shell，不读 ~/.bashrc】—— 那个 export 大概率不生效。env_file 直接读文件，与调用方式无关。
+    #   required: false —— 文件缺失时【不阻断】整栈启动（缺密钥只影响云端模型那一半，
+    #   本地 Ollama 照常可用）。代价：会静默创建一个没有密钥的容器，补文件后需 up -d 重建。
+    #   ⚠️ 待实测：required 长语法需 Compose ≥ 2.24；不支持时 check-env.sh 检查点 6 会直接 FAIL（不静默）。
+    env_file:
+      - path: .env.local
+        required: false
     volumes:
       # 只读挂载产物共享目录；jar 由 builder 容器写入（产物缺失时有可读报错，见 Dockerfile）
       - build-artifacts:/artifacts:ro

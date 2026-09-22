@@ -1,9 +1,9 @@
-# 后端 API 契约（阶段0 + 阶段1 + 阶段2）
+# 后端 API 契约（阶段0 + 阶段1 + 阶段2 + 阶段3）
 
-> 面向 `frontend-engineer`（§1~§3 + **§5 认证接口** + **§6 对话接口**）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
+> 面向 `frontend-engineer`（§1~§3 + **§5 认证接口** + **§6 对话接口** + **§7 知识库接口**）与 `devops-engineer`（**§4 是健康检查脚本的唯一判据来源**）的接口文档。
 > 机器可读版本：[`openapi.yaml`](./openapi.yaml)（OpenAPI 3.0.3）。
-> 契约来源：`docs/design/00-环境与部署.md` §5.3 + `docs/design/01-多租户与认证.md` §5 + `docs/design/02-统一AI网关.md` §3（均已确认）；
-> 实现：`backend/nexus-start`（健康检查）+ `backend/nexus-module-system`（认证）+ `backend/nexus-module-ai`（对话）。
+> 契约来源：`docs/design/00-环境与部署.md` §5.3 + `docs/design/01-多租户与认证.md` §5 + `docs/design/02-统一AI网关.md` §3 + `docs/design/03-RAG知识库.md` §3（均已确认）；
+> 实现：`backend/nexus-start`（健康检查）+ `backend/nexus-module-system`（认证）+ `backend/nexus-module-ai`（对话 + 知识库）。
 > 更新纪律：协议变更**先改本文件**再改代码，前后端以本文件为唯一事实源。
 > ⚠️ **本文件若自相矛盾，以"字段说明"为准、"代码示例"次之，但必须上报矛盾点**（并发起修正），
 > 不得默不作声地挑一条照做 —— 实例：§5.2 的 `data.tokenType` 曾同时写着"固定 `Bearer`"与"不要硬编码"。
@@ -18,7 +18,8 @@
 | `README.md` | 本文件：人工速查版（字段表、示例、错误码、常见坑）<br>§4 = 健康检查判据（0.3 的 `check-env.sh` / `check-health.sh` 照此写） |
 
 现有接口：`GET /api/health`（阶段0）、`/api/auth/login|logout|me`（阶段1）、
-`POST /api/chat/stream`（阶段2，**流式**，见 §6）。
+`POST /api/chat/stream`（阶段2，**流式**，见 §6）、`/api/kb/*`（阶段3，知识库上传 / 列表 / 删除 + 问答，
+**同步 JSON**，见 §7）。
 
 ---
 
@@ -42,11 +43,18 @@
 | **业务失败**（参数不合法、业务规则拒绝等） | **200** | 非 0（如 10000） | axios **成功**分支，拦截器判 `code !== 0` → 弹 `msg` + reject `BusinessError` |
 | **未登录 / 登录态失效**（阶段1 起） | **401** | 40100 / 40101 / 40102 | axios 失败分支的 401 专用处理：清 token + 跳 `/login`（见 §1.4 与 §5.1） |
 | 路径不存在 | 404 | 40400 | axios 失败分支，弹 `error.response.data.msg` |
+| **请求媒体类型不支持**（阶段2 起） | **415** | 40002 | axios 失败分支，弹 `error.response.data.msg` |
 | 系统异常 | 500 | 50000 | 同上（`msg` 是通用话术，不含堆栈） |
 | **依赖不可用**（健康检查探活失败） | **503** | 20000 | 同上；但 `data` 仍带完整报告，可定位故障依赖 |
 
-设计理由：HTTP 状态码只承载**传输/可用性**语义（401/404/500/503），业务成败由 `code` 判定 ——
+设计理由：HTTP 状态码只承载**传输/可用性**语义（401/404/415/500/503），业务成败由 `code` 判定 ——
 这样业务失败不会污染 axios 的失败分支，异常提示统一由拦截器负责，调用点只关心 `data`。
+
+**415 为什么不用 200 + 业务码**：缺 `Content-Type` 时请求**根本没被解析成业务入参**，
+不属于"业务失败"。它更接近 401/404 那类传输层语义。⚠️ 这条是**实测补上的**：
+在 2026-09-20 之前，`HttpMediaTypeNotSupportedException` 没有专门出口，会落进兜底 →
+客户端忘带头被报成 **500 + 50000「系统繁忙」**，把排查方向整个带偏
+（正是 §6.1 那段"看到 415 就知道是 Content-Type 没带"的诊断想防的事）。当日修复。
 
 **401 为什么必须用 HTTP 状态码、而不是塞进 200 + 业务码**：前端的"清 token + 跳登录"这条路
 （`request.ts` 里已预留的 `if (status === 401)` 分支）是**传输层**语义。若把登录态失效做成
@@ -64,6 +72,8 @@
 | **10102** | `TENANT_DISABLED` | 200 | 租户已停用，请联系管理员 |
 | 20000 | `SERVICE_UNAVAILABLE` | 503 | `依赖服务不可用：postgres、ollama` |
 | 40400 | `NOT_FOUND` | 404 | 请求的资源不存在 |
+| **40002** | `UNSUPPORTED_MEDIA_TYPE` | **415** | 请求格式不支持，请使用 application/json |
+| **40003** | `FILE_TOO_LARGE` | **200** | 文件过大，最大支持 10MB（multipart 上限，见 §7.8） |
 | **40100** | `UNAUTHENTICATED` | 401 | 未登录，请先登录 |
 | **40101** | `TOKEN_INVALID` | 401 | 登录状态无效，请重新登录 |
 | **40102** | `TOKEN_EXPIRED` | 401 | 登录已过期，请重新登录 |
@@ -71,8 +81,12 @@
 
 编码分段（按模块细分，**不复用**上表已有值）：`1xxxx` 业务 / `2xxxx` 可用性 / `4xxxx` 请求侧 / `5xxxx` 系统。
 
-> 阶段2 新增的 3 个码（`40001` / `10200` / `20100`）列在 **§6.4**（对话接口那一节），
-> 与上表一起构成完整错误码表 —— 上表保持"阶段0 + 阶段1 已落地"的原貌不动，避免改动被 `scripts/` 引用的编号。
+> **阶段2 新增 4 个码**：`40002` 列在**本表**（它是**通用**的 —— 任何 `consumes=application/json`
+> 的接口都可能触发，不只对话接口）；另 3 个（`40001` / `10200` / `20100`）列在 **§6.4**。
+> 三者与上表一起构成完整错误码表 —— 上表其余行保持原貌不动，避免改动被 `scripts/` 引用的编号。
+>
+> **阶段3 新增 5 个码**：`40003` 列在**本表**（它同样是**通用**的 —— 约束的是 multipart 请求体本身，
+> 任何上传接口都会撞上，与"知识库"这个业务域无关）；另 4 个（`10201`~`10204`）列在 **§7.8**。
 
 三条 401 分开的理由：**处置动作不同** —— `40100` 是客户端压根没带 token（接入问题）；
 `40102` 过期，重新登录即可；`40101` 是"token 签名不对"或"Redis 白名单里已无此 jti（已登出/被清）"，
@@ -477,7 +491,7 @@ curl -s --max-time 5 "http://localhost:${OLLAMA_PORT}/api/tags"
 
 | 草稿里的检查项 | 现状（已核实） | 脚本应如何处理 |
 | --- | --- | --- |
-| `pg_extension` 查 pgvector 已安装 | `db-patch/` 目录**尚不存在**（0.2 未开工），代码库内**没有任何 `CREATE EXTENSION vector`**；镜像 `pgvector/pgvector:pg16` 只保证扩展**可加载**，不等于已安装 | **现阶段必然 FAIL，不要写成 PASS 判据**。改用一条同时覆盖现在与未来的查询：`SELECT installed_version FROM pg_available_extensions WHERE name='vector'` —— 有行 = 扩展可用（PASS），`installed_version IS NOT NULL` 才算已安装（阶段3 RAG 落地后才作为硬判据） |
+| `pg_extension` 查 pgvector 已安装 | `db-patch/` 目录**尚不存在**（0.2 未开工），代码库内**没有任何 `CREATE EXTENSION vector`**；镜像 `pgvector/pgvector:pg16` 只保证扩展**可加载**，不等于已安装。**（2026-09-22 订正：`CREATE EXTENSION vector` 已由 `db-patch/202609131000` 执行，扩展已安装；RAG 的建表补丁依赖它）** | 查询：`SELECT installed_version FROM pg_available_extensions WHERE name='vector'` —— 有行 = 扩展可用，`installed_version IS NOT NULL` = 已安装。⚠️ **阶段3 起 `installed_version IS NOT NULL` 是硬判据**（RAG 落地后 `t_kb_chunk.embedding` 依赖 `vector` 类型，扩展没装上则建表/入库/检索全挂）；"扩展可用"那半只在"尚未迁移"的场景下才够用 |
 | `t_db_patch` 记录数 | 该表由 PatchCli 在执行迁移时 `CREATE TABLE IF NOT EXISTS` 引导创建；0.2 未开工 → **表不存在**，直查会报 `relation "t_db_patch" does not exist`（极易被误读成"迁移失败"） | 先探存在性：`SELECT to_regclass('public.t_db_patch') IS NOT NULL`；为 false → **SKIP（不计失败）**；为 true 才查记录数与文件名/checksum 一致性 |
 | 业务表 `tenant_id` 字段 | 阶段1（多租户）未开工，**目前没有任何业务表** | SKIP（或直接从清单移除），阶段1 后再补 |
 | `/api/ai/ping`、AI 网关接口 | **不存在**（阶段2 才实现）。当前业务接口只有 `GET /api/health` 一个 | 删除该项；AI 链路可用性现阶段用 §4.5 的模型就绪 + `checks.ollama` 覆盖 |
@@ -823,7 +837,8 @@ data: {"code":0,"msg":"success","data":{"finishReason":"stop","deltaCount":2,"du
 > **`20100` 有两种载体**（503 + `Result`、200 + `error` 帧），这是**有意的**：池满是本服务侧的、
 > 同步可判的，能给出真正的 503；上游不可达只在工作线程上才暴露，那时响应头已发。
 > 前端**两种都要处理**（成本极低：先看 `Content-Type`，再按帧解析）——
-> 判断响应类型要用 `includes('application/json')`，因为 Spring 会给 `text/event-stream` 带上 `;charset=UTF-8`，全等比较会误判。
+> 判断响应类型要用 `includes('application/json')`：**失败形态的 `application/json` 实测带 `;charset=UTF-8`（2026-09-20 实测），而成功形态的 `text/event-stream` 不带**（2026-09-21 实测）—— 两边形态不一致，全等比较会误判。
+> ⚠️ **SSE 那半刻意不加 charset**：SSE 规范里 `charset` 是"仅为兼容遗留服务端"的可选参数，事件流恒为 UTF-8；本契约声明的就是裸 `text/event-stream`（§6.1），实现与契约一致。
 > **为什么不再加一个码区分池满**：两者的用户动作相同（稍后重试），而排查方向已由 HTTP 状态码区分开
 > （503 且有 `Result` = 本服务；200 + `error` 帧 = 上游）。
 
@@ -874,7 +889,300 @@ curl -N -X POST "http://localhost:${BACKEND_PORT}/api/chat/stream" \
 
 ---
 
-## 7. 变更记录
+## 7. 知识库接口（阶段3）
+
+> 契约来源：`docs/design/03-RAG知识库.md` §3（已确认设计）；实现：`backend/nexus-module-ai`
+> 的 `com.nexus.module.ai.rag` 包（`KbDocumentController` / `KbAskController` / 两个 Service）。
+> **四个接口全部同步**：没有 SSE、没有轮询、没有"已受理"这类中间态 —— 每个失败点都有确定的载体与状态码（§7.7）。
+> 本节结构：文档管理三个接口（§7.1~§7.3）→ 问答接口（§7.4）→ 两个响应结构（§7.5~§7.6）→
+> 失败形态总表（§7.7）→ 错误码增量（§7.8）→ curl 验证（§7.9）。
+> **编号约定**：本节 §7.N 与设计文档 `docs/design/03-RAG知识库.md` §3.N **一一对应**
+> （沿用阶段2「契约 §6.N ↔ 设计 §3.N」的惯例）—— 后续阶段的新增章节请照此办理，
+> 这样"设计里读到哪一节、契约里查哪一节"是机械查找，不需要记。
+> ⚠️ **本章节为新增，§1~§6 的编号与内容一律未动**（§4 被 `scripts/` 三个脚本按编号引用），
+> 原「变更记录」顺延为 §8。
+
+**三条边界（前端必读的一句话版，与页面顶部那条 `el-alert` 同源）**：
+
+1. **一个租户一个知识库**：检索范围 = 当前租户的全部文档；没有"知识库"这一层对象，
+   也没有"只在这几个文档里找"的参数（多知识库是 backlog，见设计 §10.2）。
+2. **单轮问答**：一次提问独立检索，不带会话历史 —— 追问"那前年呢"不会有上下文（设计决策 D10）。
+3. **只支持 TXT + PDF，且不保存原始文件**：Word 是 backlog（设计 §10.1）；
+   原件不落盘 ⇒ **改分块参数后必须重传文档**（§7.1 末尾）。
+
+### 7.1 `POST /api/kb/documents` —— 上传文档
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/kb/documents`（前端 `baseURL='/api'` + `url='/kb/documents'`） |
+| Method | `POST` |
+| `consumes` | `multipart/form-data`（显式声明） |
+| `produces` | `application/json`（显式声明） |
+| 鉴权 | **必需** `Authorization: Bearer <token>` |
+| 成功 | HTTP **200** + `code=0`，`data` 为 `KbDocumentVO`（§7.5） |
+
+请求（multipart 表单，**只有一个字段**）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `file` | file | 是 | 单个文件；扩展名 `.txt` / `.pdf`（**大小写不敏感**）；**≤ 10MB**（上限真源 = `spring.servlet.multipart.max-file-size`，超限 → `40003`） |
+
+**响应不是"已受理"，而是"已入库"**：接口返回 200 时，解析 → 分块 → 向量化 → 入库**已经全部完成**
+（设计决策 D7 的同步口径）。`data.chunkCount` 即本次写入的分块数 —— 前端刷新列表即可看到。
+
+三条前端必须遵守的约定（踩了就是 `40001` 或一次超时误判）：
+
+1. **字段名必须是 `file`**：写成 `upload` 之类 → 框架抛 `MissingServletRequestPartException` → **`40001`**。
+2. **不要手工设置 `Content-Type`**：axios 1.x 在 `data` 是 `FormData` 时会**主动删掉**该请求头、
+   让浏览器自己带 `boundary`；写死成 `multipart/form-data` 会**丢掉 boundary** → 后端 `MultipartException`
+   → `40001`。（用 `el-upload` 时另有一条：它的默认 XHR **不走 axios 拦截器**，必须用 `:http-request` 自定义，
+   否则 401 不跳登录页、`Result` 不解包 —— 见设计 §5.1-1。）
+3. **超时 ≠ 失败**：上传在**请求线程**上同步完成（数十秒量级，取决于文件大小与 CPU），
+   前端必须逐请求覆盖超时（设计 §5 给的 120s），且超时文案要写成
+   **"请求超时，服务端可能仍在处理，请刷新列表确认后再重试"** ——
+   直接重传会在列表里留下两份同名文档（重名不去重是**已知行为**，设计 §10.6）。
+
+⚠️ **改分块参数后必须重传文档**：本轮不保存原始文件（决策 D8），已入库的文档无法重新分块 ——
+改 `nexus.ai.rag.chunk-size` / `chunk-overlap` 只对**之后上传**的文档生效。
+
+### 7.2 `GET /api/kb/documents` —— 文档列表
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/kb/documents` |
+| Method | `GET` |
+| `produces` | `application/json` |
+| 鉴权 | **必需** |
+| 成功 | HTTP 200 + `code=0`，`data` = `{ "items": [KbDocumentVO...], "total": <int> }`（§7.5） |
+
+- **只返回当前租户的文档**：`tenant_id` 条件由 `TenantLineHandler` 自动注入，业务 SQL 里不手写（设计决策 D11）。
+  跨租户的表现是"看不见"，不是报错 —— 用 `demo` 账号看不到 `admin` 上传的文档，这是**正确行为**。
+- `total` 与 `items.length` 本轮**恒等**（无分页）；仍然保留 `total` 字段：将来加分页时不必改契约（backlog）。
+- **排序未约定**：契约不保证 `items` 的顺序，前端不要依赖（需要固定顺序时自行排序）。
+
+### 7.3 `DELETE /api/kb/documents/{documentId}` —— 删除文档
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/kb/documents/{documentId}`（`documentId` 为路径参数，int64） |
+| Method | `DELETE` |
+| `produces` | `application/json` |
+| 鉴权 | **必需** |
+| 成功 | HTTP 200 + `code=0` + `data=null`（文档行与其**全部分块**一并删除） |
+| 失败 | 文档不存在 / **不属于当前租户** → HTTP **200** + `10202` |
+
+**两个刻意的约定**：
+
+1. **不存在时返回 `10202` 而不是 404**：本项目的 HTTP 状态码只承载传输/可用性语义（§1.2），
+   业务拒绝一律 200 + 业务码。且**另一个租户的文档在本接口里与"不存在"完全同形** —— 这是有意的：
+   区分开就等于给出一个"某 id 是否存在"的探测口。
+2. **删文档 = 删分块**：`t_kb_chunk.document_id` 上带 `ON DELETE CASCADE`，级联由数据库保证，
+   业务代码不做两次删除（少一处"忘了删分块"的可能）。
+   ⚠️ 删除**无法恢复**（本轮不保存原始文件）—— 前端二次确认的文案要写明这一点。
+
+### 7.4 `POST /api/kb/ask` —— 知识库问答
+
+| 项 | 值 |
+| --- | --- |
+| URL | `/api/kb/ask` |
+| Method | `POST` |
+| `consumes` | `application/json`（显式声明） |
+| `produces` | `application/json`（显式声明） |
+| 鉴权 | **必需** |
+| 成功 | HTTP 200 + `code=0`，`data` 为 `KbAnswerVO`（§7.6） |
+
+请求体：
+
+```json
+{ "question": "去年利润是多少", "topK": 5 }
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `question` | string | 是 | 非空、去空白后非空；**≤ 500 字符**（按**字符**计，不是字节；超出 → `40001`） |
+| `topK` | integer | **否** | 缺省 / `null` = 用配置值（`nexus.ai.rag.top-k`，默认 5）；取值域 **`1..20`**（越界 → `40001`） |
+
+**三条补充约束**：
+
+1. **`topK` 越界返回的是 `40001` + 可读文案**，不是 Bean Validation 的英文消息：后端刻意用 `Integer`
+   承接、在业务侧判边界（`@Min/@Max` 的默认消息 `must be less than or equal to 20` 会被拦截器直接弹给用户）。
+2. **`question` 的上限按字符计（500），与对话接口的 8KB 字节口径不同是刻意的**：那个口径防的是
+   "误贴大段文本撑爆上游上下文"，而问题天然是短的 —— 500 字符 ≈ 500 个汉字，简单可读即可。
+3. **问题不带任何"文档范围"参数**：本轮检索范围 = 当前租户的全部文档（见本节开头的边界 1、2）。
+
+**同步口径**（设计决策 D6）：返回 200 时答案**已经生成完**（一次提问约 3~10s，云端比本地 CPU 快得多）。
+前端要有 loading 态（按钮禁用 + "检索并生成中…"），超时文案同 §7.1 第 3 条（"服务端可能仍在处理"）。
+**不要按流式实现**：本接口的响应体是一次性 JSON；将来若改流式为 backlog（设计 §10.4），那是一次契约变更。
+
+### 7.5 `KbDocumentVO`（上传响应与列表项**同构**）
+
+```json
+{
+  "documentId": 7,
+  "fileName": "公司年报.pdf",
+  "fileType": "PDF",
+  "fileSize": 1048576,
+  "charCount": 12480,
+  "chunkCount": 28,
+  "createdAt": "2026-09-22T10:30:00+08:00"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `documentId` | integer (int64) | 是 | 文档 ID（删除接口的路径参数） |
+| `fileName` | string | 是 | 原始文件名（**仅回显，不落盘**，见本节边界 3） |
+| `fileType` | string | 是 | `TXT` / `PDF`（大写，由扩展名归一化而来） |
+| `fileSize` | integer (int64) | 是 | 上传字节数 |
+| `charCount` | integer | 是 | 解析出的正文字符数（**排查解析质量的第一眼数据**：与预期量级差太远就是解析出了问题） |
+| `chunkCount` | integer | 是 | 入库的分块数（即 `3000` 上限判据的实测值） |
+| `createdAt` | string (date-time) | 是 | 入库时间，格式与 `/api/health` 的 `timestamp` **同款**：`yyyy-MM-dd'T'HH:mm:ssXXX`（秒级、无小数秒；偏移量随服务端时区 —— 容器内通常为 `+00:00`，不是 `+08:00`） |
+
+列表接口的外层结构是 `KbDocumentListVO`：`{ "items": [KbDocumentVO...], "total": 3 }`（§7.2）。
+
+### 7.6 `KbAnswerVO`（问答响应）
+
+```json
+{
+  "answer": "根据资料，去年（2025 年）净利润为 1.23 亿元 [资料1]。",
+  "grounded": true,
+  "sources": [
+    {
+      "documentId": 7,
+      "fileName": "公司年报.pdf",
+      "chunkIndex": 12,
+      "score": 0.8241,
+      "content": "……（该分块的原文）"
+    }
+  ],
+  "retrieval": { "topK": 5, "hits": 1, "threshold": 0.5, "durationMs": 48 },
+  "generation": { "modelType": "DEEPSEEK", "model": "deepseek-chat", "durationMs": 4034 }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `answer` | string | 是 | 模型生成的答案；`grounded=false` 时是**固定文案**（见下） |
+| `grounded` | boolean | 是 | 答案是否**基于检索到的资料**。`false` = 检索（阈值筛完后）0 条 ⇒ **未调用大模型** |
+| `sources` | array | 是 | 引用片段，按 `score` **降序**；`grounded=false` 时为空数组（**不是 `null`**） |
+| `sources[].documentId` | integer (int64) | 是 | 来源文档 ID |
+| `sources[].fileName` | string | 是 | 来源文件名（展示用） |
+| `sources[].chunkIndex` | integer | 是 | 该分块在文档内的序号，**0 起**；前端展示「第 N 段」时用 `chunkIndex + 1` |
+| `sources[].score` | number | 是 | 余弦相似度 = `1 - (embedding <=> query)`，**保留 4 位小数**；取值域 `[-1, 1]` |
+| `sources[].content` | string | 是 | 该分块的**原文**（引用即原文，不做二次摘要；段落内的换行原样保留 ⇒ 渲染要 `white-space: pre-wrap`） |
+| `retrieval` | object | 是 | 检索侧观测值：`topK`（本次生效值）/ `hits`（过阈值条数）/ `threshold`（本次生效阈值）/ `durationMs` |
+| `generation` | object \| **null** | 是（可为 `null`） | 生成侧观测值：`modelType` / `model` / `durationMs`；**`grounded=false` 时为 `null`**（没调模型） |
+
+**`grounded=false` 时的 `answer` 固定文案**（后端常量，前端**不必自己拼**）：
+
+```
+知识库中未找到相关内容，请换一种问法，或先上传相关文档。
+```
+
+> 契约里**不写**"答案 ≤ 200 字"这类生成侧约束 —— 那是 prompt 的事（设计 §4.6），不是接口的事；
+> 写进契约就成了后端必须校验的规则，而它其实拦不住模型。
+> `retrieval` / `generation` 两个观测块**必须有**：它们是验收（"答案不对"到底是检索的问题还是生成的问题）
+> 与现场排查的唯一可见证据。
+> ⚠️ `sources[].content` 与 `answer` 都是**用户上传的外部文本**，前端必须用插值渲染（`{{ }}` / `v-text`），
+> **绝不用 `v-html`** —— PDF/TXT 里出现 `<script>` 就是一次 XSS（设计 §5.1-3）。
+
+### 7.7 失败形态总表（**全同步口径**）
+
+本链路全部同步（无工作线程、无 `SseEmitter`），所以每条失败都有确定的载体与状态码 —— 这正是决策 D6/D7 换来的一致性：
+
+| 失败点 | 时机 | 载体 | HTTP | code |
+| --- | --- | --- | --- | --- |
+| 无 token / 过期 / 伪造 | 进控制器前 | `Result` | 401 | `40100` / `40102` / `40101`（过滤器出口，见 §1.2） |
+| 请求不是 multipart（缺 `Content-Type` / 缺 boundary） | 参数绑定前 | `Result` | **200** | `40001` |
+| 未带 `file` 字段 / 文件为空 | 参数绑定 | `Result` | **200** | `40001` |
+| 请求体校验失败（`question` 空 / 超长；`topK` 越界）/ JSON 畸形 | 进控制器前 | `Result` | **200** | `40001` |
+| 文件超过 10MB | multipart 解析 | `Result` | **200** | `40003`（**待实测**：也可能表现为连接被重置，见设计 §6.2） |
+| 扩展名不在白名单 / 扩展名与内容不符 | 业务 | `Result` | **200** | `10201` |
+| 解析不出文本（扫描版 PDF、空文件、编码不可识别） | 业务 | `Result` | **200** | `10203` |
+| 分块数超过 3000 | 业务（**向量化之前**） | `Result` | **200** | `10204` |
+| 向量化时 Ollama 不可达 / 超时 / 报错 | 业务 | `Result` | **503** | `20100`（事务回滚，文档不落库） |
+| 生成时上游模型不可达 / 超时 / 报错 | 业务 | `Result` | **503** | `20100`（检索结果已拿到，但答案生成失败 ⇒ **整个请求失败**） |
+| 删除不存在的文档 | 业务 | `Result` | **200** | `10202` |
+| 未预期的内部异常 | 兜底 | `Result` | 500 | `50000` |
+| 客户端中途断开（上传/问答进行中） | — | 无（连接已没了） | — | 服务端**不会**察觉：入库照常完成。前端超时 ≠ 后端失败（§7.1 第 3 条） |
+
+> **为什么"生成失败"不降级为"返回引用片段、答案留空"**：那样会造出一个**看着成功其实没答**的响应，
+> 而"答案为空"的前端处置与"检索不到"（`grounded=false`）长得一样，会把排查方向带偏。
+> 宁可整体失败（503 + `20100`）让用户重试 —— 重试成本是几秒钟，误诊成本是半小时。
+
+### 7.8 错误码增量（**不复用**既有值）
+
+**通用码**（已在 §1.3 的表里，此处为完整复述 —— 它不限知识库接口）：
+
+| code | 常量（后端 `ResultCode`） | 配套 HTTP | `msg` | 归属 |
+| --- | --- | --- | --- | --- |
+| 40003 | `FILE_TOO_LARGE` | **200** | 文件过大，最大支持 10MB | 4xxxx 请求侧（**通用**） |
+
+**知识库业务码**：
+
+| code | 常量（后端 `ResultCode`） | 配套 HTTP | `msg` | 归属 |
+| --- | --- | --- | --- | --- |
+| 10201 | `KB_FILE_TYPE_UNSUPPORTED` | 200 | 不支持的文件类型，仅支持 TXT / PDF | 1xxxx 业务 |
+| 10202 | `KB_DOCUMENT_NOT_FOUND` | 200 | 文档不存在或已被删除 | 1xxxx 业务 |
+| 10203 | `KB_PARSE_EMPTY` | 200 | 未能从文件中解析出文本（可能是扫描版 PDF 或空文件） | 1xxxx 业务 |
+| 10204 | `KB_CONTENT_TOO_LARGE` | 200 | 文档内容过长，超出单文档分块上限，请拆分后上传 | 1xxxx 业务 |
+
+**复用的既有码**（不新增，避免同一件事有两个码）：
+`40001`（参数不合法：请求不是 multipart、缺 `file`、文件为空、JSON 畸形、`topK` 越界、问题超长）、
+`20100`（模型/依赖不可用：向量化或生成时上游不可达 —— 知识库链路里**只有 503 一种载体**，
+不像对话接口那样还有 `error` 帧，因为本链路全程同步）、`50000`、`40100`/`40101`/`40102`。
+
+> **`40002`（415）为什么不用于上传**：它的 `msg` 写死是"请求格式不支持，请使用 **application/json**"，
+> 贴到上传接口上是**反向误导**（用户会去改 JSON 头）。故 multipart 相关失败一律走 `40001`，
+> 由后端日志说明具体是哪一种（缺头 / 缺 boundary / 缺 part）。
+>
+> ⚠️ **两条"文案写死、配置可改"的已知成本**（本轮接受，记在明处）：
+> `40003` 的 `msg` 写死"10MB"（真源在 `spring.servlet.multipart.max-file-size`）、
+> `10201` 的 `msg` 写死"仅支持 TXT / PDF"（白名单可配）。改配置时两处文案要一起改，
+> 否则前端展示的限制值与实际行为不一致。
+
+### 7.9 curl 验证
+
+> ⚠️ **端口必须从唯一真源取，不要写死**（`docker-compose/.env` 的 `BACKEND_PORT`）。
+> 夹具在 `qa/fixtures/rag/`（**清单与用途见设计 §7.2**，其余夹具由 qa-engineer 按需生成）；
+> **验收用例与判据见 `docs/test-cases/TC-03.md`**。
+> 下面这组命令用现成的 `公司年报.pdf`（阶段验收夹具）—— 上传它再问"去年利润"才是闭环。
+
+```bash
+# 前置：进入仓库根目录
+cd /c/wp/nexus-agent-workbench
+BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
+TOKEN=$(curl -s -X POST "http://localhost:${BACKEND_PORT}/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+
+# ① 上传（-F 即 multipart；curl 会自动带上 boundary —— 这正是前端不能手写 Content-Type 的原因）
+curl -s -X POST "http://localhost:${BACKEND_PORT}/api/kb/documents" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -F "file=@/mnt/c/wp/nexus-agent-workbench/qa/fixtures/rag/公司年报.pdf"
+
+# ② 列表
+curl -s "http://localhost:${BACKEND_PORT}/api/kb/documents" -H "Authorization: Bearer ${TOKEN}"
+
+# ③ 问答（阶段验收的那一问）
+curl -s -X POST "http://localhost:${BACKEND_PORT}/api/kb/ask" \
+  -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+  -d '{"question":"去年利润是多少"}'
+
+# ④ 删除（documentId 换成②里的值）
+curl -s -X DELETE "http://localhost:${BACKEND_PORT}/api/kb/documents/1" -H "Authorization: Bearer ${TOKEN}"
+```
+
+**判据**：① 返回 `code=0` 且 `chunkCount ≥ 1`；② 列表里出现刚上传的文档（跨租户看不到，见 §7.2）；
+③ `grounded=true` + `sources` 非空 + 答案里的数字与资料一致；④ 返回 `data=null`，再查列表已消失。
+
+> 四条**探针**（embedding 维度 / 批量入参 / 模型版本 / pgvector 版本）与相似度阈值的**标定步骤**不在契约范围内，
+> 见设计 §3.9。四条探针已于 2026-09-22 实测：`/api/embed` 存在且**维度 = 768**（故 `vector(768)` 定稿）、
+> **支持批量**、`nomic-embed-text` 的 `num_ctx 8192`（500 字块远小于窗口）、pgvector **0.8.6**（HNSW 可用）。
+
+---
+
+## 8. 变更记录
 
 | 日期 | 变更 | 说明 |
 | --- | --- | --- |
@@ -886,3 +1194,6 @@ curl -N -X POST "http://localhost:${BACKEND_PORT}/api/chat/stream" \
 | 2026-09-17 | 订正 §5.3 一处的用例引用 | 「这是验收项 1.2-3 的判据」→「验收项『登出即失效』（`TC-01-1.2-5`）」。原因：`1.2-3` 在本仓库有**两套编号**（design §9 / task.2 指「task 第 3 条验收标准 = 登出即失效」，TC-01.md 指「第 3 条用例 = 过期 token」），只写 `1.2-3` 会指到错的那条。对照表见 `docs/test-cases/TC-01.md` 头部 |
 | 2026-09-20 | 追加 §6 对话接口（阶段2） | `POST /api/chat/stream`：请求契约（三条补充约束）+ 四种事件帧 + 三条时序规则 + 失败形态总表（**全异步口径**）+ 3 个新错误码（`40001`/`10200`/`20100`）+ curl 验证。**§1~§5 编号保持不变**（§4 被 `scripts/` 三个脚本按编号引用），原「变更记录」顺延为 §7。⚠️ 流式接口是本仓库第一个「响应体不是一次性 JSON」的接口，但**每帧 `data` 仍是 `Result<T>`** |
 | 2026-09-20 | §6.2 补「帧表 ↔ schema 对应关系」；`openapi.yaml` 补齐 `delta` 帧 schema | **缺口来源（前端实施时提出）**：`openapi.yaml` 只有 meta/done/error 三个 schema，缺 `ChatStreamDelta`，前端只好手工补了一个类型 —— 机器可读版与本节帧表不一致，按 openapi 生成类型的人会漏掉 `delta`。本次：① openapi 新增 `ChatStreamDelta`（`content`，注明是**增量**、不是累积全文）；② 四种帧 ↔ 四份 schema 的对应关系在 §6.2 与 openapi 的接口描述里各写一份（OpenAPI 3.0.3 无法把 schema 挂到 SSE 事件上）；③ `data.servedBy` 由紧 enum 放宽为 `string` —— 取值集合会随自动路由扩大（设计 §10.1 的 `fallback`），纯展示字段的容错优先于严格 |
+| 2026-09-22 | 追加 §7 知识库接口（阶段3） | `POST /api/kb/documents`（上传）/ `GET /api/kb/documents`（列表）/ `DELETE /api/kb/documents/{documentId}` / `POST /api/kb/ask`（问答）四个**同步**接口 + `KbDocumentVO` / `KbAnswerVO` 两个响应结构 + **全同步口径**的失败形态总表 + 5 个新错误码（`40003` 为通用码，`10201`~`10204` 为知识库业务码）+ curl 验证；含三条边界（一个租户一个知识库 / 单轮问答 / 只支持 TXT + PDF 且不保存原件）。**§1~§6 编号与内容保持不变**（§4 被 `scripts/` 三个脚本按编号引用），原「变更记录」顺延为 §8。⚠️ 与 §6 的流式接口相反：本组接口**每个失败都有确定的 HTTP 载体** |
+| 2026-09-22 | §1.3 增通用码 `40003`；§4.6 的 pgvector 判据升级 | ① `40003`（`FILE_TOO_LARGE`，HTTP 200）列入 §1.3 通用表 —— 它约束的是 multipart 请求体本身，任何上传接口都会撞上，与"知识库"这个业务域无关。② §4.6 那一行订正为「**阶段3 起 `installed_version IS NOT NULL` 为硬判据**」：`CREATE EXTENSION vector` 已由 `db-patch/202609131000` 执行，而 RAG 的建表补丁依赖 `vector` 类型 ⇒ 扩展没装上时建表 / 入库 / 检索全挂，"扩展可用"不再够用（这是设计 §0.1 末尾预告的收口，连带任务是 devops 升级 `check-env.sh`） |
+| 2026-09-22 | **补齐 `openapi.yaml` 缺失的 6 个认证 schema**（阶段1 技术债） | **缺口来源（阶段3 实施复核实测发现，非本阶段引入）**：`LoginRequest` / `ResultLoginResponse` / `ResultVoid` / `ResultUserInfoVO` 这 4 个 `$ref` **从阶段1 起就没有对应的 schema 定义**（悬空引用），任何按 `openapi.yaml` 生成 TS 类型或导入 Postman 的人都会在这 4 处失败 —— 而本文件 §5 的字段表一直是完整的，即**两份契约从阶段1 起就不同步**。本次补上 6 个 schema：`LoginRequest` / `UserInfoVO` / `LoginResponse` + 三个 `Result*` 包装体（沿用 `ResultHealthReport` 的 `allOf` 写法；认证组用包装体、知识库组用内联，两种写法并存是既成事实，见 openapi 内对应注释）。字段以 §5.2 / §5.4 为准，并与 `nexus-module-system` 的 `LoginRequest` / `LoginResponse` / `UserInfoVO` 三个 DTO 逐一核对。判据：`openapi.yaml` 可解析且**全部 `$ref` 可解析**（本次自检：8 path / 22 schema / 20 ref / **0 悬空**） |

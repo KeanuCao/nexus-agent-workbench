@@ -12,9 +12,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.List;
@@ -30,6 +35,10 @@ import java.util.List;
  *     <tr><td>{@link UnauthorizedException}</td><td>401</td><td>40100 / 40101 / 40102</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link MethodArgumentNotValidException}</td><td>200</td><td>40001</td><td>warn（打字段级明细，不打堆栈）</td><td>是</td></tr>
  *     <tr><td>{@link HttpMessageNotReadableException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link MaxUploadSizeExceededException}</td><td>200</td><td>40003</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link MultipartException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link MissingServletRequestPartException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link MissingServletRequestParameterException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link TaskRejectedException}</td><td>503</td><td>20100</td><td>warn（异常 message 自带线程池现场）</td><td>是</td></tr>
  *     <tr><td>{@link SystemException}</td><td>500</td><td>50000</td><td>error（含堆栈）</td><td>否，只回通用话术</td></tr>
  *     <tr><td>{@link NoResourceFoundException}</td><td>404</td><td>40400</td><td>warn</td><td>是</td></tr>
@@ -50,6 +59,12 @@ import java.util.List;
  * {@code docs/api/README.md} §1.2 已把「参数不合法」归入"业务失败 → HTTP 200"，
  * 且 openapi.yaml 头部只列举了 401/404/500/503。选 400 就必须在同一次改动里改这两份
  * 已发布契约（见 {@link ResultCode#PARAM_INVALID}）。
+ *
+ * <p>阶段3 的四个"请求形状"出口（{@code MaxUploadSizeExceeded} / {@code Multipart} /
+ * {@code MissingServletRequestPart} / {@code MissingServletRequestParameter}）是<b>同一类问题的
+ * 事前处置</b>：阶段2 的 {@code HttpMediaTypeNotSupportedException} 曾经落进兜底、把客户端的请求
+ * 拼写问题报成 500「系统繁忙」，把排查方向整个带偏（{@code docs/api/README.md} §1.2 有完整记载）。
+ * 与其等上传接口上线后再被实测暴露一次，不如把这一族一次性收口。
  *
  * @author nexus
  */
@@ -127,6 +142,109 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Result<Void>> handleHttpMessageNotReadable(HttpMessageNotReadableException ex) {
         log.warn("请求体不可读（JSON 畸形或类型不匹配）：{}", ex.getMessage());
+        return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+    }
+
+    /**
+     * 请求的媒体类型不受支持（阶段2 新增）：缺 {@code Content-Type} 或不是 {@code application/json}。
+     *
+     * <p><b>为什么必须单开一条（这是实测出来的缺陷）</b>：没有它时，{@code HttpMediaTypeNotSupportedException}
+     * 会落进 {@link #handleException} 兜底 → 客户端<b>忘带头</b>被报成 <b>500 + 50000「系统繁忙」</b>。
+     * 那一格把排查方向整个带偏：明明是调用方的请求格式问题，却显示成服务端故障 ——
+     * 而契约（{@code docs/api/README.md} §6.1 与设计 §5.1-2）恰恰把 415 写成前端诊断
+     * "是不是 Content-Type 没带"的依据。2026-09-20 由 TC-02 的只读探针实测暴露，同日修复。
+     *
+     * <p>用 <b>415</b> 而不是又一个 200：这属于传输层语义（请求的媒体类型不被接受），
+     * 与 401/404 同类；{@link ResultCode#PARAM_INVALID} 那条配套 200 的理由（业务失败不污染
+     * 前端的失败分支）在这里不成立 —— 请求根本没被解析成业务入参。
+     *
+     * @param ex 媒体类型不支持异常
+     * @return HTTP 415 + 40002
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<Result<Void>> handleHttpMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
+        // 只记"收到的是什么"，不记 content-type 明细：这条日志的价值在于定位"哪个调用方忘了带头"
+        log.warn("请求媒体类型不受支持：contentType={}", ex.getContentType());
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .body(Result.failure(ResultCode.UNSUPPORTED_MEDIA_TYPE));
+    }
+
+    /**
+     * 上传文件超过大小上限（阶段3 新增，随知识库的上传接口一起落地）。
+     *
+     * <p><b>与下面 {@link #handleMultipartException} 的匹配关系</b>：本异常是
+     * {@code MultipartException} 的<b>子类</b>。Spring 的 {@code ExceptionHandlerMethodResolver}
+     * 是按异常类型的继承距离挑出口的（选最贴近的那个），所以声明顺序技术上不决定匹配结果 ——
+     * 但这里仍把子类排在父类之前：读代码的人顺着扫下来，才不会误以为"文件超限会落进父类那格"、
+     * 被报成一个误导性的 40001。
+     *
+     * <p>出口 <b>200 + 40003</b>：与 {@link ResultCode#PARAM_INVALID} 同一条理由（业务失败不污染
+     * 前端的 axios 失败分支）；而码必须与参数问题分开 —— "文件太大"要用户换文件、"参数不合法"
+     * 要用户改请求，两种动作不同，合成一个码就等于让前端只能靠猜。
+     *
+     * <p>⚠️ <b>待实测</b>：Tomcat 的 {@code max-swallow-size}（默认约 2MB）可能让超限请求
+     * 表现为"连接被重置"而根本到不了这里（设计 §6.2 的待实测项，判据见契约 §7.7）。
+     *
+     * @param ex 上传超限异常
+     * @return HTTP 200 + 40003
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<Result<Void>> handleMaxUploadSizeExceeded(MaxUploadSizeExceededException ex) {
+        // 只记异常自带的消息（含上限值），不记文件名与内容
+        log.warn("上传文件超过大小上限：{}", ex.getMessage());
+        return ResponseEntity.ok(Result.failure(ResultCode.FILE_TOO_LARGE));
+    }
+
+    /**
+     * multipart 请求本身不可解析（阶段3 新增）：缺 {@code Content-Type: multipart/form-data}、
+     * 缺 boundary、或 body 不是合法的 multipart 结构。
+     *
+     * <p>出口 <b>200 + 40001</b>，刻意<b>不</b>复用 {@link ResultCode#UNSUPPORTED_MEDIA_TYPE}（415）：
+     * 那个码的文案写死是"请使用 <b>application/json</b>"，贴到上传接口上是<b>反向误导</b>
+     * ——用户会去改 JSON 头，而真正要做的是"别手工设置 Content-Type、让浏览器带上 boundary"。
+     * 所以 multipart 这一类的失败一律走 40001，靠本条日志说清是哪一种（设计 §3.8 的备注）。
+     *
+     * <p>warn 级、不打堆栈：与其它客户端缺陷出口一致 —— 请求都没拼对，不是服务端故障。
+     *
+     * @param ex multipart 异常
+     * @return HTTP 200 + 40001
+     */
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Result<Void>> handleMultipartException(MultipartException ex) {
+        log.warn("multipart 请求不可解析（缺 Content-Type / 缺 boundary / 结构非法）：{}", ex.getMessage());
+        return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+    }
+
+    /**
+     * 表单里缺少必需的文件 part（阶段3 新增）：例如请求是合法的 multipart，但没有名为
+     * {@code file} 的字段（前端把字段名写错成 {@code upload} 之类就是这一格）。
+     *
+     * <p><b>它不是一个"多余"的出口</b>：本异常<b>不是</b> {@code MultipartException} 的子类
+     * （它继承自 {@code ServletRequestBindingException}），不单开就会落进兜底 → 500 + 50000，
+     * 把"前端字段名写错"报成服务端故障 —— 与阶段2 那个 415 的缺陷是同一类（见类注释）。
+     *
+     * @param ex 缺少请求 part 异常
+     * @return HTTP 200 + 40001
+     */
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public ResponseEntity<Result<Void>> handleMissingServletRequestPart(MissingServletRequestPartException ex) {
+        log.warn("缺少必需的请求 part（表单字段名可能写错了）：{}", ex.getRequestPartName());
+        return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+    }
+
+    /**
+     * 缺少必需的请求参数（阶段3 新增）：查询串 / 表单里少了声明为必填的参数。
+     *
+     * <p>它<b>不在</b>本阶段的业务链路上，属"顺手补齐同类缺口"：阶段2 的
+     * {@code HttpMediaTypeNotSupportedException} 就是落进兜底被报成 500 之后才补的（见类注释）。
+     * 与其等下一次被实测暴露，不如把这一族异常一次性收口 —— 代价只有五行。
+     *
+     * @param ex 缺少请求参数异常
+     * @return HTTP 200 + 40001
+     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Result<Void>> handleMissingServletRequestParameter(MissingServletRequestParameterException ex) {
+        log.warn("缺少必需的请求参数：{}", ex.getParameterName());
         return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
     }
 
