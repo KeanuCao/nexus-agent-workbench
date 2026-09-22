@@ -22,3 +22,16 @@ metadata:
 2026-09-03 检查点 G 通过（Step 6）：`docker compose up -d ollama-init` 一次性拉取成功，约 2 分钟内完成。证据三件套：① `docker compose ps -a` 显示 `Exited (0)`；② `curl localhost:11434/api/tags` 含 qwen2.5:7b（4.68GB，Q4_K_M，digest 845dbda0...697e）与 nomic-embed-text:latest（274MB，F16，digest 0a109f42...e59f）；③ `docker exec nexus-ollama du -sh /root/.ollama` = 4.7G（卷内落盘）。拉取速率实测 24 MB/s。init 容器日志末尾 `[ollama-init] 模型就绪：qwen2.5:7b / nomic-embed-text`。注意 ollama-init 服务的 image 实际是 `docker.m.daocloud.io/ollama/ollama:latest` + `/bin/sh -c 'set -e ...'` 拉取脚本（非独立镜像）。
 
 2026-09-03 检查点 H 通过（Step 7）：四项探测全绿——`pg_isready -U nexus -d nexus` = accepting connections；`redis-cli ping` = PONG；`/api/version` = ollama 0.33.2；`/api/tags` 含两模型；pgvector 加分项 `SELECT name FROM pg_available_extensions WHERE name='vector'` 返回 1 行。卷持久化实测：`docker compose restart ollama` 后 38s 恢复 healthy，`ollama list` 两模型仍在（nomic-embed-text 274MB / qwen2.5:7b 4.7GB）。`docker compose ps` 三件套全部 `(healthy)`。§7 验收对照表 0.1 前三条打勾，第四条（builder 不常驻）留待 Step 8（`ps -a` 无 builder 行即通过）。注意：经 `bash -c` 双层引号转义时 `docker inspect -f '{{...}}'` 模板会取到空值，用 `docker compose ps` 或去掉 `-f` 直接 inspect 更稳。
+
+> ⚠️ **2026-09-22 模型清单已变（本文件上面所有"两模型/275MB/768 维"都是 nomic 时代的历史记录）**：
+> embedding 模型由 `nomic-embed-text`（768 维）换为 **`bge-m3`（1024 维）**，qwen2.5:7b 不变。
+> 期望清单的**唯一真源** = `docker-compose.yml` 的 `ollama-init` 命令里的 `for model in qwen2.5:7b bge-m3`；
+> `scripts/lib/probe.sh` 的 `nexus_expected_models()` 从它 grep 解析，`check-env.sh` / `check-health.sh` / `up.sh`
+> 三处都调用该函数 —— **所以改模型清单只需改 compose 那一行，脚本会自动跟上**（实测：改完后
+> `check-health.sh` 打出 `[PASS] 模型齐备：qwen2.5:7b bge-m3`，退出码 0）。
+> 拉取实测（2026-09-22）：`docker exec nexus-ollama ollama pull bge-m3` → 1.2GB / 2.4MB/s / `success` / 退出码 0；
+> **维度探针实测 = 1024**（两种独立计数法一致），`ollama show` = architecture bert / context length **8192** / embedding length 1024 / F16。
+> ⚠️ `nomic-embed-text` 的 274MB blob **仍留在 `ollama-models` 卷里**（未删，未获授权）：
+> 后果是"若有人把期望清单改回旧值，检查照样 PASS" ⇒ 想彻底断掉这条假绿灯，可在复测通过后 `ollama rm nomic-embed-text`。
+> ⚠️ compose 改动会让下次 `docker compose up -d` **重建 `nexus-ollama-init`**（配置哈希变了）：属预期，
+> 新逻辑对两个模型都命中跳过分支（已用**真实** `ollama list` 输出实测），秒级退出 0。

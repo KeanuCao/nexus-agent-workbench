@@ -29,7 +29,7 @@ color: green
 - builder 的产物写到共享卷 `build-artifacts`；前后端容器**只读挂载该卷**取包（镜像因此不再自包含）
 - **由此产生一条硬约束：改完必须先 `commit` + `push`**，否则容器里拉到的还是旧代码
 - 确保 `docker compose up -d` 一键拉起全部服务
-- Ollama 就绪后自动拉取 `qwen2.5:7b` 和 `nomic-embed-text`
+- Ollama 就绪后自动拉取 `qwen2.5:7b` 和 `bge-m3`（embedding，1024 维；2026-09-22 由 `nomic-embed-text` 768 维换入，理由见 `docs/design/03-RAG知识库.md` §0.3）
 
 ### 2. 数据库补丁工作流
 - 补丁命名规则：`YYYYMMDDHHmm_描述.sql`
@@ -135,7 +135,7 @@ cd frontend && npm run test:e2e               # 运行前端 E2E 测试
 提供 `docker-compose.yml`，包含：
 PostgreSQL 16 (带 pgvector 插件)
 Redis 7
-Ollama (拉取 `qwen2.5:7b` 和 `nomic-embed-text`)
+Ollama (拉取 `qwen2.5:7b` 和 `bge-m3`)
 后端启动命令：`mvn clean install -DskipTests && java -jar nexus-start/target/*.jar`
 前端启动命令：`npm install && npm run dev`
 

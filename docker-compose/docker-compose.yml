@@ -107,12 +107,17 @@ services:
         set -e
         # 幂等判断（2026-09-12 修正）：
         #   ollama list 的 NAME 列对**未指定 tag** 的模型显示为 `name:latest`
-        #   （如 nomic-embed-text:latest），而 model 变量不带 tag
+        #   （如 bge-m3:latest），而 model 变量不带 tag
         #   → 原写法 `awk '{print $1}' | grep -qx "${model}"` 要求整行相等，**必然匹配不上**
         #   → 跳过分支对第二个模型永久失效，每次 up -d 都会重新 pull（外网依赖 + 假失败风险）。
         #   修法：在列表侧剥离 :latest 再比；NR>1 顺带跳过表头。sub 有则剥、无则不动，
         #   对自带 tag 的 qwen2.5:7b 无影响，两种显示格式都能命中。
-        for model in qwen2.5:7b nomic-embed-text; do
+        #   ⚠️ 2026-09-22 换入 bge-m3 后本陷阱**依旧压在当前清单上**（bge-m3 也是无 tag 拉取、
+        #      列表显示 bge-m3:latest），所以这段剥离逻辑不是历史包袱，是活判据 —— 别删。
+        # ── 模型清单（唯一真源：probe.sh / check-env.sh / check-health.sh 都从这里解析）──
+        # 2026-09-22 由 nomic-embed-text 换入（替换而非追加：nomic 已无人使用，
+        # 留着只多占 274MB 并让"期望模型清单"含糊）。理由见 docs/design/03-RAG知识库.md §0.3。
+        for model in qwen2.5:7b bge-m3; do
           if ollama list | awk 'NR>1 {sub(/:latest$$/, "", $$1); print $$1}' | grep -qx "$${model}"; then
             echo "[ollama-init] 模型 $${model} 已存在，跳过"
           else
@@ -120,7 +125,7 @@ services:
             ollama pull "$${model}"
           fi
         done
-        echo "[ollama-init] 模型就绪：qwen2.5:7b / nomic-embed-text"
+        echo "[ollama-init] 模型就绪：qwen2.5:7b / bge-m3"
     networks:
       - nexus-net
 

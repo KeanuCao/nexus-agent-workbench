@@ -94,13 +94,15 @@ nexus_load_env() {
 
 # 期望的模型清单：唯一真源是 compose 的 ollama-init 命令（`for model in A B`）。
 # 不在脚本里硬编码，是为了改模型清单时不会漏改脚本（§4.5 明确要求同步）；解析失败才用兜底。
+# 当前期望（2026-09-22 起）：qwen2.5:7b（生成）+ bge-m3（embedding，1024 维）——
+#   embedding 由 nomic-embed-text(768) 换入，理由见 docs/design/03-RAG知识库.md §0.3。
 nexus_expected_models() {
     local list=""
     if [ -f "$NEXUS_COMPOSE_FILE" ]; then
         list="$(grep -oE 'for model in [^;]*' "$NEXUS_COMPOSE_FILE" 2>/dev/null \
             | head -n1 | sed 's/for model in //' | tr -d '\r')"
     fi
-    if [ -n "$list" ]; then printf '%s' "$list"; else printf '%s' "qwen2.5:7b nomic-embed-text"; fi
+    if [ -n "$list" ]; then printf '%s' "$list"; else printf '%s' "qwen2.5:7b bge-m3"; fi
 }
 
 # 由容器名反查 compose 服务名 —— 给用户的命令必须是**服务名**：
@@ -426,7 +428,9 @@ nexus_probe_models() {
     if [ "$NEXUS_HTTP_CODE" != "200" ]; then return; fi
 
     # :latest 归一化陷阱（已出过真实事故，§4.5）：无 tag 拉取的模型在列表里显示为
-    # nomic-embed-text:latest，用整字段精确匹配会**永不命中** → 在列表侧剥掉 :latest 再比。
+    # `<名字>:latest`（当初的肇事模型是 nomic-embed-text；**当前期望的 bge-m3 同为无 tag
+    # 拉取、同样显示 bge-m3:latest**，所以这条剥离逻辑现在仍在生效，不是历史注脚），
+    # 用整字段精确匹配会**永不命中** → 在列表侧剥掉 :latest 再比。
     # 匹配同样容忍 `:` 后空白（ollama 是 Go 的紧凑输出，但别把判据押在序列化风格上）。
     NEXUS_MODELS_FOUND="$(printf '%s' "$NEXUS_HTTP_BODY" \
         | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
