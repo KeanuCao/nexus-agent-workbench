@@ -867,7 +867,8 @@ export async function askKb(req: KbAskRequest): Promise<KbAnswerVO>
 | **`db-patch/` 新补丁**（§6.3） | ❌ | ✅ builder `db-patch-migrate` | 无需动容器（但要先跑迁移，否则上传报 500） | `SELECT to_regclass('public.t_kb_chunk') IS NOT NULL` → `t` |
 | `pom.xml` 依赖增量（§6.4） | ❌ | ✅ `build-backend`（★ **首次会多下载 Tika 依赖**） | `restart nexus-backend` | 构建日志里 Tika 构件解析成功；启动日志出现 `TikaDocumentParser 就绪` |
 | 前端源码（§5） | ❌ | ✅ builder `build-frontend` | **不用动容器**（nginx 逐请求读共享卷） | 浏览器强刷后页面变成知识库页 |
-| `docker-compose.yml` / `nginx.conf` / `.env` | — | — | **本阶段零改动** | 不需要新增环境变量、不需要新端口、不需要新卷 |
+| `docker-compose.yml` / `.env` | — | — | **本阶段零改动** | 不需要新增环境变量、不需要新端口、不需要新卷 |
+| **`nginx.conf`** | ✅ **`build nexus-frontend`** | ❌ | **`up -d nexus-frontend`** | ★ **实施时发现必须改**（初版写"零改动"是错的）：nginx 默认 `client_max_body_size` = **1m** ⇒ 走 8088 上传 >1MB 被 **413** 挡下（**1.68MB 的验收夹具必挂**），而直连后端端口一切正常。加了 `client_max_body_size 12m;`（与后端 `max-request-size` 对齐）。**该文件是 COPY 进镜像的 ⇒ 必须重建镜像**，只 `restart` 不生效 |
 
 > 💡 **本阶段不动 compose、不动 nginx、不动 Dockerfile** —— 三个"不需要改"本身是阶段0/2 那套架构（产物走共享卷 + `env_file`）的红利，值得在面试里提一句。
 
@@ -883,7 +884,8 @@ export async function askKb(req: KbAskRequest): Promise<KbAnswerVO>
 | 6 | `db-patch/202609221000_初始化知识库表.sql` | **新建** | 两张表 + 索引 + 注释（§6.3） |
 | 7 | `docs/api/README.md` + `docs/api/openapi.yaml` | 改 | +§7 契约（**先落这两份，再写代码**） |
 | 8 | `backend/nexus-module-ai/README.md` | 改 | 阶段3 段落（落地后） |
-| 9 | `docs/核心任务.md` | 改 | 阶段3 进度标记 |
+| 9 | `docker-compose/frontend/nginx.conf` | 改 | ★ **实施时发现**：加 `client_max_body_size 12m;`（默认 1m 会挡住 >1MB 的上传 ⇒ 验收夹具 413）。证据、探针与复核见 §6.0 的表 |
+| 10 | `docs/核心任务.md` | 改 | 阶段3 进度标记 |
 
 ### 6.2 `application.yml` 的改法（**三处插入，别整块替换**）
 
@@ -1059,7 +1061,12 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/dock
 # 5. 重建前端产物
 wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose exec -T builder build-frontend"
 
-# 6. 重启后端（jar 变了 → restart 就够；本阶段没改 compose/环境变量，不需要 up -d --force-recreate）
+# 5.5 ★ 重建前端**镜像**并重建容器 —— 只有改了 nginx.conf 才需要（它被 COPY 进镜像，restart 不生效）。
+#     ⚠️ 别漏：漏了的话走 8088 上传 >1MB 仍是 413，而你会以为"改过了怎么还不行"
+wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose build nexus-frontend"
+wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose up -d nexus-frontend"
+
+# 6. 重启后端（jar 变了 → restart 就够；本阶段只改了 nginx.conf，没动 compose 的 environment/env_file）
 wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose restart nexus-backend"
 
 # 7. 核对新表与索引（★ 只在 builder 容器内有 psql）
@@ -1246,3 +1253,4 @@ embedding / 答案缓存（同一问题重复问会重复调用上游）、批�
 | 2026-09-22 | **第二段 a 交付后的设计订正（6 处）** | 子代理交付 11 个类（**含真实 jar 的 `javac` 编译自检 + 59/15 项行为探针**）并上报 11 条偏离，主会话逐条裁定后订正本设计：① embedding 的**三个常量**（§4.5 —— 含"`nexus.ai.ollama.model` 是对话模型、不能拿来向量化"这条警告）；② **TXT 不做 Tika 内容检测**（D12 —— 合法 GBK 文件会被判成 `octet-stream` 而误杀成 10201）；③ **尾块合并不可达**（§4.4 —— 7920 组穷举 0 次触发，保留分支但不再当用例）；④ `TextChunker` 构造期 fail-fast（§4.4 —— `overlap ≥ size` 会让首个上传请求死循环）；⑤ **空答案按 `20100` 失败**（§4.7 —— 由 `KbAskServiceImpl` 判，绝不给"看着成功其实没答"的响应）；⑥ **`entity/KbChunk` 不建**（§4.1 —— 全链路自定义 SQL ⇒ 实体无消费者，属死代码）。另：不因一条日志给 `generate(...)` 加参数（§4.7 第 5 条），因此 §4.11 的"生成完成"行去掉 `sources=N`（与检索行的 `hits=N` 同源） |
 | 2026-09-22 | **第二段 b 交付后的设计订正（4 处）+ 一条实测数字** | 子代理交付 15 个类（编译自检 40 源文件 exit 0 + 4 项行为实测）并上报 9 条偏离，主会话逐条裁定：① **§4.6 的检索 SQL 换成实况** —— pgvector 的 `<=>` 让 jsqlparser **解析失败**、租户拦截器"先解析后注入" ⇒ 每条问答都会抛 `MybatisPlusException`；处置是 `@InterceptorIgnore(tenantLine="true")` + **手写 `tenant_id`（两张表都判）**，§9 风险 4 据此从"待实测"改为"**已实测发生并处置**"，原退路①（换 `?::vector`）作废；② §4.1 `KbChunkMapper` 两条语句（`deleteByDocumentId` 不建）；③ §4.8 事务改 `TransactionTemplate`（同类内部调用的注解事务会静默失效）；④ §4.11 补两个判据细节（`durationMs` 含问题向量化；`tenant_id` 在 INSERT 是**字面量**、在检索是**绑定参数**，别混着核对）；⑤ §3.5 `createdAt` 零偏移渲染成 `Z`；⑥ §3.7/§7.7 补"文件名超 255 → `40001`"；⑦ **契约 §7.7 的 503 由代码修齐**（`GlobalExceptionHandler` 加 `code=20100` ⇒ 503 的按码分流，契约一字未改）；⑧ §7.3 把**跨租户提问**升为强制用例。★ **实测数字**：嵌入 ≈ **2.1 s/批（16 块）** ⇒ 夹具 587 块 ≈ **80~90 秒**上传 ⇒ §5 的上传超时由 120s 改 **300s** |
 | 2026-09-22 | **沙箱库重放补丁 + 索引/级联/约束实测；订正 §4.6 第 2 条的理由** | 用一次性沙箱库（`nexus_patch_probe`，真实 `nexus` 库**零写操作**）重放「补丁1 + 补丁2」→ 两条 **exit 0**（新补丁**首次被真正执行**，此前是"没人跑过"的风险）。实测五点：① 本项目的 `ORDER BY 嵌入列 <=> 常量` → **`Index Scan using idx_kb_chunk_embedding_hnsw`**；② `ORDER BY score DESC`（别名）→ **`Sort` + `Seq Scan`**（§4.6 第 1 条成立）；③ **阈值进 `WHERE` → `Index Scan` + `Filter` —— 索引照样可用** ⇒ **§4.6 第 2 条初版"会让索引失效"的理由被实测推翻**，已改为按**语义**（TopK 的定义）选择应用层过滤；④ 删文档 → 分块**级联清零**；⑤ 唯一约束 `uk_kb_chunk_doc_index` 如期拦住重复块。**连带订正 3 处 `EXPLAIN` 判据**（§4.6 / §7.3 / 补丁注释）：**必须先 `SET enable_seqscan = off`**，否则表小时规划器选 Seq Scan 会让判据**假失败**。⚠️ 复现时注意：`wsl … bash -s < 脚本` 会让脚本与 `docker exec -i` 争用同一个 stdin（症状是输出为空、脚本静默半途而废、**沙箱库残留**）—— 落成文件再执行 |
+| 2026-09-22 | **测试段交付：修掉一个阻塞验收的产品缺陷（nginx 1MB 体量墙）** | qa-engineer 交付 6 个单测类（**59 条，59/59 绿**）+ TC-03（**33 条 / 7 组**）+ 两条 qa 脚本（都实跑过）+ 5 件夹具（含**真·无文本层**的 `扫描版.pdf` 与 GBK 夹具）；其只读探针发现**走 8088 上传 >1MB 被 413 挡下**（`nginx.conf` 缺 `client_max_body_size`，nginx 默认 **1m**；**1.68MB 的验收夹具必挂**，而直连 8089 正常、响应体还不是 `Result`）。主会话复核后修：加 `client_max_body_size 12m;` + **重建前端镜像** → 复测 1.68MB 走 8088 得 **`401` + 标准 `Result`** ✅。⇒ **§6.0 / §6.1 / §6.5 三处"本阶段零改动"的表述同步订正**（初版判断错了，且这是"只有走 nginx 才现形"的**第二例**，前一例是阶段2 的 `proxy_buffering`）。另：qa 对共享库 `tc-common.sh` 的改动经复核**向后兼容**（三个 HTTP 动作各加**可选**基地址参数，静态核对全部调用点 + 实跑 `tc01-login-then-me.sh` 退出码 0） |
