@@ -1031,6 +1031,130 @@ components:
         - DOWN
 
     # ── POST /api/chat/stream 的请求体（对应后端 dto/ChatRequest + dto/ChatMessage）──
+    # ── 认证接口（阶段1：POST /api/auth/login|logout、GET /api/auth/me）──
+    #   ⚠️ 这 6 个 schema **从阶段1 起一直是缺失的**：LoginRequest / ResultLoginResponse /
+    #      ResultVoid / ResultUserInfoVO 这 4 个 $ref 悬空（README §5 的字段表却一直是完整的
+    #      ⇒ 两份契约不同步）。2026-09-22 由阶段3 实施复核发现并补齐，见 README §8 变更记录。
+    #      字段以 README §5.2 / §5.4 为准，并与 nexus-module-system 的 DTO 逐一核对过。
+    LoginRequest:
+      type: object
+      description: |
+        登录请求体（契约：`docs/api/README.md` §5.2）。对应后端 `com.nexus.module.system.dto.LoginRequest`。
+        **刻意不带校验注解**：登录接口的契约是"失败一律 200 + 10100"（防账号枚举），
+        若在入参上做 Bean Validation，空口令会先被抛成 `40001`，与契约不符。
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          description: 登录名，**全局唯一**（登录只收用户名：先查出用户，才知道它属于哪个租户）
+          example: admin
+        password:
+          type: string
+          description: 明文口令（服务端只做 BCrypt 比对；空值按 `10100` 处理）
+          example: admin123
+
+    UserInfoVO:
+      type: object
+      description: |
+        当前用户信息（契约：`docs/api/README.md` §5.2 / §5.4）。对应后端 `UserInfoVO` record。
+        `POST /api/auth/login` 的 `data.user` 与 `GET /api/auth/me` 的 `data` **同构**（就是同一个类）。
+      required:
+        - userId
+        - username
+        - nickname
+        - tenantId
+        - tenantCode
+        - tenantName
+      properties:
+        userId:
+          type: integer
+          format: int64
+          description: 用户 ID
+          example: 1
+        username:
+          type: string
+          description: 登录名
+          example: admin
+        nickname:
+          type: string
+          nullable: true
+          description: 展示名（**可为 `null`**）
+          example: 默认租户管理员
+        tenantId:
+          type: integer
+          format: int64
+          description: 租户 ID
+          example: 1
+        tenantCode:
+          type: string
+          description: 租户编码（`default` / `demo`）
+          example: default
+        tenantName:
+          type: string
+          description: 租户名称（前端展示用）
+          example: 默认租户
+
+    LoginResponse:
+      type: object
+      description: 登录成功的数据（契约：`docs/api/README.md` §5.2）。对应后端 `LoginResponse` record。
+      required:
+        - token
+        - tokenType
+        - expiresIn
+        - user
+      properties:
+        token:
+          type: string
+          description: 'JWS 紧凑序列化串；之后每个请求带 `Authorization: <tokenType> <token>`'
+        tokenType:
+          type: string
+          description: |
+            目前恒为 `Bearer`。前端拼 `Authorization: ${tokenType} ${token}` —— **用返回值而非硬编码**
+            （行为等价，但更贴合 RFC 6750 的语义）。⚠️ 本字段在本仓库曾同时写着"固定 Bearer"与
+            "不要硬编码"两种口径，已按**用返回值**收口（见 README 头部与 §5.2）。
+          example: Bearer
+        expiresIn:
+          type: integer
+          format: int64
+          description: 有效期（秒），与 Redis 白名单 TTL 一致
+          example: 7200
+        user:
+          $ref: '#/components/schemas/UserInfoVO'
+
+    ResultLoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/LoginResponse'
+
+    ResultUserInfoVO:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/UserInfoVO'
+
+    ResultVoid:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              type: object
+              nullable: true
+              description: 恒为 `null` —— 登出没有业务数据（契约 §5.3）
+
     ChatRequest:
       type: object
       description: |
