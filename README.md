@@ -12,7 +12,7 @@ Java 全栈求职面试展示项目：用 **Java 17 + Spring Boot 3.3 + Vue 3 (s
 >
 > | | 换位置后 |
 > |---|---|
-> | **脚本**（`scripts/`、`qa/scripts/`） | ✅ **照常能跑** —— 仓库根一律从 `BASH_SOURCE` 派生（`scripts/lib/probe.sh`），没有任何一处写死 |
+> | **脚本**（`scripts/`、`qa/scripts/`） | ✅ **照常能跑** —— 仓库根一律从 `BASH_SOURCE` 派生（`scripts/sh/lib/probe.sh`），没有任何一处写死 |
 > | **少数提示文案** | ⚠️ 脚本**打印出来**的建议命令会指错地方（如 `check-env.sh` 的"下一步执行"），脚本本身不受影响 |
 > | **文档里的命令**（README / `docs/test-cases/` / `docs/design/`） | ❌ **全部指错地方** —— 你得在脑子里逐条换算成自己的路径 |
 >
@@ -51,7 +51,7 @@ Java 全栈求职面试展示项目：用 **Java 17 + Spring Boot 3.3 + Vue 3 (s
 > 只有确需构建某个**尚未合并**的分支时，才临时改成那个分支名。
 
 ```bash
-wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/up.sh"
+wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/up.sh"
 ```
 
 `up.sh` 依次执行九步：
@@ -64,8 +64,8 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && .
 也可以分步执行（在 WSL 内，任一步都可单独重跑）：
 
 ```bash
-wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-env.sh"
-wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-health.sh"
+wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-env.sh"
+wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-health.sh"
 ```
 
 > 阶段0 的脚本与骨架已交付，实机验收仍在进行中 —— 逐项验收状态见 [`docs/task/task.1+环境准备.md`](docs/task/task.1+环境准备.md)。
@@ -76,11 +76,11 @@ wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && .
 
 | 脚本 | 定位 | 何时运行 | 失败语义 |
 |------|------|----------|----------|
-| `scripts/check-env.sh` | **启动前置自检（门禁）**：问"这台机器能不能把环境拉起来" | 环境起来**之前**（`up.sh` 第 1 步会调用） | 任一 `[FAIL]` → 退出码非 0 → **`up.sh` 中止**。判据必须在"一个容器都没起"的机器上可复现（所以"模型就绪"在这里只判 WARN） |
-| `scripts/up.sh` | **一键拉起 + 构建**：九步全流程（同步源码 → 迁移 → 打包 → 起容器）。2026-09-13 起构建也由它承担 | 首次启动 / 改完代码要重建 | 自检 FAIL、构建失败、依赖不健康 → 中止；模型拉取超时 → 只告警不中止 |
-| `scripts/check-health.sh` | **运行期巡检**：对"此刻"的环境做快照报告 | 环境起来**之后**，任何时刻可重跑 | `[FAIL]` **仅报告，不中止任何流程**；退出码只表达报告结论。容器一个都没起时也会正常跑完，并提示"若尚未启动，请先执行 up.sh" |
+| `scripts/sh/check-env.sh` | **启动前置自检（门禁）**：问"这台机器能不能把环境拉起来" | 环境起来**之前**（`up.sh` 第 1 步会调用） | 任一 `[FAIL]` → 退出码非 0 → **`up.sh` 中止**。判据必须在"一个容器都没起"的机器上可复现（所以"模型就绪"在这里只判 WARN） |
+| `scripts/sh/up.sh` | **一键拉起 + 构建**：九步全流程（同步源码 → 迁移 → 打包 → 起容器）。2026-09-13 起构建也由它承担 | 首次启动 / 改完代码要重建 | 自检 FAIL、构建失败、依赖不健康 → 中止；模型拉取超时 → 只告警不中止 |
+| `scripts/sh/check-health.sh` | **运行期巡检**：对"此刻"的环境做快照报告 | 环境起来**之后**，任何时刻可重跑 | `[FAIL]` **仅报告，不中止任何流程**；退出码只表达报告结论。容器一个都没起时也会正常跑完，并提示"若尚未启动，请先执行 up.sh" |
 
-三者共用同一套探针判据（`scripts/lib/probe.sh`），巡检分三层：容器级（容器状态 + compose healthcheck）→ 业务级（`GET /api/health` 的 `checks`）→ 模型级（`/api/tags`）。
+三者共用同一套探针判据（`scripts/sh/lib/probe.sh`），巡检分三层：容器级（容器状态 + compose healthcheck）→ 业务级（`GET /api/health` 的 `checks`）→ 模型级（`/api/tags`）。
 
 ## 服务与端口
 
@@ -168,7 +168,7 @@ curl -I http://localhost:8088
 wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose ps -a"
 
 # ⑤ 运行期巡检（三层判据 + 失败项的下一步指引）
-wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-health.sh"
+wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-health.sh"
 ```
 
 ## 项目结构

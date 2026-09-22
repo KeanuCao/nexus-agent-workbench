@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/check-env.sh —— 启动前置自检（在环境"起来之前"执行；任一 [FAIL] → up.sh 中止）
+# scripts/sh/check-env.sh —— 启动前置自检（在环境"起来之前"执行；任一 [FAIL] → up.sh 中止）
 #
 # 执行位置：WSL 发行版 nexus-agent-workbench 内（Windows 侧经 wsl -d ... 触发）
-#           cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-env.sh
+#           cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-env.sh
 #
 # 语义边界（**本脚本只做前置检查，不做运行期巡检**）：
 #   前置检查问的是"这台机器**能不能**把环境拉起来"，因此每一条 FAIL 都必须在
@@ -100,7 +100,7 @@ DAEMON_OK="no"
 if ! command -v docker >/dev/null 2>&1; then
     _fail "1 Docker daemon：找不到 docker 命令"
     _info "→ 确认是在 WSL 发行版 nexus-agent-workbench 内执行："
-    _info "  wsl -d nexus-agent-workbench -- bash -c \"cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-env.sh\""
+    _info "  wsl -d nexus-agent-workbench -- bash -c \"cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-env.sh\""
 else
     DOCKER_SERVER_VERSION="$(nexus_run_timeout 15 docker version --format '{{.Server.Version}}' 2>/dev/null | tr -d '\r')"
     if [ -n "$DOCKER_SERVER_VERSION" ]; then
@@ -366,9 +366,9 @@ printf ' 合计：PASS %d / WARN %d / FAIL %d\n' "$PASS_N" "$WARN_N" "$FAIL_N"
 if [ "$FAIL_N" -gt 0 ]; then
     printf '%s\n' " 失败清单（up.sh 会因此中止）："
     for item in "${FAIL_ITEMS[@]}"; do printf '   · %s\n' "$item"; done
-    printf '%s\n' " 修完重跑本脚本，全绿后再执行 ./scripts/up.sh"
+    printf '%s\n' " 修完重跑本脚本，全绿后再执行 ./scripts/sh/up.sh"
 else
-    printf '%s\n' " 结论：前置检查通过，可执行 ./scripts/up.sh 一键拉起"
+    printf '%s\n' " 结论：前置检查通过，可执行 ./scripts/sh/up.sh 一键拉起"
 fi
 printf '%s\n' "=============================================================================="
 

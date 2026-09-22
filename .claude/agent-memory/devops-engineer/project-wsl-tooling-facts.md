@@ -9,7 +9,7 @@ metadata:
 
 | 工具 | 状态 | 影响 |
 | --- | --- | --- |
-| `jq` | **缺失** | `scripts/lib/probe.sh` 的 **sed/grep 子串兜底路径才是实际执行路径**；"有 jq 会更精确"那条分支目前从没跑过。改判据时必须保证兜底路径也对 |
+| `jq` | **缺失** | `scripts/sh/lib/probe.sh` 的 **sed/grep 子串兜底路径才是实际执行路径**；"有 jq 会更精确"那条分支目前从没跑过。改判据时必须保证兜底路径也对 |
 | `curl` / `ss` / `timeout` / `free` | 有（`/usr/bin/*`） | — |
 | `python3` | **有（3.12.3）** | 适合做本地 stub server 来测 HTTP 分支，不必改 compose |
 | `powershell.exe` | 可用（`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/`） | 端口双侧检查走它 |

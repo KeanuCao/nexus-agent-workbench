@@ -13,7 +13,7 @@
 #   逐字重复；其中最后一项**最不能各写一份** —— 「信号不触发 EXIT trap」那条实测结论（见下）
 #   若只在某一处修好，其余脚本会静默地带着"Ctrl-C 之后环境里留着键"的缺口。
 #   改库的时机：两个既有脚本**用户还没跑过**（TC-01.md 的「实测」栏为空、无已记录结论会被
-#   重构作废），此刻换是零成本。先例：scripts/lib/probe.sh（同为"判据只写一份"的落点）。
+#   重构作废），此刻换是零成本。先例：scripts/sh/lib/probe.sh（同为"判据只写一份"的落点）。
 #
 # 本库的边界（qa/README.md 铁律 #2「判据不藏脚本里」）：
 #   ✅ 装：机械动作 —— 路径/端口解析、JSON 取值、HTTP 动作、Redis 只读指纹、后端日志只读抓取、
@@ -246,7 +246,7 @@ tc_preflight_services() {
   if [ "$health_code" != '200' ]; then
     printf '错误：GET %s/api/health → HTTP %s（预期 200）。原始响应：\n' "$TC_BASE_URL" "$health_code" >&2
     tc_show_body "$tc_work_dir/health.json" >&2
-    printf '\n      环境未就绪 —— 先跑 ./scripts/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
+    printf '\n      环境未就绪 —— 先跑 ./scripts/sh/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
     exit 3
   fi
   printf '  后端：GET %s/api/health → HTTP 200\n' "$TC_BASE_URL"

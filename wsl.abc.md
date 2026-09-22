@@ -121,6 +121,29 @@ Git Bash 的参数与路径处理打乱 —— 实测报 `syntax error near unex
    两者会**争用同一个 stdin** ⇒ 症状是**输出为空、脚本静默半途而废**（还可能留下沙箱库/半截状态，
    本项目实测踩到两次）。需要"脚本内容"时落盘，不要走 stdin。
 
+### 3.9 镜像重建失败**未必**是缺口：判「内容是否中立」的三条判据（2026-09-22 实测）
+
+**现象**：镜像源故障窗口内 `docker compose build nexus-frontend` 连败 4 次，症状在两种之间漂移 ——
+BuildKit：`failed to fetch anonymous token ... dial tcp: lookup docker.m.daocloud.io on 10.255.255.254:53: read udp ...: i/o timeout`；
+`DOCKER_BUILDKIT=0`（换 legacy builder 也一样）：`failed to resolve reference "docker.m.daocloud.io/library/nginx:1.27-alpine": ... TLS handshake timeout`。
+同一窗口宿主侧 `getent hosts docker.m.daocloud.io` **无输出** ⇒ 是**镜像源的网络窗口**，
+**不是本机配置**（别去改 `.env` / `daemon.json`，也别在窗口里反复重试 —— 症状会在 DNS 与 TLS 之间漂移，白耗时间）。
+
+**判据（三条合起来才能说"内容中立"，缺一条都不算）**：
+
+1. **烘进镜像的那份文件与宿主源码逐字节相同**：
+   `docker exec <容器> sha256sum /etc/nginx/conf.d/default.conf`  ==  `sha256sum docker-compose/frontend/nginx.conf`；
+2. **镜像 id 没变**：`docker image inspect <img> --format '{{.Id}} {{.Created}}'` ⇒ 没有半成品镜像顶上来；
+3. **该服务的产物走卷挂载**（本项目 nginx 的 `root` = `/artifacts/frontend`，卷 `build-artifacts`）
+   ⇒ 重建镜像**本来就不改内容**，重建的唯一作用是把 `nginx.conf` 带进去。
+
+**实测**：两侧同为 `de14332a…`（含 `client_max_body_size 12m` 那行），镜像 id 自 `13:36:03Z` 未变、容器未被重建，
+而经 8088 的 1.6MB 上传照样 200 ⇒ 那一步确实是**内容中立**的，等网络恢复补跑即可（预期 cache 命中）。
+
+**反过来说**：判据别写成"build 成功" —— 镜像源一抖它就红，而红的原因与"改了没生效"毫无关系。
+本项目另有一类**真的没生效**的坑是"改了 `nginx.conf` 只 `restart` 不重建"，两者外观相似、判据完全不同：
+一个查「镜像里的文件 vs 源码」，一个查「build 到底有没有跑过」。
+
 ## 4. 常见问题预案（占位，遇到实际问题后填充）
 
 | 问题 | 预案思路 |

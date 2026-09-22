@@ -160,7 +160,7 @@ if [ "$TC02_TARGET" = 'frontend' ]; then
   fe_code="$(curl -s -o /dev/null -w '%{http_code}' "${TARGET_BASE_URL}/" || true)"
   printf '  GET %s/ → HTTP %s（前端静态页；非 200 说明 nginx 没起来或产物缺失）\n' "$TARGET_BASE_URL" "$fe_code"
   if [ "$fe_code" != '200' ]; then
-    printf '错误：前端不可达。先跑 ./scripts/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
+    printf '错误：前端不可达。先跑 ./scripts/sh/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
     exit 3
   fi
 fi

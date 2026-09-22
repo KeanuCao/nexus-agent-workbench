@@ -16,9 +16,9 @@
 #   6. **产物走共享卷**：builder 把 jar / 前端静态文件写到命名卷 build-artifacts，
 #      nexus-backend / nexus-frontend 只读挂载同一个卷。
 #      ⚠️ 后果：运行镜像**不再自包含** —— 产物还没生成时，前后端容器会启动失败。
-#         所以「裸 docker compose up -d」不再是可靠入口，请走 scripts/up.sh（它保证顺序）。
+#         所以「裸 docker compose up -d」不再是可靠入口，请走 scripts/sh/up.sh（它保证顺序）。
 #
-# 用法（0.3 由 scripts/up.sh 封装，现阶段人工执行）：
+# 用法（0.3 由 scripts/sh/up.sh 封装，现阶段人工执行）：
 #   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench/docker-compose && docker compose up -d"
 #   （compose 自动发现同目录 .env；从仓库根目录调用时加 -f docker-compose/docker-compose.yml）
 # =============================================================================
@@ -212,7 +212,7 @@ services:
     # ★ 阶段2 新增：把 AI 密钥从 gitignored 文件注入容器。
     #   为什么用 env_file 而不是 ${DEEPSEEK_API_KEY:-} 插值：插值走"宿主 shell + docker-compose/.env"
     #   两个来源，而 .env 是【提交进仓库】的（.gitignore 第 6 行的例外），密钥绝不能放；
-    #   放 shell 则要求每次开新终端都 export，而 scripts/up.sh 经 `wsl -d … -- bash -c` 调起，
+    #   放 shell 则要求每次开新终端都 export，而 scripts/sh/up.sh 经 `wsl -d … -- bash -c` 调起，
     #   是【非交互 shell，不读 ~/.bashrc】—— 那个 export 大概率不生效。env_file 直接读文件，与调用方式无关。
     #   required: false —— 文件缺失时【不阻断】整栈启动（缺密钥只影响云端模型那一半，
     #   本地 Ollama 照常可用）。代价：会静默创建一个没有密钥的容器，补文件后需 up -d 重建。

@@ -9,3 +9,5 @@
 - [builder-m2 持久卷隐患](project-builder-m2-persistent-volume-hazard.md) — 持久卷静默复用旧构件，把「配置没生效」伪装成构建成功；判据要落在产物本身
 - [builder 构建分支的真源](project-builder-git-sync-branch-source.md) — 真源是容器 env `NEXUS_REPO_BRANCH`（默认 main），**不是宿主当前分支**；push 功能分支 ≠ builder 能拿到
 - [RAG 检索召回缺陷](project-rag-retrieval-recall-defect.md) — 阶段3 验收未过：答案块排 27+/587、无关块 score 0.75 ⇒ 阈值标定救不了；已定修法=换 bge-m3，**重灌复测未做≠已修好**
+- [builder 容器工具实况](project-builder-container-tooling.md) — **无 unzip**（验 jar 内文件用 JDK `jar xf`）；与 WSL 宿主工具清单分开看，镜像重建判据见 `wsl.abc.md` §3.9
+- [RAG 夹具上传耗时](project-rag-ingest-timing.md) — 587 块 ≈3.6s/批、总 130~132s（设计写的 80~90s 偏低）；前端超时 300s 余量仅 ~2.3×

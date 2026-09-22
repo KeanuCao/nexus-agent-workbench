@@ -7,8 +7,11 @@
 # 契约依据：docs/api/README.md §7（四个接口 §7.1~§7.4、两个响应结构 §7.5/§7.6、失败形态 §7.7）
 #
 # 为什么有它：这些用例的步骤都要「先登录拿 token，再把 token 喂给下一条命令」，而上传一份 1.6MB
-#   的 PDF 要 **130 秒左右**（2026-09-22 换 bge-m3 后实测 129.75 秒）、提问要 3~10 秒 —— 手工拼装正是「人最不擅长、也最容易出错」的一环，
-#   而拼接错误会被误读成产品缺陷。所以机械动作归脚本，**判据留在 TC 文档**：
+#   的 PDF 要 **2 分钟出头**（2026-09-22 换 bge-m3 后端到端经 8088 实测 **131.9 秒**）、提问要 3~10 秒 ——
+#   手工拼装正是「人最不擅长、也最容易出错」的一环，而拼接错误会被误读成产品缺陷。
+#   ⚠️ **耗时是记录值、不是判据**：它随机器负载与 CPU 漂移（同一台机器上 2.1 s/批 → 3.6 s/批，见 TC-03 3.2-2 ④）。
+#   本脚本把总耗时**打印出来供记录**；判据只有「必须 < 300 秒」那一条上界（与前端逐请求上传超时同源）。
+#   所以机械动作归脚本，**判据留在 TC 文档**：
 #   本脚本只发请求、只打印原始观察（响应原文 + 机械字段表 + [kb] 日志），不打 PASS/FAIL。
 #
 # 它做的事（每一步都只做动作、只打印观察）：
@@ -43,6 +46,10 @@
 #   TC03_DOC_ID=<documentId>             delete 用，**必须是本次测试自己上传的那份**
 #   TC03_KEEP_DOC=1                      upload 后**不**自动删除（3.1-③ / 3.4-① / 3.5 的链路要留着它提问）
 #   TC03_LOG_TAIL=<行数>                 后端日志抓取行数（默认 300）
+#   TC03_MAX_SECONDS=<秒>                上传 / 问答的**客户端等待上限**（默认 600）。它只兜住"无限等"，
+#                                        **不是判据**：判据的上界是 **300 s**（前端逐请求上传超时的同源值），
+#                                        故意取 2 倍余量 —— 若脚本自己的上限更小，它会先于前端放弃，把一次
+#                                        「用户其实能成功」的上传记成客户端放弃（退出码 28）而误读成失败。
 #   TC03_BASE_URL / TC03_FRONTEND_BASE_URL  直接覆盖入口地址（默认从 docker-compose/.env 的端口推出）
 #
 # 退出码（**不是判据**，只表示"动作做没做成"；结论一律看它打印的原始响应）：
@@ -50,7 +57,8 @@
 #   2 = 用法错误（未知的 TC03_ACTION / 缺 TC03_DOC_ID / 未知的 TC03_TARGET）
 #   3 = 前提不成立（工具缺失 / Redis 取不到指纹 / 目标入口 /api/health 非 200 / upload 的夹具不存在）
 #   4 = 登录没拿到 data.token（原始响应已打印，照它判断）
-#   28 = curl 主动放弃（客户端超时；服务端可能仍入库成功 —— 上传/问答的固有形态，见契约 §7.1 第 3 条）
+#   28 = curl 主动放弃（到达 TC03_MAX_SECONDS，默认 600 s；服务端可能仍入库成功 —— 上传/问答的固有形态，
+#        见契约 §7.1 第 3 条。**它不是判据**：判据的上界是 300 s，600 s 只防无限等）
 #   130 = 被 Ctrl-C 打断（清理与指纹仍会执行）
 #   注：动作自身的 HTTP 状态码（200 / 503 / …）只被**打印**，脚本不因它中断。
 #
@@ -95,6 +103,9 @@ readonly TC03_ACCOUNT="${TC03_ACCOUNT:-admin}"
 readonly TC03_TARGET="${TC03_TARGET:-backend}"
 readonly TC03_FIELD="${TC03_FIELD:-file}"
 readonly TC03_LOG_TAIL="${TC03_LOG_TAIL:-300}"
+# 客户端等待上限（秒）：**不是判据**，只防"无限等"。判据的上界是 300 s（前端逐请求上传超时同源），
+# 这里取 2 倍余量 —— 脚本的上限必须**明显大于**它，否则会把「用户其实能成功」的上传误报成客户端放弃（退出码 28）。
+readonly TC03_MAX_SECONDS="${TC03_MAX_SECONDS:-600}"
 readonly TC03_DEFAULT_FILE='qa/fixtures/rag/知识库说明.txt'
 
 case "$TC03_ACCOUNT" in
@@ -149,7 +160,10 @@ tc_cleanup() {
 # ── 机械动作 ──────────────────────────────────────────────────────────────────────
 tc03_post_json() {  # <标签> <URL> <请求体> <响应文件>
   local label="$1" url="$2" body="$3" outfile="$4" http
-  http="$(curl -s -o "$outfile" -w '%{http_code}' -X POST -H "Authorization: Bearer ${admin_token}" \
+  # --max-time 与上传同源（TC03_MAX_SECONDS，默认 600 s）：只防无限等，**不是判据** ——
+  # 判据的上界是 300 s，脚本自己绝不先于前端放弃
+  http="$(curl -s -o "$outfile" -w '%{http_code}' -X POST --max-time "$TC03_MAX_SECONDS" \
+        -H "Authorization: Bearer ${admin_token}" \
         -H 'Content-Type: application/json' -d "$body" "$url" || true)"
   printf '\nPOST %s   [%s]\n  请求体(原样): %s\n  → HTTP %s\n  响应体(原样):\n' "$url" "$label" "$body" "$http"
   tc03_pretty "$outfile"
@@ -179,8 +193,11 @@ tc03_action_upload() {  # 上传 TC03_FILE（multipart）
   printf '\nPOST %s/api/kb/documents   [上传：%s]\n' "$TC03_BASE_URL" "$tc03_file_resolved"
   printf '  multipart 字段名=%s  filename=%s  手工 Content-Type=%s\n' "$TC03_FIELD" \
     "${TC03_FILENAME:-（未设，取文件本身的路径名）}" "${TC03_CONTENT_TYPE:-（未设，由 curl 带 boundary）}"
-  # -w 里带上总耗时：验收要的「上传约 130 秒」就是它（契约 §7.1 第 3 条 / 设计 §5.1-4）
-  meta="$(curl -s -o "$outfile" -w '%{http_code} %{time_total}' -X POST \
+  printf '  客户端等待上限=%s 秒（只防无限等；**判据**是那条「总耗时 < 300 秒」的上界，见 TC-03 3.2-2 ④）\n' \
+    "$TC03_MAX_SECONDS"
+  # -w 里的 %{time_total}：这个总耗时是**要记录的值**（判据只有「< 300 秒」那一条上界，不与任何窗口比对）——
+  # 取值理由与"为什么不能写死耗时"见 TC-03 3.2-2 ④ / 契约 §7.1 第 3 条 / 设计 §5.1-4。
+  meta="$(curl -s -o "$outfile" -w '%{http_code} %{time_total}' -X POST --max-time "$TC03_MAX_SECONDS" \
         -H "Authorization: Bearer ${admin_token}" "${header_args[@]+"${header_args[@]}"}" \
         "${field_args[@]}" "${TC03_BASE_URL}/api/kb/documents" || true)"
   http="$(printf '%s' "$meta" | cut -d' ' -f1)"
@@ -346,7 +363,7 @@ tc03_preflight_target() {
   if [ "$health_code" != '200' ]; then
     printf '错误：GET %s/api/health → HTTP %s（预期 200）。原始响应：\n' "$TC03_BASE_URL" "$health_code" >&2
     tc_show_body "$tc_work_dir/health.json" >&2
-    printf '\n      入口未就绪 —— 先跑 ./scripts/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
+    printf '\n      入口未就绪 —— 先跑 ./scripts/sh/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
     exit 3
   fi
   printf '  入口：GET %s/api/health → HTTP 200（TC03_TARGET=%s）\n' "$TC03_BASE_URL" "$TC03_TARGET"

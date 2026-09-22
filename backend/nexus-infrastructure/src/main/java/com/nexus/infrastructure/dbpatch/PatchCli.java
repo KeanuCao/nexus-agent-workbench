@@ -41,7 +41,7 @@ import java.util.stream.Stream;
  *     <tr><td>时间戳早于已应用的最大时间戳</td><td>报错终止（乱序保护）</td><td>3</td></tr>
  * </table>
  *
- * <p><b>退出码就是判据</b>：{@code scripts/up.sh} 第 5 步完全依赖它 ——
+ * <p><b>退出码就是判据</b>：{@code scripts/sh/up.sh} 第 5 步完全依赖它 ——
  * 非 0 即中止，后端不会被拉起。因此本类不吞任何异常，一律翻译成明确的退出码。
  *
  * <p><b>依赖约束</b>：本类只 import {@code java.*}，<strong>没有任何第三方编译期依赖</strong>，

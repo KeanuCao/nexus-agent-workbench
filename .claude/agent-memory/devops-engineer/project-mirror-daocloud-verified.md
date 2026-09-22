@@ -26,7 +26,7 @@ metadata:
 > ⚠️ **2026-09-22 模型清单已变（本文件上面所有"两模型/275MB/768 维"都是 nomic 时代的历史记录）**：
 > embedding 模型由 `nomic-embed-text`（768 维）换为 **`bge-m3`（1024 维）**，qwen2.5:7b 不变。
 > 期望清单的**唯一真源** = `docker-compose.yml` 的 `ollama-init` 命令里的 `for model in qwen2.5:7b bge-m3`；
-> `scripts/lib/probe.sh` 的 `nexus_expected_models()` 从它 grep 解析，`check-env.sh` / `check-health.sh` / `up.sh`
+> `scripts/sh/lib/probe.sh` 的 `nexus_expected_models()` 从它 grep 解析，`check-env.sh` / `check-health.sh` / `up.sh`
 > 三处都调用该函数 —— **所以改模型清单只需改 compose 那一行，脚本会自动跟上**（实测：改完后
 > `check-health.sh` 打出 `[PASS] 模型齐备：qwen2.5:7b bge-m3`，退出码 0）。
 > 拉取实测（2026-09-22）：`docker exec nexus-ollama ollama pull bge-m3` → 1.2GB / 2.4MB/s / `success` / 退出码 0；
