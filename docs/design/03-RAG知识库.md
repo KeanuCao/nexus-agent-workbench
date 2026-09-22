@@ -580,10 +580,20 @@ LIMIT #{topK}
 
 1. **`ORDER BY` 必须是"操作符直接作用在列上"的形式**：不能写成 `ORDER BY score DESC`（别名）或包一层函数 ——
    那样 HNSW 索引**用不上**，退化成全表扫描 + 排序（数据量小时看不出差别，正是最危险的那种坑）。
-   判据：`EXPLAIN` 输出里必须出现 `Index Scan using idx_kb_chunk_embedding_hnsw`（§7 给了完整命令）；
-2. **阈值不过 SQL 的 `WHERE`**：`WHERE 1 - (embedding <=> ?) >= ?` 同样会让索引失效。
-   阈值在**应用层**过滤（`KbAskServiceImpl`：取 `topK` 条后丢掉 `score < threshold` 的）——
-   语义完全正确（TopK 的定义就是"最相似的 K 条"，再按阈值收紧）；
+   判据（★ 2026-09-22 沙箱实测订正，**必须带前提**）：先 `SET enable_seqscan = off` 再 `EXPLAIN`，
+   断言出现 `Index Scan using idx_kb_chunk_embedding_hnsw`。**为什么必须关顺序扫描**：HNSW 是**近似**索引，
+   表小的时候规划器会按代价选 Seq Scan（哪怕索引可用）⇒ 照字面断言会在真实数据量下**假失败**。
+   实测三条对照：本写法 → `Index Scan`；`ORDER BY score DESC`（别名）→ `Sort` + `Seq Scan`；
+   阈值进 `WHERE` → `Index Scan` **+ Filter**（索引照样可用 —— 见本节第 2 条的订正）；
+2. **阈值不过 SQL 的 `WHERE`** —— ⚠️ **但初版给的理由是错的，已实测订正**：
+   初版写"`WHERE 1 - (embedding <=> ?) >= ?` 同样会让索引失效"。**沙箱实测（2026-09-22）推翻了它**：
+   该写法下规划器给出的仍是 `Index Scan using idx_kb_chunk_embedding_hnsw` **+ Filter**
+   （索引照样用于**排序**，谓词只是加在索引扫描结果上）。
+   ⇒ **仍然选择应用层过滤，但理由是语义而不是索引**：`LIMIT topK` 的含义是"最相似的 K 条"，
+   再按阈值收紧（可能少于 K 条）；若把阈值放进 `WHERE`，`LIMIT` 会在**过滤之后**取满 topK 条，
+   语义变成"最多 K 条且都过阈值"—— 两者都合理，本项目选前者。
+   **教训（"理由错、行为对"是最难发现的一类错）**：错的理由会被后来者当依据（比如据此去"优化"一处
+   本来不需要优化的地方），所以订正理由与订正行为一样重要；
 3. **向量参数出现两次是刻意的**（SELECT 里算 score、ORDER BY 里排序）：绑定同一个字符串两次，无副作用。
    **不要**为了"只绑一次"改成派生表 / CTE —— 那会让 `ORDER BY` 依赖派生列，重新引入第 1 条的索引问题。
 
@@ -1116,7 +1126,7 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 
 ### 7.3 `docs/test-cases/TC-03.md` 必须覆盖的用例（qa-engineer 按 §8 展开）
 
-- **3.1**：① 两表与三个索引存在（`pg_indexes` 查询）；② **`EXPLAIN` 显示走 HNSW 索引**（命令：`EXPLAIN SELECT chunk_id FROM t_kb_chunk ORDER BY embedding <=> (SELECT embedding FROM t_kb_chunk LIMIT 1) LIMIT 5;`）；③ 写入后可检索（问答命中）
+- **3.1**：① 两表与三个索引存在（`pg_indexes` 查询）；② **`EXPLAIN` 显示走 HNSW 索引** —— ★ **必须先 `SET enable_seqscan = off`**（表小时规划器会选 Seq Scan，照字面断言会假失败）：`EXPLAIN SELECT chunk_id FROM t_kb_chunk ORDER BY embedding <=> (SELECT embedding FROM t_kb_chunk LIMIT 1) LIMIT 5;`；③ 写入后可检索（问答命中）；④ 级联删除与唯一约束（沙箱脚本 `.tmp/main/sandbox-probe.sh` 是现成的机械动作实现，qa 可搬进 `qa/scripts/`）
 - **3.2**：① TXT 正路径；② PDF 正路径；③ GBK TXT 不乱码；④ 扫描版/空文件 → `10203`；⑤ `.docx` → `10201`；⑥ 11MB → `40003`（或其真实形态）；⑦ 非 multipart 请求 → `40001`
 - **3.3**：① `chunk_size=200` 重打包后同一文档块数变多（**可配置的判据**）；② 日志出现 §4.11 的六条；③ **跨租户不可见**（`demo` 账号的列表里看不到 `admin` 上传的文档；用 `demo` 的 token 删 `admin` 的 documentId → `10202`）；④ mapper debug 日志里能看到注入后的 `tenant_id = ?`
 - **3.4**：① 命中问题 → `grounded=true` + `sources` 非空 + 答案含资料里的数字；② **无关问题 → `grounded=false` + `sources=[]` + 未调用大模型的日志**；③ `topK` 越界 → `40001`；④ 阈值标定记录（§3.9 探针 D 的步骤与结果）；⑤ ★ **跨租户提问**（用 `demo` 的 token 提问，**不得命中 `admin` 上传的文档**）—— 强制项，理由见 §9 风险 4：检索语句绕开了租户拦截器、`tenant_id` 是人手写的，必须有机器判据兜住
@@ -1235,3 +1245,4 @@ embedding / 答案缓存（同一问题重复问会重复调用上游）、批�
 | 2026-09-22 | **D12 订正**：文件白名单由"配置键"改为**常量** | 初版 D12 写的是配置键 `nexus.ai.rag.allowed-extensions`（而 §6.2 的 yml 清单里**从来没有这个键** —— 子代理上报了这个缺口）。实施时定案：**白名单是 `TikaDocumentParser` 里的常量**，因为可配的白名单会让 `10201` 里写死的文案"仅支持 TXT / PDF"**说谎**，而"支持哪几种格式"本就是范围决策（加 Word 要同时加 Tika 模块与用例，§10.1）。连带订正 3 处引用：`ResultCode` 的 `KB_FILE_TYPE_UNSUPPORTED` javadoc、契约 §7.8 的"已知成本"提示、`openapi.yaml` 的错误码说明 —— 三处原先都写着"白名单可配、文案要一起改" |
 | 2026-09-22 | **第二段 a 交付后的设计订正（6 处）** | 子代理交付 11 个类（**含真实 jar 的 `javac` 编译自检 + 59/15 项行为探针**）并上报 11 条偏离，主会话逐条裁定后订正本设计：① embedding 的**三个常量**（§4.5 —— 含"`nexus.ai.ollama.model` 是对话模型、不能拿来向量化"这条警告）；② **TXT 不做 Tika 内容检测**（D12 —— 合法 GBK 文件会被判成 `octet-stream` 而误杀成 10201）；③ **尾块合并不可达**（§4.4 —— 7920 组穷举 0 次触发，保留分支但不再当用例）；④ `TextChunker` 构造期 fail-fast（§4.4 —— `overlap ≥ size` 会让首个上传请求死循环）；⑤ **空答案按 `20100` 失败**（§4.7 —— 由 `KbAskServiceImpl` 判，绝不给"看着成功其实没答"的响应）；⑥ **`entity/KbChunk` 不建**（§4.1 —— 全链路自定义 SQL ⇒ 实体无消费者，属死代码）。另：不因一条日志给 `generate(...)` 加参数（§4.7 第 5 条），因此 §4.11 的"生成完成"行去掉 `sources=N`（与检索行的 `hits=N` 同源） |
 | 2026-09-22 | **第二段 b 交付后的设计订正（4 处）+ 一条实测数字** | 子代理交付 15 个类（编译自检 40 源文件 exit 0 + 4 项行为实测）并上报 9 条偏离，主会话逐条裁定：① **§4.6 的检索 SQL 换成实况** —— pgvector 的 `<=>` 让 jsqlparser **解析失败**、租户拦截器"先解析后注入" ⇒ 每条问答都会抛 `MybatisPlusException`；处置是 `@InterceptorIgnore(tenantLine="true")` + **手写 `tenant_id`（两张表都判）**，§9 风险 4 据此从"待实测"改为"**已实测发生并处置**"，原退路①（换 `?::vector`）作废；② §4.1 `KbChunkMapper` 两条语句（`deleteByDocumentId` 不建）；③ §4.8 事务改 `TransactionTemplate`（同类内部调用的注解事务会静默失效）；④ §4.11 补两个判据细节（`durationMs` 含问题向量化；`tenant_id` 在 INSERT 是**字面量**、在检索是**绑定参数**，别混着核对）；⑤ §3.5 `createdAt` 零偏移渲染成 `Z`；⑥ §3.7/§7.7 补"文件名超 255 → `40001`"；⑦ **契约 §7.7 的 503 由代码修齐**（`GlobalExceptionHandler` 加 `code=20100` ⇒ 503 的按码分流，契约一字未改）；⑧ §7.3 把**跨租户提问**升为强制用例。★ **实测数字**：嵌入 ≈ **2.1 s/批（16 块）** ⇒ 夹具 587 块 ≈ **80~90 秒**上传 ⇒ §5 的上传超时由 120s 改 **300s** |
+| 2026-09-22 | **沙箱库重放补丁 + 索引/级联/约束实测；订正 §4.6 第 2 条的理由** | 用一次性沙箱库（`nexus_patch_probe`，真实 `nexus` 库**零写操作**）重放「补丁1 + 补丁2」→ 两条 **exit 0**（新补丁**首次被真正执行**，此前是"没人跑过"的风险）。实测五点：① 本项目的 `ORDER BY 嵌入列 <=> 常量` → **`Index Scan using idx_kb_chunk_embedding_hnsw`**；② `ORDER BY score DESC`（别名）→ **`Sort` + `Seq Scan`**（§4.6 第 1 条成立）；③ **阈值进 `WHERE` → `Index Scan` + `Filter` —— 索引照样可用** ⇒ **§4.6 第 2 条初版"会让索引失效"的理由被实测推翻**，已改为按**语义**（TopK 的定义）选择应用层过滤；④ 删文档 → 分块**级联清零**；⑤ 唯一约束 `uk_kb_chunk_doc_index` 如期拦住重复块。**连带订正 3 处 `EXPLAIN` 判据**（§4.6 / §7.3 / 补丁注释）：**必须先 `SET enable_seqscan = off`**，否则表小时规划器选 Seq Scan 会让判据**假失败**。⚠️ 复现时注意：`wsl … bash -s < 脚本` 会让脚本与 `docker exec -i` 争用同一个 stdin（症状是输出为空、脚本静默半途而废、**沙箱库残留**）—— 落成文件再执行 |
