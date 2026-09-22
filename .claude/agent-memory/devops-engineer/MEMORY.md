@@ -5,5 +5,6 @@
 - [compose 构建路径解析](project-compose-build-path-resolution.md) — dockerfile 相对 context 拼（config 不解析），静态预检用 `docker compose build --print` + 存在性检查
 - [本环境无外网](project-no-internet-verify-empirically.md) — 在线文档不可达，规则判断改走本机实测/--help，未验证的标注为推断
 - [健康检查实测偏差](project-health-probe-findings.md) — 前端/ollama-init 两条已在 compose 修复（待 up -d 生效）；data.timestamp 用 `Z` 未闭环；0.3.3 探针决策
-- [WSL 内工具实况](project-wsl-tooling-facts.md) — **jq 缺失**（sed 兜底才是实际路径）、python3 可做 stub、经 wsl 传长脚本要用 heredoc
+- [WSL 内工具实况](project-wsl-tooling-facts.md) — **jq 缺失**（sed 兜底才是实际路径）、python3 是最佳机械探针、SQL 走文件、含 `docker exec -i` 的脚本必须落盘
 - [builder-m2 持久卷隐患](project-builder-m2-persistent-volume-hazard.md) — 持久卷静默复用旧构件，把「配置没生效」伪装成构建成功；判据要落在产物本身
+- [RAG 检索召回缺陷](project-rag-retrieval-recall-defect.md) — 阶段3 验收未过：答案块排 27+/587、无关块 score 0.75 ⇒ 阈值标定救不了，含"已排除项"清单
