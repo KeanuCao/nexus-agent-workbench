@@ -18,8 +18,9 @@ import java.util.List;
  * 与旧的 {@code /api/embeddings} 端点的 {@code prompt:<string>} 形状不同 —— 那条退路若启用，
  * 本类要一起改（连同 {@code OllamaEmbeddingService} 里的批量循环），端口签名不受影响。
  *
- * @param model 上游真实模型名（{@code nomic-embed-text}）
- * @param input 待向量化的文本（<b>已带任务前缀</b>，前缀在实现里加，见决策 D14）
+ * @param model 上游真实模型名（2026-09-22 晚起为 {@code bge-m3}；此前是 {@code nomic-embed-text}）
+ * @param input 待向量化的文本（实现里<b>可能</b>加任务前缀，见决策 D14 的机制 ——
+ *              当前模型不需要前缀，那一侧配置默认是空串，此时就是原文）
  * @author nexus
  */
 record UpstreamEmbedRequest(String model, List<String> input) {

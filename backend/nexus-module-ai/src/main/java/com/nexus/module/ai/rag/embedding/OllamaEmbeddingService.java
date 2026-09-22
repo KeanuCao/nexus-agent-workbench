@@ -28,36 +28,57 @@ import java.util.List;
  * {@link EmbeddingService} 的实现：调本地 Ollama 的 {@code POST {base-url}{embed-path}}（默认
  * {@code /api/embed}），把一批文本换成一批向量。
  *
- * <h2>上游协议（✅ 2026-09-22 探针 A/B 实测）</h2>
+ * <h2>上游协议（✅ 2026-09-22 探针 A/B 实测：端点存在、批量入参被接受）</h2>
  * <pre>
- * 请求：{"model":"nomic-embed-text","input":["search_document: 第一块","..."]}
- * 响应：{"model":"nomic-embed-text","embeddings":[[0.1,0.2,...], ...]}   ← 768 维；支持批量
+ * 请求：{"model":"bge-m3","input":["第一块","..."]}
+ * 响应：{"model":"bge-m3","embeddings":[[0.1,0.2,...], ...]}   ← 1024 维；支持批量
  * </pre>
- * ⚠️ <b>退路备查</b>（只改本类，端口签名不变 —— 这正是"embedding 自成端口"的价值）：
+ * ⚠️ 上面那个 <b>1024 是 bge-m3 的公布值，不是本机实测值</b>（依据与复核方式见
+ * {@link #EXPECTED_DIMENSION} 那条注释）：换模型时 {@code nexus-ollama} 里还没拉 bge-m3，
+ * 2026-09-22 的探针 A 量到的是 nomic 的 768。
+ *
+ * <p>⚠️ <b>退路备查</b>（只改本类，端口签名不变 —— 这正是"embedding 自成端口"的价值）：
  * 若将来换了 Ollama 版本、{@code /api/embed} 不存在，退到旧的 {@code /api/embeddings}
  * （单条入参 {@code {"model":..,"prompt":".."}} → 单条响应 {@code {"embedding":[..]}}），
  * 那时把批量循环改成逐条调用、把 {@link UpstreamEmbedRequest} 的 {@code input} 换成 {@code prompt} 即可。
  *
- * <h2>前缀在这里加（决策 D14）</h2>
- * {@code nomic-embed-text} 的模型卡建议检索侧加任务前缀：入库加 {@code search_document: }、
- * 查询加 {@code search_query: }。<b>加在实现内部</b>（而不是让调用方拼）的理由见
- * {@link EmbeddingService} 的类注释。两个前缀都来自 {@code nexus.ai.rag.document-prefix} /
- * {@code query-prefix}，<b>置空即关闭</b>（TC-03 的 A/B 用例就是靠清空它们跑的）。
+ * <h2>前缀在这里加（决策 D14 的机制保留，默认值已随换模型清空）</h2>
+ * 这两个前缀本是 {@code nomic-embed-text} 模型卡的建议（v1.5 口径）：入库加 {@code search_document: }、
+ * 查询加 {@code search_query: }。换成 {@code bge-m3} 后<b>两个默认值都改成空串</b> —— bge-m3
+ * <b>不需要</b>任务前缀，留着等于给一个不期望它们的模型<b>硬塞英文任务前缀</b>：不报错、只是检索变差，
+ * 属本仓库最防的"静默劣化"一类，故与换模型**同一次**改掉（TC-03 的 A/B 用例正是靠这两个键一开一关跑的）。
+ * 机制本身照旧保留：两个前缀由<b>实现内部</b>持有（而不是让调用方拼，理由见 {@link EmbeddingService}
+ * 的类注释），来自 {@code nexus.ai.rag.document-prefix} / {@code query-prefix}，<b>置空即关闭</b>。
  *
  * <h2>三个写死的常量（都对应一个"缺的配置键"，已在交付说明里上报）</h2>
  * <ul>
  *     <li>{@link #EMBED_MODEL}：上游模型名。yml 里只有 {@code nexus.ai.ollama.model}
  *         （那是<b>对话</b>模型 {@code qwen2.5:7b}，拿它来向量化是错的），
  *         没有 {@code embed-model} 这个键 —— 故先落常量。它的"单一真源"实际在
- *         {@code docker-compose/docker-compose.yml} 的 {@code ollama-init} 拉取清单里
- *         （{@code qwen2.5:7b nomic-embed-text}），将来补配置键时建议叫
- *         {@code nexus.ai.ollama.embed-model}（与 {@code chat-path}/{@code embed-path} 同处一地）；</li>
+ *         {@code docker-compose/docker-compose.yml} 的 {@code ollama-init} 拉取清单里。
+ *         <b>2026-09-22 时点该清单仍写着 {@code qwen2.5:7b nomic-embed-text}，换模型必须同步改它</b>
+ *         —— 本类不改 compose（不在本次交付范围内），改它之前<b>每次向量化都会拿到
+ *         {@code model 'bge-m3' not found} → 20100</b>。清单也没有 bge-m3 时，devops 可先手工
+ *         {@code docker exec nexus-ollama ollama pull bge-m3} 顶一下。将来补配置键时建议叫
+ *         {@code nexus.ai.ollama.embed-model}（与 {@code chat-path}/{@code embed-path} 同处一地）；
+ *         <b>为什么从 nomic-embed-text 换成 bge-m3</b>（2026-09-22 阶段3 端到端验收实测，一份 587 块的
+ *         中文年报）：问"去年利润是多少"时<b>答案所在块在 587 块里排第 27 名</b>、问"归母净利润"排第 47 名
+ *         —— 只取 TopK=5，取不到；而 5 条<b>无关</b>块拿到 <b>0.71~0.75</b> 分，连完全无关问题的 top1
+ *         也有 0.6929 ⇒ <b>阈值标定救不了</b>（要让无关块出局就得把阈值抬到 0.7 以上，那会把本来命中的
+ *         也一起筛掉）。已逐一排除的其它解释：解析（"84.1 亿元"/"8,408,057 千元"都在正文里）、前缀不对称
+ *         （{@code cos(库内向量, 带前缀重算) = 1.000000}）、生成链路（换个问法"受益计划服务年限"能答对）、
+ *         阈值（一条都没被筛掉）。⇒ 定性为 nomic 在<b>中文细粒度检索</b>上的排序能力不足，
+ *         改用中文检索专长的 bge-m3；</li>
  *     <li>{@link #EMBED_BATCH_SIZE}：批量大小（探针 B 实测批量入参被接受）。设计 §3.9 写的是
  *         {@code embed-batch-size: 16}，但 yml 里没有这个键 —— 故先落常量，建议补
  *         {@code nexus.ai.rag.embed-batch-size}；</li>
- *     <li>{@link #EXPECTED_DIMENSION}：768。它的真源是 {@code db-patch} 里
- *         {@code t_kb_chunk.embedding vector(768)}（探针 A 实测的模型输出维度）。
- *         本类<b>只做校验</b>（不符就抛系统异常），不参与建表 —— 建表早于本类运行。</li>
+ *     <li>{@link #EXPECTED_DIMENSION}：1024。它的真源是 {@code db-patch} 里
+ *         {@code t_kb_chunk.embedding vector(1024)}（表由
+ *         {@code db-patch/202609221100_知识库向量维度改1024.sql} 重建）。本类<b>只做校验</b>
+ *         （不符就抛系统异常），不参与建表 —— 建表早于本类运行。
+ *         ⚠️ <b>与 {@link #EMBED_MODEL} 必须同改</b>：维度与 DB 的 {@code vector(N)} 是同一条真源。
+ *         改模型不改维度 ⇒ 第一次入库就以 PG 类型错的形态现形（错误在事务深处，看着像代码 bug）；
+ *         只改维度不改模型 ⇒ 本类的维度校验先抛系统异常。两种都是本类存在的意义。</li>
  * </ul>
  *
  * <h2>日志级别</h2>
@@ -72,8 +93,15 @@ public class OllamaEmbeddingService implements EmbeddingService {
 
     private static final Logger log = LoggerFactory.getLogger(OllamaEmbeddingService.class);
 
-    /** upstream-model-name：见类注释"三个写死的常量"。 */
-    private static final String EMBED_MODEL = "nomic-embed-text";
+    /**
+     * upstream-model-name：见类注释"三个写死的常量"。
+     *
+     * <p>2026-09-22 由 {@code nomic-embed-text} 换成 {@code bge-m3}（换模型的实测依据写在类注释里）。
+     * <b>它与 {@link #EXPECTED_DIMENSION} 必须同改</b>，也与 {@code db-patch} 里那条重建表的补丁同源。
+     * <b>本常量只是"名字"，模型本身得先在 Ollama 里存在</b>：拉取清单在
+     * {@code docker-compose/docker-compose.yml} 的 {@code ollama-init} 里（本次未改，属 devops 的交付物）。
+     */
+    private static final String EMBED_MODEL = "bge-m3";
 
     /**
      * 单次请求的最大文本条数（分批的粒度）。
@@ -85,15 +113,27 @@ public class OllamaEmbeddingService implements EmbeddingService {
     private static final int EMBED_BATCH_SIZE = 16;
 
     /**
-     * 期望的向量维度 = 表定义 {@code t_kb_chunk.embedding vector(768)}（探针 A 实测，
-     * 见 {@code db-patch/202609221000_初始化知识库表.sql}）。
+     * 期望的向量维度 = 表定义 {@code t_kb_chunk.embedding vector(1024)}
+     * （表由 {@code db-patch/202609221100_知识库向量维度改1024.sql} 重建）。
+     *
+     * <p><b>为什么是 1024，以及它的可信度</b>：bge-m3 的<b>公布值</b> —— BAAI/bge-m3 仓库的
+     * {@code config.json} 是 {@code hidden_size: 1024}（xlm-roberta 架构，2026-09-22 取自此模型的
+     * HuggingFace 镜像），稠密检索取的就是这一维。⚠️ <b>本机没实测过</b>：换模型时
+     * {@code nexus-ollama} 里还没有 bge-m3（{@code ollama list} 只有 nomic-embed-text / qwen2.5:7b），
+     * 而探针 A 量到的是 nomic 的 768。devops 拉取后请按设计 §3.9 探针 A 复核一次
+     * （入参换 {@code {"model":"bge-m3","input":["测试"]}}，数返回数组长度，期望 1024）。
+     * 复核不符时的处置是"改本常量 + 改补丁的 vector(N)"，不是改这里去迁就实测值。
+     *
+     * <p>⚠️ <b>与 {@link #EMBED_MODEL} 同源，必须一起改</b>：这条真源的另一半在 DB 的
+     * {@code vector(N)} 上，而维度从 768 变 1024 <b>不能靠 ALTER COLUMN TYPE</b>
+     * （列上已有 768 维数据，转换不可行）—— 只能新增补丁重建表，理由见那条补丁的文件头。
      *
      * <p><b>为什么要校验而不是"信任上游"</b>：维度不符时 PostgreSQL 会拒绝插入
      * （报的是类型错误），那条错误出现在事务深处、看起来像代码 bug；而"期望 vs 实际"的
      * 一条日志能把排查方向直接指向"模型换了吗 / 表定义对得上吗"。这就是设计 §9 风险 3
-     * 保留的处置：维度仍写进启动期日志 + 逐批校验，将来换 embedding 模型时第一个发现。
+     * 保留的处置：维度仍写进启动期日志 + 逐批校验，将来再换 embedding 模型时第一个发现。
      */
-    private static final int EXPECTED_DIMENSION = 768;
+    private static final int EXPECTED_DIMENSION = 1024;
 
     /** 错误响应体进日志的字节上限（诊断信息，不是用户正文，但也没必要整段搬进日志）。 */
     private static final int ERROR_BODY_SNIPPET_BYTES = 200;
@@ -111,10 +151,10 @@ public class OllamaEmbeddingService implements EmbeddingService {
     /** 向量化接口路径（{@code nexus.ai.ollama.embed-path}）。 */
     private final String embedPath;
 
-    /** 入库侧前缀（可为空串 = 关闭）。 */
+    /** 入库侧前缀（可为空串 = 关闭；换 bge-m3 后**默认就是空串**，见类注释"前缀在这里加"）。 */
     private final String documentPrefix;
 
-    /** 查询侧前缀（可为空串 = 关闭）。 */
+    /** 查询侧前缀（可为空串 = 关闭）。与 {@link #documentPrefix} 成对同源，只改一侧同样不报错。 */
     private final String queryPrefix;
 
     /**
@@ -332,7 +372,7 @@ public class OllamaEmbeddingService implements EmbeddingService {
             }
             if (item.size() != EXPECTED_DIMENSION) {
                 log.error("Ollama embedding 向量维度与表定义不符：期望={} 实际={} batch={}/{}"
-                                + "（对照 t_kb_chunk.embedding 的 vector(768) 与当前模型）",
+                                + "（对照 t_kb_chunk.embedding 的 vector(1024) 与当前模型 bge-m3）",
                         EXPECTED_DIMENSION, item.size(), batchIndex, totalBatches);
                 throw new SystemException("Ollama embedding 向量维度与表定义不符：期望 " + EXPECTED_DIMENSION
                         + " 维，实际 " + item.size() + " 维");

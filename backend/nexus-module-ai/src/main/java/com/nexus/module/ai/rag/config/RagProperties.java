@@ -19,7 +19,8 @@ import org.springframework.stereotype.Component;
  * <ol>
  *     <li>改 {@link #chunkSize} / {@link #chunkOverlap} 之后<b>必须重传文档</b> ——
  *         本轮不保存原始文件，无法对已入库的文档重新分块（决策 D8）；
- *     <li>改 {@link #documentPrefix} / {@link #queryPrefix}（D14 的检索侧前缀）之后<b>必须重灌全部文档</b>
+ *     <li>改 {@link #documentPrefix} / {@link #queryPrefix}（D14 的检索侧前缀机制，<b>当前默认置空</b>）
+ *         之后<b>必须重灌全部文档</b>
  *         —— 存量向量与新查询向量会不在同一个空间，而且<b>不报错、只是检索质量静默劣化</b>。
  *         两个前缀必须成对同源地改：只改一侧等于把两侧的向量按比例拉偏，同样不报错。
  * </ol>
@@ -109,15 +110,23 @@ public class RagProperties {
     private int maxQuestionLength = 500;
 
     /**
-     * 入库侧（document）给 embedding 文本加的前缀（决策 D14，{@code nomic-embed-text} 的任务前缀）。
+     * 入库侧（document）给 embedding 文本加的前缀（决策 D14 的机制，<b>当前默认关闭</b>）。
+     *
+     * <p><b>为什么默认是空串</b>（2026-09-22 晚换 embedding 模型时定）：
+     * ① <b>机制保留</b> —— 有些模型的模型卡建议检索侧加任务前缀（{@code nomic-embed-text} 的 v1.5
+     * 口径就是入库 {@code search_document: }、查询 {@code search_query: }），换回那类模型时把这两个
+     * 值填回去即可，不必改代码；
+     * ② <b>默认置空</b> —— 当前模型 {@code bge-m3} <b>不需要</b>任务前缀（设计 §0.3），留着等于给一个
+     * 不期望它们的模型硬塞英文任务前缀，属"不报错、只是检索变差"的静默劣化。
+     * ⚠️ 置空的理由是"<b>当前模型不需要</b>"，<b>不是"这个机制没用"</b> —— 不要顺手把机制删掉。
      *
      * <p>⚠️ 改它必须重灌数据（见类注释第 2 条）；留空字符串表示<b>关闭前缀</b>
-     * —— TC-03 的 A/B 用例正是靠"清空这两个值 → 重灌 → 比检索质量"来给结论的。
+     * —— TC-03 的 A/B 用例正是靠"填上 / 清空这两个值 → 重灌 → 比检索质量"来给结论的。
      */
-    private String documentPrefix = "search_document: ";
+    private String documentPrefix = "";
 
     /** 查询侧（query）的前缀。与 {@link #documentPrefix} <b>必须成对同源</b>，理由见类注释。 */
-    private String queryPrefix = "search_query: ";
+    private String queryPrefix = "";
 
     public int getChunkSize() {
         return chunkSize;
