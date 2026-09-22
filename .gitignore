@@ -12,7 +12,19 @@
 !.claude/settings.json
 # 技能（skills）默认视为**个人工作流**，不进仓库（如 sync-master：本机 git 同步用）。
 # 若某个技能确实要随项目交付，用 `!.claude/skills/<技能名>/` 显式放行 —— 别为此放开整个目录。
-.claude/skills/
+# ⚠️ 2026-09-23 实测订正：写 `.claude/skills/`（带尾斜杠 = 忽略**目录本身**）时，
+#    git **不会**下探进该目录，下面的 `!` 放行**永远不生效**（git 明确不允许"父目录被排除时再包含其子文件"）。
+#    故本行必须写成 `.claude/skills/*`（只忽略目录**内容**，目录本身仍被下探），放行才有效。
+.claude/skills/*
+# ── 放行：随项目交付的技能（逐个显式放行，不放开整个目录）──
+# deploy：nexus 一键部署（阶段交付后的标准动作）。它编码的是**项目特有**的部署知识
+#         （builder 四条脚本、端口与分支真源、模型清单、db-patch 只读对账、镜像 rebuild 判据），
+#         不是个人工作流，故入库。真源文档见 .claude/skills/deploy/SKILL.md。
+!.claude/skills/deploy/
+
+# ── Python（skill 脚本 / .tmp 下的探针脚本）──
+__pycache__/
+*.pyc
 
 # ── Java / Maven ──
 target/
