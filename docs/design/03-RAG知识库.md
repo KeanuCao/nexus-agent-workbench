@@ -229,7 +229,7 @@ graph TD
 | `fileSize` | integer (int64) | 是 | 上传字节数 |
 | `charCount` | integer | 是 | 解析出的正文字符数（**排查解析质量的第一眼数据**：与预期量级差太远就是解析出了问题） |
 | `chunkCount` | integer | 是 | 入库的分块数（= `3000` 上限判据的实测值） |
-| `createdAt` | string (date-time) | 是 | 入库时间，格式与 `/api/health` 的 `timestamp` 同款：`yyyy-MM-dd'T'HH:mm:ssXXX`（秒级、无小数秒） |
+| `createdAt` | string (date-time) | 是 | 入库时间，格式与 `/api/health` 的 `timestamp` 同款：`yyyy-MM-dd'T'HH:mm:ssXXX`（秒级、无小数秒）。⚠️ **零偏移渲染成 `Z` 而不是 `+00:00`**（已实测）—— 容器内是 `2026-09-22T02:30:00Z`，Windows 本地直跑是 `+08:00`；`Z` 与 `+00:00` 是等价的 ISO-8601 写法，**前端的判据不要写死 `+00:00`** |
 
 ### 3.6 `KbAnswerVO`（问答响应）
 
@@ -282,6 +282,7 @@ graph TD
 | 请求不是 multipart（缺 `Content-Type` / 缺 boundary） | 参数绑定前 | `Result` | **200** | `40001` |
 | 未带 `file` 字段 / 文件为空 | 参数绑定 | `Result` | **200** | `40001` |
 | 请求体校验失败（`question` 空 / 超长；`topK` 越界）/ JSON 畸形 | 进控制器前 | `Result` | **200** | `40001` |
+| **文件名超过 255 字符**（实施时补：precheck 段拦下，不让 DB 的 `VARCHAR(255)` 报错） | 业务（写库前） | `Result` | **200** | `40001` |
 | 文件超过 10MB | multipart 解析 | `Result` | **200** | `40003`（**待实测**：也可能表现为连接被重置，见 §6.2） |
 | 扩展名不在白名单 / 扩展名与内容不符 | 业务 | `Result` | **200** | `10201` |
 | 解析不出文本（扫描版 PDF、空文件、编码不可识别） | 业务 | `Result` | **200** | `10203` |
@@ -417,7 +418,7 @@ backend/
 │       ├── entity/KbDocument.java                   [新] MP 实体（@TableName/@TableId）
 │       ├── entity/KbChunk.java                      [**不建**] ★ 实施时裁定**不建**（原设计写的是"只映射非向量字段"）：全链路自定义 SQL —— 插入走参数、检索返回 `ChunkHit` ⇒ 实体没有任何消费者，属死代码。设计里"`t_kb_chunk` 的向量不经实体映射面"这条契约，改由"压根没有实体"直接保证
 │       ├── mapper/KbDocumentMapper.java             [新] extends BaseMapper<KbDocument>（列表 / 按 id 查 / 级联删除）
-│       ├── mapper/KbChunkMapper.java                [新] ★ 不继承 BaseMapper，三条自定义语句（insert / deleteByDocumentId / search）
+│       ├── mapper/KbChunkMapper.java                [新] ★ 不继承 BaseMapper，**两条**自定义语句（insertChunk / search —— `deleteByDocumentId` 实施时裁定不建：删文档走 DB 级联，零调用方即死代码）
 │       ├── mapper/VectorTypeHandler.java            [新] String → setObject(Types.OTHER)（§4.5）
 │       ├── parse/DocumentParser.java                [新] 端口：ParsedDocument parse(byte[] content, String fileName)
 │       ├── parse/TikaDocumentParser.java            [新] 实现：TXT 直读 + 编码探测；PDF 走 Tika
@@ -550,16 +551,30 @@ public interface EmbeddingService {
 
 ### 4.6 检索 SQL 与 Prompt 模板
 
-**检索语句**（`KbChunkMapper.search`，注解或 XML 皆可，**用 `#{}` 而不是 `${}`**）：
+**检索语句**（`KbChunkMapper.search`，注解语句；**用 `#{}` 而不是 `${}`**）：
+
+> ★ **实施时按实测改写过一次**（详见 §9 风险 4）：pgvector 的 `<=>` 让 MP 3.5.9 内置的 jsqlparser 5.0
+> **解析失败**（它把 `<=>` 切成 `<=` + 一个孤立的 `>`），而租户拦截器是"**先解析、后注入**"
+> ⇒ 只要语句里有 `<=>`，**每条问答请求都会抛 `MybatisPlusException`**。
+> 因此本语句**标 `@InterceptorIgnore(tenantLine = "true")` 绕开拦截器，并手写 `tenant_id`**（两处，两张表都判）。
 
 ```sql
-SELECT chunk_id, document_id, chunk_index, content, char_count,
-       1 - (c.embedding <=> CAST(#{queryVector, typeHandler=com.nexus.module.ai.rag.mapper.VectorTypeHandler} AS vector)) AS score
+SELECT c.document_id, d.file_name, c.chunk_index, c.content, c.char_count,
+       1 - (c.embedding <=>
+            CAST(#{queryVector, typeHandler=com.nexus.module.ai.rag.mapper.VectorTypeHandler} AS vector)) AS score
 FROM t_kb_chunk c
--- ★ 这里刻意不写 tenant_id：由 TenantLineHandler 注入（D11）。判据见 §4.7 的日志
-ORDER BY c.embedding <=> CAST(#{queryVector, typeHandler=com.nexus.module.ai.rag.mapper.VectorTypeHandler} AS vector)
+JOIN t_kb_document d ON d.document_id = c.document_id
+-- ★ 这两行 tenant_id 是【手写】的 —— 全项目唯一的例外（理由见上：拦截器在本语句上被短路）。
+--   两张表都判：只判一张等于给跨租户留一条窄缝。
+WHERE c.tenant_id = #{tenantId}
+  AND d.tenant_id = #{tenantId}
+ORDER BY c.embedding <=>
+         CAST(#{queryVector, typeHandler=com.nexus.module.ai.rag.mapper.VectorTypeHandler} AS vector)
 LIMIT #{topK}
 ```
+
+**SELECT 里没有 `chunk_id`**（实施时订正）：`ChunkHit` 只有 6 个组件，多选一列没有消费者。
+**`JOIN` 只为取 `file_name`**。
 
 **三条必须写进注释的理由**：
 
@@ -668,7 +683,8 @@ sequenceDiagram
 
 1. **预检放在最前面**（扩展名、空文件、大小）——"读字节之前"能挡掉的就别进后续流程；
 2. **`10204` 在向量化之前判**（D15）：先分块、数一眼，再决定要不要调 embedding；
-3. **`@Transactional(rollbackFor = Exception.class)` 只包住"写库 + 向量化"这一段**，解析与分块放在事务外
+3. **事务只包住"写库 + 向量化"这一段**（实施时订正：用 `TransactionTemplate` **编程式**事务，不用 `@Transactional` 注解 ——
+   需要事务的只是 `upload` 的最后一段，而注解事务靠代理生效、**同类内部调用会静默失效**），解析与分块放在事务外
    —— 事务越短越好，且解析失败时压根没有事务开销；
 4. **`tenant_id` 一律不手写**（D11）：`insertDocument` / `insertChunks` 的 SQL 里没有 `tenant_id` 列，由拦截器补；
 5. **日志**（宪法："向量入库必须打 `log.info`"）：见 §4.11；
@@ -742,6 +758,13 @@ sequenceDiagram
 [kb] 生成完成: provider=deepseek model=deepseek-chat finishReason=stop chars=86 durationMs=4034
 ```
 
+> ⚠️ **两个判据细节**（实施时实测；qa 按字面核对会得出假结论）：
+> ① **`durationMs` 含"问题的向量化"**（契约 §7.6 明写），不只是那条 SQL 的耗时；
+> ② **`tenant_id` 在 mapper debug 日志里的形态两处不同** —— INSERT 的改写是**字面量**
+> （`INSERT INTO t_kb_chunk (..., tenant_id) VALUES (..., 1)`），而**检索语句是绑定参数**
+> （`WHERE c.tenant_id = ? AND d.tenant_id = ?` —— 它绕开了拦截器、由 SQL 自己绑定）。
+> **拿一种形态去核对另一种，会误判成"没注入"。**
+
 **不打印正文**（分块内容、问题、答案都不进日志）：与阶段2 §4.5 同一条纪律（隐私 + 日志体积）。
 **例外**：解析失败时的异常类型与 message、上游错误报文可以进日志 —— 那是诊断信息，不是用户正文。
 
@@ -769,7 +792,7 @@ sequenceDiagram
 
 ```ts
 export async function uploadDocument(file: File): Promise<KbDocumentVO>
-// service.post('/kb/documents', formData, { timeout: 120_000 })
+// service.post('/kb/documents', formData, { timeout: 300_000 })   // ★ 300s：按实测放宽（§5.1-4）
 //  - formData.append('file', file) —— 字段名必须是 file（契约 §3.1），写错就是 40001
 //  - ★ 不要手工设置 Content-Type（见 §5.1-2）
 
@@ -796,9 +819,11 @@ export async function askKb(req: KbAskRequest): Promise<KbAnswerVO>
    `{{ source.content }}`（或 `v-text`），**绝不用 `v-html`** —— PDF/TXT 里出现 `<script>` 或 `<img onerror=...>`
    在 `v-html` 下就是一次 XSS。答案文本同理。
 4. **上传/问答必须逐请求覆盖超时，且"超时 ≠ 失败"。**
-   实例默认 `timeout: 15_000` 会让一份 20 秒的 PDF **在前端被判定失败**，而后端那时**很可能已经入库成功**
-   ⇒ 用户重传 ⇒ 列表里出现两份同名文档。
-   故：`uploadDocument` / `askKb` 各传 `timeout: 120_000`；且超时/网络错误的提示要写清楚
+   实例默认 `timeout: 15_000`，而**实测的上传耗时是它的数十倍**：嵌入约 **2.1 s/批（16 块）**，
+   验收夹具 `公司年报.pdf` 有 587 块 ⇒ 37 批 ≈ **80~90 秒**（另加 Tika 解析与写库）。
+   前端若用默认值，就会在**后端其实已经入库成功**时判定失败 ⇒ 用户重传 ⇒ 列表里出现两份同名文档。
+   故：`uploadDocument` 传 **`timeout: 300_000`**（留足余量，覆盖"机器更慢/文件更大"的情形）、
+   `askKb` 传 `120_000`（问答约 3~10 s）；且超时/网络错误的提示要写清楚
    ——**"请求超时，服务端可能仍在处理，请刷新列表确认后再重试"**。
 5. **答案与片段要 `white-space: pre-wrap` 渲染。** 分块原文里的换行是结构信息（引用要能对得上原文），
    CSS 默认会把它们压成一整行，看起来像"解析坏了"。
@@ -1083,7 +1108,7 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 
 | 夹具 | 用途 | 备注 |
 | --- | --- | --- |
-| `公司年报.pdf` | **阶段验收**：上传后问"去年利润是多少" | ✅ **2026-09-22 用户已提供**（1.6MB、`%PDF-1.7`、**含文本层**：`/Font` 266 处 / `/Image` 3 处 ⇒ 不是扫描件，`10203` 那条负路径不会误伤它）。⚠️ **刻意不入库**（`.gitignore` 末段：`qa/fixtures/rag/*.pdf` —— 第三方公开材料 + 体积），复现时自备一份中文含财务数字的 PDF、放同目录同名即可。<br>★ **期望答案（已由主会话用 `pdftotext -layout` 抽出正文核对，两处措辞一致）**：<br>· "报告期内，公司实现营业总收入 **897 亿元**，同比增长 14.4%；归属于上市公司股东的净利润 **84.1 亿元**，同比大幅上升 **41.2%**"（正文段）<br>· "报告期间实现归属母公司净利润 **84.1 亿元**，同比大幅增长 **41.2%**，销售净利率达 9.5%"（经营讨论段）<br>· 财报表格里同一数字写作 **8,408,057 千元**（= 84.08 亿元）⇒ **TC-03 的判据要接受两种形态**（"84.1 亿元" 或 "8,408,057 千元"），否则会把一次正确回答判成错。<br>**交叉核对工具**：宿主侧 `pdftotext -layout <pdf> <txt>`（Git Bash 自带）可随时抽正文，用来判断"答案不对"是**解析问题**还是**检索/生成问题**。<br>★ **实测数字（第二段 a 用真实 Tika 3.2.3 跑出来的，TC-03 可直接当判据）**：本夹具解析出 **263,910 字符 → 587 块**（最长 500、最短 210），**远低于 3000 的 `max-chunks-per-document` 上限**（不会撞 `10204`）。⚠️ 判据建议留余量：`charCount` 落在 25 万~28 万、`chunkCount` 在 585~590 之间 —— 精确断言 `587` 也可，但 Tika/PDFBox 版本一动就会假失败 |
+| `公司年报.pdf` | **阶段验收**：上传后问"去年利润是多少" | ✅ **2026-09-22 用户已提供**（1.6MB、`%PDF-1.7`、**含文本层**：`/Font` 266 处 / `/Image` 3 处 ⇒ 不是扫描件，`10203` 那条负路径不会误伤它）。⚠️ **刻意不入库**（`.gitignore` 末段：`qa/fixtures/rag/*.pdf` —— 第三方公开材料 + 体积），复现时自备一份中文含财务数字的 PDF、放同目录同名即可。<br>★ **期望答案（已由主会话用 `pdftotext -layout` 抽出正文核对，两处措辞一致）**：<br>· "报告期内，公司实现营业总收入 **897 亿元**，同比增长 14.4%；归属于上市公司股东的净利润 **84.1 亿元**，同比大幅上升 **41.2%**"（正文段）<br>· "报告期间实现归属母公司净利润 **84.1 亿元**，同比大幅增长 **41.2%**，销售净利率达 9.5%"（经营讨论段）<br>· 财报表格里同一数字写作 **8,408,057 千元**（= 84.08 亿元）⇒ **TC-03 的判据要接受两种形态**（"84.1 亿元" 或 "8,408,057 千元"），否则会把一次正确回答判成错。<br>**交叉核对工具**：宿主侧 `pdftotext -layout <pdf> <txt>`（Git Bash 自带）可随时抽正文，用来判断"答案不对"是**解析问题**还是**检索/生成问题**。<br>★ **实测数字（第二段 a 用真实 Tika 3.2.3 跑出来的，TC-03 可直接当判据）**：本夹具解析出 **263,910 字符 → 587 块**（最长 500、最短 210），**远低于 3000 的 `max-chunks-per-document` 上限**（不会撞 `10204`）。⚠️ 判据建议留余量：`charCount` 落在 25 万~28 万、`chunkCount` 在 585~590 之间 —— 精确断言 `587` 也可，但 Tika/PDFBox 版本一动就会假失败。<br>★ **实测耗时**（2026-09-22，宿主直连 Ollama 实测）：嵌入约 **2.1 s/批（16 块）** ⇒ 本夹具 37 批 ≈ **80~90 秒**（含解析与写库）—— 前端的上传超时据此定 **300s**（§5.1-4），TC-03 要记录实测耗时是否落在这个区间 |
 | `知识库说明.txt` | 3.2 的正路径 + 3.3 的分块判据 | 建议 ~1200 字（→ 3 块），内容里埋一个只有它才有的答案（用于验证"答案基于知识库"） |
 | `gbk编码.txt` | 编码探测的正路径 | 用 `iconv -f UTF-8 -t GBK` 生成（生成命令写进 TC-03 的备注） |
 | `扫描版.pdf` | 3.2 的负路径（`10203`） | 只有图片层、无文本层的 PDF；若一时造不出，用**空文件**替代并注明"未覆盖扫描版形态" |
@@ -1094,7 +1119,7 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 - **3.1**：① 两表与三个索引存在（`pg_indexes` 查询）；② **`EXPLAIN` 显示走 HNSW 索引**（命令：`EXPLAIN SELECT chunk_id FROM t_kb_chunk ORDER BY embedding <=> (SELECT embedding FROM t_kb_chunk LIMIT 1) LIMIT 5;`）；③ 写入后可检索（问答命中）
 - **3.2**：① TXT 正路径；② PDF 正路径；③ GBK TXT 不乱码；④ 扫描版/空文件 → `10203`；⑤ `.docx` → `10201`；⑥ 11MB → `40003`（或其真实形态）；⑦ 非 multipart 请求 → `40001`
 - **3.3**：① `chunk_size=200` 重打包后同一文档块数变多（**可配置的判据**）；② 日志出现 §4.11 的六条；③ **跨租户不可见**（`demo` 账号的列表里看不到 `admin` 上传的文档；用 `demo` 的 token 删 `admin` 的 documentId → `10202`）；④ mapper debug 日志里能看到注入后的 `tenant_id = ?`
-- **3.4**：① 命中问题 → `grounded=true` + `sources` 非空 + 答案含资料里的数字；② **无关问题 → `grounded=false` + `sources=[]` + 未调用大模型的日志**；③ `topK` 越界 → `40001`；④ 阈值标定记录（§3.9 探针 D 的步骤与结果）
+- **3.4**：① 命中问题 → `grounded=true` + `sources` 非空 + 答案含资料里的数字；② **无关问题 → `grounded=false` + `sources=[]` + 未调用大模型的日志**；③ `topK` 越界 → `40001`；④ 阈值标定记录（§3.9 探针 D 的步骤与结果）；⑤ ★ **跨租户提问**（用 `demo` 的 token 提问，**不得命中 `admin` 上传的文档**）—— 强制项，理由见 §9 风险 4：检索语句绕开了租户拦截器、`tenant_id` 是人手写的，必须有机器判据兜住
 - **3.5**：① 上传 → 列表出现 → 删除 → 列表消失且分块一并删除（SQL 复核）；② 上传中/问答中的 loading 与按钮禁用；③ 上传失败文案可直接展示；④ 两条链路都走 **8088（nginx）**
 - **回归**：`/api/health` 200 + 三项 UP；`/api/chat/stream` 仍能流式；登录/401 三态不受影响；`check-health.sh` 复跑无新增 FAIL
 - **契约复核**：`docs/api/README.md` §7 与 `openapi.yaml` 与实际响应逐字段一致（含 `grounded=false` 时 `generation` 为 `null`）
@@ -1128,12 +1153,12 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 | 1 | **PDF 文本提取质量**（表格错位、多列串行、页眉页脚混入） | 答案答不准，且**看起来像"检索坏了"** | ① `char_count` 落在列表页，一眼看出解析是否成功；② §4.3 的空白归一化；③ **排查顺序写死在 TC-03 里**：先看 `sources[].content` 本身乱不乱 → 乱=解析问题，不乱=检索/阈值问题（**这一步省掉半小时**）；④ 版面分析/OCR 记 §10.3 |
 | 2 | 扫描版 PDF（无文本层） | 用户以为上传成功，实际 0 块 | `10203` 明确报错（**不做 OCR**，记 §10.3）。判据：`char_count` 接近 0 时必然报错 |
 | 3 | ~~embedding 维度与 `vector(768)` 不符~~ **已消除** | — | ✅ 2026-09-22 探针 A 实测维度 = 768，与表定义一致。**处置保留**：维度仍写进启动期日志，将来换 embedding 模型时第一个发现 |
-| 4 | **jsqlparser 改写不了 `<=>` / `CAST(? AS vector)`** | MyBatis-Plus 租户注入失败 → 抛异常（或更坏：条件没注入） | **待实测**：跑一次 `/api/kb/ask`，看 mapper debug 打印的最终 SQL 是否含 `tenant_id = ?`。退路① 把 `CAST(? AS vector)` 换成 PG 的 `?::vector`；退路② `@IgnoreTenant` + **手写** `tenant_id = #{tenantId}`（**必须同时有跨租户用例**，因为这条退路把"结构化保证"降级成了"人手写对"） |
+| 4 | ~~jsqlparser 改写不了 `<=>`~~ **已实测发生并处置** | ✅ 元凶**只有** `<=>`；`CAST(? AS vector)` **单独出现时解析与注入都正常** ⇒ 原退路①（换 `?::vector`）**不对症，已作废**。失败形态不是"条件没注入"，而是**每条请求都抛 `MybatisPlusException`** ⇒ 不处理则问答链路全挂 | **实测处置**：`search` 标 MP 的 `@InterceptorIgnore(tenantLine = "true")`（它在 `willIgnoreTenantLine` 处**短路在解析之前**）+ 手写 `tenant_id`（`where` 里两处、两张表都判）。⚠️ **项目自己的 `@IgnoreTenant` 救不了这里**：它是 AOP，只让 `ignoreTable()` 返 true，而 MP 是"先 `parserSingle` 解析、后咨询 `ignoreTable`"（已实测：`ignoreTable` 恒真照样 FAIL）。**连带强制项**：TC-03 必须有一条 **"B 租户提问不得命中 A 租户文档"** 的用例 —— 这条退路把结构化保证降级成"人手写对"，必须有机器判据兜住 |
 | 5 | HNSW 近似 + 租户后置过滤导致召回下降 | 跨租户数据量大时"检索不到" | 演示规模无影响；规模化方案（分区 / 部分索引 / 提高 `hnsw.ef_search`）记 §10.3 |
 | 6 | Tika 版本/坐标在镜像源上不存在 | 构建失败（响亮，不静默） | §6.4 的回退链（`tika-parsers-standard-package` / 2.9.2）+ 首次构建后核对版本 |
 | 7 | **multipart 默认上限 1MB** + Tomcat `max-swallow-size` | 大文件上传表现成"连接被重置"而不是 `40003` | §6.2 显式配 `max-file-size`；`max-swallow-size` 按实测决定是否加 |
 | 8 | **长事务占 Hikari 连接**（并发上传） | 池满 → 其它接口全部排队 | 池大小 10、演示规模无并发；日志里事务耗时可见；异步化记 §10.5 |
-| 9 | 前端超时 ≠ 后端失败（D7 同步口径的必然结果） | 用户重传 → 重复文档 | §5.1-4 的文案 + `timeout: 120_000`；重名不去重是**已知行为**（§10.6） |
+| 9 | 前端超时 ≠ 后端失败（D7 同步口径的必然结果） | 用户重传 → 重复文档 | §5.1-4 的文案 + 逐请求超时（**上传 300s / 问答 120s** —— 实测夹具上传 ≈ 80~90 秒，原定的 120s 太贴边）；重名不去重是**已知行为**（§10.6） |
 | 10 | 无 `DEEPSEEK_API_KEY` 时问答默认走云端会 20100 | 演示现场翻车 | 与阶段2 同款、同处置：`printenv \| wc -c` 先验；离线演示把 `answer-model-type` 改成 `OLLAMA`（改配置要重打包） |
 | 11 | **答案幻觉 / 引用与答案不符** | 面试被追问时站不住 | 三道闸（D9）+ `sources` 原文可见（**可当场核对**）+ prompt 明确"只依据资料"；把"如何量化幻觉率"记 §10.9 |
 | 12 | 同名文档重复上传 | 列表里两份同名、检索被稀释 | 本轮**允许**（不去重）；`content_hash` 去重记 §10.6 |
@@ -1209,3 +1234,4 @@ embedding / 答案缓存（同一问题重复问会重复调用上游）、批�
 | 2026-09-22 | 状态置「已确认」+ 夹具落定 + 编号收口 | ① 用户确认设计并开工（后端第一段已交付）；② **契约 §7.N 与本文档 §3.N 收成一比一** —— 原 §3.8 的"（进 §7.4）"是从阶段2 的"§6.4"顺手抄来的笔误（阶段2 的 §3.4 恰好是错误码，阶段3 不是），子代理上报后由主会话按阶段2 惯例收口，并把该约定写进契约 §7 开头；③ `公司年报.pdf` 由用户提供（含文本层）且**刻意不入库**（§7.2 已更新，`.gitignore` 有对应规则） |
 | 2026-09-22 | **D12 订正**：文件白名单由"配置键"改为**常量** | 初版 D12 写的是配置键 `nexus.ai.rag.allowed-extensions`（而 §6.2 的 yml 清单里**从来没有这个键** —— 子代理上报了这个缺口）。实施时定案：**白名单是 `TikaDocumentParser` 里的常量**，因为可配的白名单会让 `10201` 里写死的文案"仅支持 TXT / PDF"**说谎**，而"支持哪几种格式"本就是范围决策（加 Word 要同时加 Tika 模块与用例，§10.1）。连带订正 3 处引用：`ResultCode` 的 `KB_FILE_TYPE_UNSUPPORTED` javadoc、契约 §7.8 的"已知成本"提示、`openapi.yaml` 的错误码说明 —— 三处原先都写着"白名单可配、文案要一起改" |
 | 2026-09-22 | **第二段 a 交付后的设计订正（6 处）** | 子代理交付 11 个类（**含真实 jar 的 `javac` 编译自检 + 59/15 项行为探针**）并上报 11 条偏离，主会话逐条裁定后订正本设计：① embedding 的**三个常量**（§4.5 —— 含"`nexus.ai.ollama.model` 是对话模型、不能拿来向量化"这条警告）；② **TXT 不做 Tika 内容检测**（D12 —— 合法 GBK 文件会被判成 `octet-stream` 而误杀成 10201）；③ **尾块合并不可达**（§4.4 —— 7920 组穷举 0 次触发，保留分支但不再当用例）；④ `TextChunker` 构造期 fail-fast（§4.4 —— `overlap ≥ size` 会让首个上传请求死循环）；⑤ **空答案按 `20100` 失败**（§4.7 —— 由 `KbAskServiceImpl` 判，绝不给"看着成功其实没答"的响应）；⑥ **`entity/KbChunk` 不建**（§4.1 —— 全链路自定义 SQL ⇒ 实体无消费者，属死代码）。另：不因一条日志给 `generate(...)` 加参数（§4.7 第 5 条），因此 §4.11 的"生成完成"行去掉 `sources=N`（与检索行的 `hits=N` 同源） |
+| 2026-09-22 | **第二段 b 交付后的设计订正（4 处）+ 一条实测数字** | 子代理交付 15 个类（编译自检 40 源文件 exit 0 + 4 项行为实测）并上报 9 条偏离，主会话逐条裁定：① **§4.6 的检索 SQL 换成实况** —— pgvector 的 `<=>` 让 jsqlparser **解析失败**、租户拦截器"先解析后注入" ⇒ 每条问答都会抛 `MybatisPlusException`；处置是 `@InterceptorIgnore(tenantLine="true")` + **手写 `tenant_id`（两张表都判）**，§9 风险 4 据此从"待实测"改为"**已实测发生并处置**"，原退路①（换 `?::vector`）作废；② §4.1 `KbChunkMapper` 两条语句（`deleteByDocumentId` 不建）；③ §4.8 事务改 `TransactionTemplate`（同类内部调用的注解事务会静默失效）；④ §4.11 补两个判据细节（`durationMs` 含问题向量化；`tenant_id` 在 INSERT 是**字面量**、在检索是**绑定参数**，别混着核对）；⑤ §3.5 `createdAt` 零偏移渲染成 `Z`；⑥ §3.7/§7.7 补"文件名超 255 → `40001`"；⑦ **契约 §7.7 的 503 由代码修齐**（`GlobalExceptionHandler` 加 `code=20100` ⇒ 503 的按码分流，契约一字未改）；⑧ §7.3 把**跨租户提问**升为强制用例。★ **实测数字**：嵌入 ≈ **2.1 s/批（16 块）** ⇒ 夹具 587 块 ≈ **80~90 秒**上传 ⇒ §5 的上传超时由 120s 改 **300s** |

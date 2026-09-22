@@ -321,9 +321,27 @@ L2 是**唯一**同时覆盖 postgres / redis / ollama 的入口 —— 依赖�
 | `data.status` | `"UP"` | 与 HTTP 200 同真同假。若 `status=UP` 但 HTTP=503（或反之）→ **契约被破坏，报后端 bug** |
 | `data.service` | `"nexus-start"` | 固定值（配置 `nexus.health.service-name`）。不匹配 → 打到别的服务了 |
 | `data.version` | 等于 `backend/pom.xml` 的 `<revision>`（**不要写死具体版本号**） | 取真源值：`grep -o '<revision>[^<]*</revision>' backend/pom.xml`。**专条见下** |
-| `data.timestamp` | 正则 `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$` | 秒级、**无小数秒**。**不要断言时区**：容器内 `+00:00`、Windows 本地直跑 `+08:00`，两者都合法 |
+| `data.timestamp` | 见下方**专条**（原判据写死的正则会把容器内的形态判错） | 秒级、**无小数秒**。**不要断言时区**：容器内是 `Z`（零偏移）、Windows 本地直跑 `+08:00`，两者都合法 |
 | `data.checks.postgres` / `.redis` / `.ollama` | 三项均 `"UP"` | **取值域只有 `UP` / `DOWN`**（后端刻意不复用 Spring `HealthStatus`，就没有 `OUT_OF_SERVICE`/`UNKNOWN`）。出现第三值 → 契约破坏，脚本应报错而非通过 |
 | `data.checks` 的键数 | **恰好 3 个** | 多出未知键 → 契约已变更，报告而非静默通过 |
+
+**`data.timestamp` 专条（2026-09-22 实测订正）**
+
+原判据写的是正则 `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$`（**只认 `±HH:MM`**）。
+但容器内的实测响应是 `"timestamp":"2026-09-22T12:59:02Z"` —— **零偏移在 ISO-8601 里就渲染成 `Z`**，
+原正则**不匹配** ⇒ 照它实现的脚本会在容器内**假失败**（报"契约破坏"，而契约根本没被破坏）。
+✅ 好消息：`scripts/check-health.sh:379` 本来就是按"**不断言时区**"实现的（注释里写着"容器内 Z=UTC、
+本地直跑 +08:00 都合法"）—— **脚本没错，是本节这句话写窄了**。
+
+正确判据（两种形态都接受）：
+
+```bash
+# 秒级、无小数秒；偏移量 Z（零偏移）或 ±HH:MM 都合法
+printf '%s' "$TS" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$'
+```
+
+⚠️ 同类措辞在 `openapi.yaml` 的健康检查 schema 描述里也写着"容器内通常为 `+00:00`" —— 已一并订正。
+**新写的契约一律按"`Z` 或 `±HH:MM` 都合法"表述**（阶段3 的 `createdAt` 就是照此写的）。
 
 **`data.version` 专条（脚本最容易漏的判据）**
 
@@ -1036,7 +1054,7 @@ curl -N -X POST "http://localhost:${BACKEND_PORT}/api/chat/stream" \
 | `fileSize` | integer (int64) | 是 | 上传字节数 |
 | `charCount` | integer | 是 | 解析出的正文字符数（**排查解析质量的第一眼数据**：与预期量级差太远就是解析出了问题） |
 | `chunkCount` | integer | 是 | 入库的分块数（即 `3000` 上限判据的实测值） |
-| `createdAt` | string (date-time) | 是 | 入库时间，格式与 `/api/health` 的 `timestamp` **同款**：`yyyy-MM-dd'T'HH:mm:ssXXX`（秒级、无小数秒；偏移量随服务端时区 —— 容器内通常为 `+00:00`，不是 `+08:00`） |
+| `createdAt` | string (date-time) | 是 | 入库时间，格式与 `/api/health` 的 `timestamp` **同款**：`yyyy-MM-dd'T'HH:mm:ssXXX`（秒级、无小数秒；偏移量随服务端时区）。⚠️ **零偏移渲染成 `Z` 而不是 `+00:00`**（2026-09-22 实测）：容器内是 `2026-09-22T02:30:00Z`，Windows 本地直跑是 `+08:00` —— `Z` 与 `+00:00` 是等价的 ISO-8601 写法，**判据不要写死 `+00:00`**（前端 `new Date(...)` 两种都能解析） |
 
 列表接口的外层结构是 `KbDocumentListVO`：`{ "items": [KbDocumentVO...], "total": 3 }`（§7.2）。
 
@@ -1096,6 +1114,7 @@ curl -N -X POST "http://localhost:${BACKEND_PORT}/api/chat/stream" \
 | 请求不是 multipart（缺 `Content-Type` / 缺 boundary） | 参数绑定前 | `Result` | **200** | `40001` |
 | 未带 `file` 字段 / 文件为空 | 参数绑定 | `Result` | **200** | `40001` |
 | 请求体校验失败（`question` 空 / 超长；`topK` 越界）/ JSON 畸形 | 进控制器前 | `Result` | **200** | `40001` |
+| **`file` 的文件名超过 255 字符** | 业务（写库前拦下） | `Result` | **200** | `40001` |
 | 文件超过 10MB | multipart 解析 | `Result` | **200** | `40003`（**待实测**：也可能表现为连接被重置，见设计 §6.2） |
 | 扩展名不在白名单 / 扩展名与内容不符 | 业务 | `Result` | **200** | `10201` |
 | 解析不出文本（扫描版 PDF、空文件、编码不可识别） | 业务 | `Result` | **200** | `10203` |
@@ -1199,3 +1218,4 @@ curl -s -X DELETE "http://localhost:${BACKEND_PORT}/api/kb/documents/1" -H "Auth
 | 2026-09-22 | 追加 §7 知识库接口（阶段3） | `POST /api/kb/documents`（上传）/ `GET /api/kb/documents`（列表）/ `DELETE /api/kb/documents/{documentId}` / `POST /api/kb/ask`（问答）四个**同步**接口 + `KbDocumentVO` / `KbAnswerVO` 两个响应结构 + **全同步口径**的失败形态总表 + 5 个新错误码（`40003` 为通用码，`10201`~`10204` 为知识库业务码）+ curl 验证；含三条边界（一个租户一个知识库 / 单轮问答 / 只支持 TXT + PDF 且不保存原件）。**§1~§6 编号与内容保持不变**（§4 被 `scripts/` 三个脚本按编号引用），原「变更记录」顺延为 §8。⚠️ 与 §6 的流式接口相反：本组接口**每个失败都有确定的 HTTP 载体** |
 | 2026-09-22 | §1.3 增通用码 `40003`；§4.6 的 pgvector 判据升级 | ① `40003`（`FILE_TOO_LARGE`，HTTP 200）列入 §1.3 通用表 —— 它约束的是 multipart 请求体本身，任何上传接口都会撞上，与"知识库"这个业务域无关。② §4.6 那一行订正为「**阶段3 起 `installed_version IS NOT NULL` 为硬判据**」：`CREATE EXTENSION vector` 已由 `db-patch/202609131000` 执行，而 RAG 的建表补丁依赖 `vector` 类型 ⇒ 扩展没装上时建表 / 入库 / 检索全挂，"扩展可用"不再够用（这是设计 §0.1 末尾预告的收口，连带任务是 devops 升级 `check-env.sh`） |
 | 2026-09-22 | **补齐 `openapi.yaml` 缺失的 6 个认证 schema**（阶段1 技术债） | **缺口来源（阶段3 实施复核实测发现，非本阶段引入）**：`LoginRequest` / `ResultLoginResponse` / `ResultVoid` / `ResultUserInfoVO` 这 4 个 `$ref` **从阶段1 起就没有对应的 schema 定义**（悬空引用），任何按 `openapi.yaml` 生成 TS 类型或导入 Postman 的人都会在这 4 处失败 —— 而本文件 §5 的字段表一直是完整的，即**两份契约从阶段1 起就不同步**。本次补上 6 个 schema：`LoginRequest` / `UserInfoVO` / `LoginResponse` + 三个 `Result*` 包装体（沿用 `ResultHealthReport` 的 `allOf` 写法；认证组用包装体、知识库组用内联，两种写法并存是既成事实，见 openapi 内对应注释）。字段以 §5.2 / §5.4 为准，并与 `nexus-module-system` 的 `LoginRequest` / `LoginResponse` / `UserInfoVO` 三个 DTO 逐一核对。判据：`openapi.yaml` 可解析且**全部 `$ref` 可解析**（本次自检：8 path / 22 schema / 20 ref / **0 悬空**） |
+| 2026-09-22 | **阶段3 第二段 b 的契约侧收口（5 处）+ §4.2.2 判据订正** | ① §7.5 `createdAt` 补"**零偏移渲染成 `Z`**"（实测 `2026-09-22T02:30:00Z`；原写"容器内通常为 `+00:00`"，会在容器内误导判据）；② §7.7 失败形态表补一行 **`file` 文件名超 255 字符 → 200 + `40001`**（原先会落到 DB 的 `VARCHAR(255)` 报错 ⇒ 500「系统繁忙」，把客户端的输入问题报成服务端故障）；③ §7.7 里"向量化/生成时上游不可达 → **503** + 20100"两行**原先只有契约、实现给的是 200** —— 本次在 `GlobalExceptionHandler` 加**按码分流**（`code=20100` ⇒ 503）**修的是代码、契约未动**（已逐点复核不影响阶段2：池满走自己的出口、provider 的 20100 在工作线程被转成 `error` 帧）；④ **§4.2.2 加 `data.timestamp` 专条** —— 原判据正则只认 `±HH:MM`，而容器内实测是 `Z` 结尾 ⇒ 照它实现会**假失败**（`scripts/check-health.sh` 本来就按"不断言时区"实现，**脚本没错、是本节文字写窄了**）；⑤ `openapi.yaml` 的健康 timestamp 描述同步订正 |

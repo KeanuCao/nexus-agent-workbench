@@ -998,8 +998,11 @@ components:
           format: date-time
           description: |
             生成时刻，ISO-8601 带时区偏移，格式固定为 `yyyy-MM-dd'T'HH:mm:ssXXX`
-            （秒级精度、无小数秒）。偏移量取服务端默认时区 —— 容器内通常为 `+00:00`，
-            Windows 本地直跑为 `+08:00`。前端按字符串展示即可，需要 Date 对象时可 `new Date(timestamp)`。
+            （秒级精度、无小数秒）。偏移量取服务端默认时区。
+            ⚠️ **零偏移渲染成 `Z` 而不是 `+00:00`**（2026-09-22 实测：容器内是
+            `2026-09-22T12:59:02Z`，本地直跑是 `+08:00`）—— 两者都是合法的 ISO-8601，
+            消费方**不要断言时区**（`scripts/check-health.sh` 本就如此）。
+            前端按字符串展示即可，需要 Date 对象时可 `new Date(timestamp)`。
           example: '2026-09-03T10:00:00+08:00'
         checks:
           $ref: '#/components/schemas/HealthChecks'
@@ -1360,7 +1363,9 @@ components:
           format: date-time
           description: |
             入库时间，格式与 `/api/health` 的 `timestamp` **同款**：`yyyy-MM-dd'T'HH:mm:ssXXX`
-            （秒级、无小数秒）。偏移量随服务端时区 —— 容器内通常为 `+00:00`，不是 `+08:00`。
+            （秒级、无小数秒）。偏移量随服务端时区。
+            ⚠️ **零偏移渲染成 `Z` 而不是 `+00:00`**（2026-09-22 实测）：容器内是 `2026-09-22T02:30:00Z`，
+            本地直跑是 `+08:00` —— `Z` 与 `+00:00` 是等价的 ISO-8601 写法，**判据不要写死 `+00:00`**。
           example: '2026-09-22T10:30:00+08:00'
 
     KbDocumentListVO:
