@@ -117,7 +117,7 @@ graph TD
 | **D9** | **检索 = 纯向量 TopK（余弦）**，不做 rerank / 混合检索 / MMR；**"检索不到就说不知道"用三道闸**（相似度阈值 → 空结果短路 → prompt 约束） | ① 混合检索（BM25 + 向量）② rerank 模型 ③ 只靠 prompt 约束 | ① ② 是 `RAG建议.md` 明确 backlog 的项。三道闸的分工：**阈值**挡住"全都低分"、**空结果短路**连大模型都不调（省成本且结构上不可能胡说）、**prompt** 挡住"检索到但答不上"。阈值初值是**待标定**的（§3.7 探针 D），不写成"0.35 就是对的" |
 | **D10** | **单轮问答**：一次提问独立检索，不带会话历史 | 多轮（把上几轮问答拼进 prompt） | task.4 的问答是"检索 → 拼 → 生成"，无会话维度；无状态也让契约不必定义会话 id。**代价**：追问"那前年呢"不管用（前端给一句提示，§5.2） |
 | **D11** | **一个租户一个知识库**，隔离完全交给既有的 `TenantLineHandler`（SQL 里**不手写** `tenant_id`） | 三张表（含 `t_kb`） | **2026-09-22 用户拍板**（§0.1 第 2 条）。**为什么 SQL 里不手写 `tenant_id`**：手写等于把隔离交给"每个人每次都写对"，而拦截器的注入是**结构化保证**。判据：mapper debug 日志里能看到注入后的最终 SQL（§4.7） |
-| **D12** | **文件类型白名单 = TXT + PDF**，写成 `TikaDocumentParser` 里的**常量**（`Set.of("txt","pdf")`），**不做成配置键**；按**扩展名 + 内容检测**双重判断 | ① 只看扩展名 ② 只做内容探测 ③ 做成配置键 `nexus.ai.rag.allowed-extensions` | 只看扩展名：改个后缀就能骗过；只做内容探测：`.txt` 的探测结果是 `text/plain`，区分不出内容是否真是文本。**两头都看，冲突时报 `10201`**（§4.3）。**为什么不做成配置键**（初版设计写了这个键，实施时改掉）：白名单一旦可配，`10201` 里写死的文案"仅支持 TXT / PDF"就会**说谎** —— 除非把文案也做成动态的，而那会把"接口文案"变成运行期可变的东西；而"支持哪几种格式"本来就是**范围决策**（加 Word 要同时加 Tika 模块 + 用例，§10.1），不是运维旋钮。常量 + 写死文案，两处同源、改一次全对 |
+| **D12** | **文件类型白名单 = TXT + PDF**，写成 `TikaDocumentParser` 里的**常量**（`Set.of("txt","pdf")`），**不做成配置键**；按**扩展名 + 内容检测**双重判断 | ① 只看扩展名 ② 只做内容探测 ③ 做成配置键 `nexus.ai.rag.allowed-extensions` | 只看扩展名：改个后缀就能骗过；只做内容探测：`.txt` 的探测结果是 `text/plain`，区分不出内容是否真是文本。**两头都看，冲突时报 `10201`**（§4.3）。**为什么不做成配置键**（初版设计写了这个键，实施时改掉）：白名单一旦可配，`10201` 里写死的文案"仅支持 TXT / PDF"就会**说谎** —— 除非把文案也做成动态的，而那会把"接口文案"变成运行期可变的东西；而"支持哪几种格式"本来就是**范围决策**（加 Word 要同时加 Tika 模块 + 用例，§10.1），不是运维旋钮。常量 + 写死文案，两处同源、改一次全对。<br>⚠️ **实施时再订正一处**：**内容检测只对 PDF 成立** —— TXT 的"内容是不是文本"由**编码探测**回答（UTF-8 与 GBK 解出来都超标 ⇒ `10203`）；**不要**对 `.txt` 跑 Tika 的内容探测：合法 GBK 文件很可能被判成 `application/octet-stream`，拿它做交叉校验会把**正路文件误杀成 `10201`**（"两个探针都做过头、反而更差"的一例） |
 | **D13** | **解析器收口成 `DocumentParser` 端口**：TXT 用 JDK 直读（**带编码探测** UTF-8 → GBK），PDF 才用 Tika | ① 全部走 Tika ② 全部自己写（PDFBox 直用） | TXT 不需要框架（`new String(bytes, UTF_8)` 就是全部），而**编码才是 TXT 真正的坑**（GBK 文件按 UTF-8 解 = 全文乱码，见 §4.3）；PDF 这类二进制格式才是 Tika 的用武之地。**代价**：多一个 15 行的编码探测；换来的是把"乱码"从"入库一堆垃圾"变成"要么正确解码、要么明确报错" |
 | **D14** | **`nomic-embed-text` 检索前缀**：入库时加 `search_document: `、查询时加 `search_query: `（**可配、默认开启**，两侧前缀同源） | 不加前缀 | 该模型卡建议检索侧加任务前缀（v1.5）；且"加了还是没加、差多少"正是可讲的调参经历（§7 的 A/B 步骤）。⚠️ **改前缀必须重灌数据** —— 存量向量与新查询向量不在同一个空间，且**不报错、只是检索质量静默劣化**。这条警告要写进配置注释与 §4.4 |
 | **D15** | **上限：单文件 10MB、单文档 3000 块**；分块数上限**在向量化之前**检查 | 不限 / 只在最后统计 | 10MB 的 TXT ≈ 2 万块 ≈ 上万次 embedding 调用 —— 演示机上就是一次"跑到天荒地老"的事故。**先分块、再判上限、再向量化**：失败在几秒内发生，而不是几分钟后（`10204`）。10MB 这个数字的唯一真源是 `spring.servlet.multipart.max-file-size`（§6.2），业务侧不重复判 |
@@ -415,7 +415,7 @@ backend/
 │       ├── dto/KbDocumentVO.java                    [新] 上传响应与列表项同构（record）
 │       ├── dto/KbDocumentListVO.java                [新] {items,total}（record）
 │       ├── entity/KbDocument.java                   [新] MP 实体（@TableName/@TableId）
-│       ├── entity/KbChunk.java                      [新] ★ 只映射非向量字段（见类注释：embedding 不走实体面）
+│       ├── entity/KbChunk.java                      [**不建**] ★ 实施时裁定**不建**（原设计写的是"只映射非向量字段"）：全链路自定义 SQL —— 插入走参数、检索返回 `ChunkHit` ⇒ 实体没有任何消费者，属死代码。设计里"`t_kb_chunk` 的向量不经实体映射面"这条契约，改由"压根没有实体"直接保证
 │       ├── mapper/KbDocumentMapper.java             [新] extends BaseMapper<KbDocument>（列表 / 按 id 查 / 级联删除）
 │       ├── mapper/KbChunkMapper.java                [新] ★ 不继承 BaseMapper，三条自定义语句（insert / deleteByDocumentId / search）
 │       ├── mapper/VectorTypeHandler.java            [新] String → setObject(Types.OTHER)（§4.5）
@@ -505,7 +505,10 @@ public interface DocumentParser {
 
 1. 输入是**归一化后**的文本（§4.3 第 2 条），输出是 `List<String>`，**顺序即 `chunk_index`**（0 起）；
 2. 步长 = `chunk-size - chunk-overlap`（默认 450）；窗口不足 `chunk-size` 时直接取到末尾；
-3. **尾块合并**：若最后一块的长度 ≤ `chunk-overlap`，并入前一块（避免产生一个几十字的尾巴 —— 那种块即使被检索到也没有信息量）；
+3. **尾块合并**：若最后一块的长度 ≤ `chunk-overlap`，并入前一块（避免产生一个几十字的尾巴 —— 那种块即使被检索到也没有信息量）。
+   ⚠️ **实施时订正**：这条在 `步长 = size - overlap` 下**不可达** —— 尾块长度恒 > overlap（子代理用 7920 组
+   `size × overlap × 长度` 的网格穷举，触发 **0 次**）。分支**保留**（代码注释已写明"防御性，将来改语义分块即生效"），
+   但**不要**把它当成需要覆盖的用例：TC-03 不必为它造数据，`TextChunkerTest` 也不必断言它被触发过；
 4. 文本长度 ≤ `chunk-size` 时**产出 1 块**（不特判成 0 块：短文档同样要能问答）；
 5. 空文本（trim 后为空）不由本类处理 —— 那是 `10203`，在解析层就拦掉了；
 6. 计数口径：Java `String.length()`（UTF-16 单元）。中文 BMP 字符与"字数"1:1；emoji 等增补平面字符按 2 计
@@ -530,7 +533,8 @@ public interface EmbeddingService {
 | 关注点 | 做法 |
 | --- | --- |
 | 上游端点 | `POST {nexus.ai.ollama.base-url}{nexus.ai.ollama.embed-path}`（默认 `/api/embed`）。**✅ 2026-09-22 探针 A/B 实测**：端点存在、响应形状 `{"embeddings":[[...]]}`、支持批量入参 ⇒ **不需要**退化到旧的 `/api/embeddings`（那条退路留在本行备查：将来换版本只改实现内部，端口签名不变 —— 这正是把 embedding 做成端口的价值） |
-| 请求体 | `{"model":"nomic-embed-text","input":["...","..."]}`；**前缀在这里加**（D14）：入库侧 `search_document: `，查询侧 `search_query: `（两个前缀是端口方法的一部分，由调用方传入或由实现按方向区分 —— 见下方签名补充） |
+| 请求体 | `{"model":"nomic-embed-text","input":["...","..."]}`；**前缀在这里加**（D14）：入库侧 `search_document: `，查询侧 `search_query: `（两个前缀由**实现内部**持有，端口只暴露 `embedDocuments` / `embedQuery` 两个方法，不把前缀泄漏给调用方） |
+| ★ 三个**常量**（实施时订正） | `EMBED_MODEL="nomic-embed-text"` / `EMBED_BATCH_SIZE=16` / `EXPECTED_DIMENSION=768` 都是**实现类里的常量，不是配置键** —— yml 里从来没有这三个键（设计 §6.2 的清单也没有）。尤其注意：**`nexus.ai.ollama.model` 是对话模型**（`qwen2.5:7b`），拿它做向量化是错的，两者必须分开。`EXPECTED_DIMENSION` 的真源是 DB 补丁的 `vector(768)`：换 embedding 模型时**两处必须同改**（改常量 + 新增补丁 + 重灌数据） |
 | 超时 | 复用 `nexus.ai.read-timeout-ms`（60s，阶段2 既定口径）。**不要**沿用 `probe-timeout-ms`（那是探活口径，会误杀） |
 | 错误处理 | 与阶段2 的 provider 完全同口径：网络类失败 / 非 2xx / 上游错误报文 → `BusinessException(20100)`；**非网络类**（如序列化失败）原样上抛按 `50000` 处置（"上游真的挂了"与"我们写挂了"必须分得开） |
 | 响应校验 | `embeddings` 数组长度必须 == 入参长度、每个向量长度必须 == 表定义维度；不符 → **抛系统异常**（`50000`，属本服务/上游配置缺陷，不是用户问题），日志带上"期望 vs 实际" |
@@ -615,7 +619,13 @@ public class ModelAnswerGenerator {
 3. **`CancelToken` 的用法**：本链路没有"客户端断开就取消上游"的通道（同步请求），传一个**不被取消**的实例即可；
    **不要**为了"支持取消"去监听请求线程中断 —— 那是一条没有消费者的复杂度（§10.4 才需要）；
 4. **异常**：`BusinessException(20100)` 原样上抛（由全局处理器出 503），其余异常按 `50000`（与阶段2 的分工一致）；
-5. **日志**：`[kb] 生成完成: provider=deepseek model=deepseek-chat sources=3 finishReason=stop chars=86 durationMs=4034`。
+5. **日志**：`[kb] 生成完成: provider=deepseek model=deepseek-chat finishReason=stop chars=86 durationMs=4034`
+   （**实施时订正**：初版这条写的是 `sources=3`，而 `generate(messages)` 的签名里没有这个数 —— 不改签名，
+   因为 `sources` 与上一条检索日志的 `hits` **是同一个数**，两行相邻、合起来就是全部信息，补第二行只是噪声）。
+6. **空答案按 `20100` 失败**（**实施时定案**）：上游"成功但一个字都没给"时**不要**返回 `answer=""` + `grounded=true`
+   —— 那会造出"看着成功其实没答"的响应，与 §3.7 的原则直接冲突（"答案为空"与"检索不到"的前端处置会混淆）。
+   判定落在 `KbAskServiceImpl`（`answer` 去空白后为空 ⇒ 抛 `BusinessException(20100)`，HTTP 503 让用户重试）；
+   `ModelAnswerGenerator` 只记一条 warn（它离上游最近，`provider` / `finishReason` 在那里才可见）。
 
 ### 4.8 `KbDocumentServiceImpl` 编排（上传链路）与事务边界
 
@@ -729,7 +739,7 @@ sequenceDiagram
 [kb] 入库完成: documentId=7 tenantId=1 chunkCount=28 durationMs=4300
 [kb] 检索: questionLength=12 topK=5 hits=3 maxScore=0.8241 threshold=0.5 durationMs=48
 [kb] 检索为空（未调用大模型）: questionLength=12 topK=5 maxScore=0.3120 threshold=0.5
-[kb] 生成完成: provider=deepseek model=deepseek-chat sources=3 finishReason=stop chars=86 durationMs=4034
+[kb] 生成完成: provider=deepseek model=deepseek-chat finishReason=stop chars=86 durationMs=4034
 ```
 
 **不打印正文**（分块内容、问题、答案都不进日志）：与阶段2 §4.5 同一条纪律（隐私 + 日志体积）。
@@ -1049,6 +1059,11 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 
 ### 7.1 单元测试（JUnit 5 + Mockito，放 `nexus-module-ai/src/test/java/.../rag/`）
 
+> ⚠️ **测试类的包路径要精确**（实施时的可见性约束）：`TextChunker.chunk(text, size, overlap)` 与
+> `TikaDocumentParser.normalize(...)` 是**包内可见**的（刻意留的测试缝，与阶段2 的 `OllamaService.parseStream` 同款），
+> 所以 `TextChunkerTest` 必须放在 `com.nexus.module.ai.rag.chunk`、`TikaDocumentParserTest` 放在
+> `com.nexus.module.ai.rag.parse` —— 一律丢在 `...rag` 下会因为可见性**编不过**。
+
 > 选型理由同阶段2 §7：**纯函数与协议解析这类"喂样本断言输出"的单测成本低、防回归价值高**，
 > 本阶段真正值得机器钉住的就是下面 6 组。真实连通性交给 TC-03 的实机用例。
 
@@ -1068,7 +1083,7 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 
 | 夹具 | 用途 | 备注 |
 | --- | --- | --- |
-| `公司年报.pdf` | **阶段验收**：上传后问"去年利润是多少" | ✅ **2026-09-22 用户已提供**（1.6MB、`%PDF-1.7`、**含文本层**：`/Font` 266 处 / `/Image` 3 处 ⇒ 不是扫描件，`10203` 那条负路径不会误伤它）。⚠️ **刻意不入库**（`.gitignore` 末段：`qa/fixtures/rag/*.pdf` —— 第三方公开材料 + 体积），复现时自备一份中文含财务数字的 PDF、放同目录同名即可。<br>★ **期望答案（已由主会话用 `pdftotext -layout` 抽出正文核对，两处措辞一致）**：<br>· "报告期内，公司实现营业总收入 **897 亿元**，同比增长 14.4%；归属于上市公司股东的净利润 **84.1 亿元**，同比大幅上升 **41.2%**"（正文段）<br>· "报告期间实现归属母公司净利润 **84.1 亿元**，同比大幅增长 **41.2%**，销售净利率达 9.5%"（经营讨论段）<br>· 财报表格里同一数字写作 **8,408,057 千元**（= 84.08 亿元）⇒ **TC-03 的判据要接受两种形态**（"84.1 亿元" 或 "8,408,057 千元"），否则会把一次正确回答判成错。<br>**交叉核对工具**：宿主侧 `pdftotext -layout <pdf> <txt>`（Git Bash 自带）可随时抽正文，用来判断"答案不对"是**解析问题**还是**检索/生成问题** |
+| `公司年报.pdf` | **阶段验收**：上传后问"去年利润是多少" | ✅ **2026-09-22 用户已提供**（1.6MB、`%PDF-1.7`、**含文本层**：`/Font` 266 处 / `/Image` 3 处 ⇒ 不是扫描件，`10203` 那条负路径不会误伤它）。⚠️ **刻意不入库**（`.gitignore` 末段：`qa/fixtures/rag/*.pdf` —— 第三方公开材料 + 体积），复现时自备一份中文含财务数字的 PDF、放同目录同名即可。<br>★ **期望答案（已由主会话用 `pdftotext -layout` 抽出正文核对，两处措辞一致）**：<br>· "报告期内，公司实现营业总收入 **897 亿元**，同比增长 14.4%；归属于上市公司股东的净利润 **84.1 亿元**，同比大幅上升 **41.2%**"（正文段）<br>· "报告期间实现归属母公司净利润 **84.1 亿元**，同比大幅增长 **41.2%**，销售净利率达 9.5%"（经营讨论段）<br>· 财报表格里同一数字写作 **8,408,057 千元**（= 84.08 亿元）⇒ **TC-03 的判据要接受两种形态**（"84.1 亿元" 或 "8,408,057 千元"），否则会把一次正确回答判成错。<br>**交叉核对工具**：宿主侧 `pdftotext -layout <pdf> <txt>`（Git Bash 自带）可随时抽正文，用来判断"答案不对"是**解析问题**还是**检索/生成问题**。<br>★ **实测数字（第二段 a 用真实 Tika 3.2.3 跑出来的，TC-03 可直接当判据）**：本夹具解析出 **263,910 字符 → 587 块**（最长 500、最短 210），**远低于 3000 的 `max-chunks-per-document` 上限**（不会撞 `10204`）。⚠️ 判据建议留余量：`charCount` 落在 25 万~28 万、`chunkCount` 在 585~590 之间 —— 精确断言 `587` 也可，但 Tika/PDFBox 版本一动就会假失败 |
 | `知识库说明.txt` | 3.2 的正路径 + 3.3 的分块判据 | 建议 ~1200 字（→ 3 块），内容里埋一个只有它才有的答案（用于验证"答案基于知识库"） |
 | `gbk编码.txt` | 编码探测的正路径 | 用 `iconv -f UTF-8 -t GBK` 生成（生成命令写进 TC-03 的备注） |
 | `扫描版.pdf` | 3.2 的负路径（`10203`） | 只有图片层、无文本层的 PDF；若一时造不出，用**空文件**替代并注明"未覆盖扫描版形态" |
@@ -1193,3 +1208,4 @@ embedding / 答案缓存（同一问题重复问会重复调用上游）、批�
 | 2026-09-22 | **四条探针实测**（§3.9） | A: `/api/embed` 存在且**维度 = 768**（`vector(768)` 定稿、§9 风险 3 消除）；B: **支持批量**（`embed-batch-size` 可用）；C: `num_ctx 8192`（500 字块远小于窗口）、v1.0/v1.5 待 A/B 用例判定；D: pgvector **0.8.6**（HNSW 可用）。探针 D 的落点订正为 `nexus-postgres` 容器 |
 | 2026-09-22 | 状态置「已确认」+ 夹具落定 + 编号收口 | ① 用户确认设计并开工（后端第一段已交付）；② **契约 §7.N 与本文档 §3.N 收成一比一** —— 原 §3.8 的"（进 §7.4）"是从阶段2 的"§6.4"顺手抄来的笔误（阶段2 的 §3.4 恰好是错误码，阶段3 不是），子代理上报后由主会话按阶段2 惯例收口，并把该约定写进契约 §7 开头；③ `公司年报.pdf` 由用户提供（含文本层）且**刻意不入库**（§7.2 已更新，`.gitignore` 有对应规则） |
 | 2026-09-22 | **D12 订正**：文件白名单由"配置键"改为**常量** | 初版 D12 写的是配置键 `nexus.ai.rag.allowed-extensions`（而 §6.2 的 yml 清单里**从来没有这个键** —— 子代理上报了这个缺口）。实施时定案：**白名单是 `TikaDocumentParser` 里的常量**，因为可配的白名单会让 `10201` 里写死的文案"仅支持 TXT / PDF"**说谎**，而"支持哪几种格式"本就是范围决策（加 Word 要同时加 Tika 模块与用例，§10.1）。连带订正 3 处引用：`ResultCode` 的 `KB_FILE_TYPE_UNSUPPORTED` javadoc、契约 §7.8 的"已知成本"提示、`openapi.yaml` 的错误码说明 —— 三处原先都写着"白名单可配、文案要一起改" |
+| 2026-09-22 | **第二段 a 交付后的设计订正（6 处）** | 子代理交付 11 个类（**含真实 jar 的 `javac` 编译自检 + 59/15 项行为探针**）并上报 11 条偏离，主会话逐条裁定后订正本设计：① embedding 的**三个常量**（§4.5 —— 含"`nexus.ai.ollama.model` 是对话模型、不能拿来向量化"这条警告）；② **TXT 不做 Tika 内容检测**（D12 —— 合法 GBK 文件会被判成 `octet-stream` 而误杀成 10201）；③ **尾块合并不可达**（§4.4 —— 7920 组穷举 0 次触发，保留分支但不再当用例）；④ `TextChunker` 构造期 fail-fast（§4.4 —— `overlap ≥ size` 会让首个上传请求死循环）；⑤ **空答案按 `20100` 失败**（§4.7 —— 由 `KbAskServiceImpl` 判，绝不给"看着成功其实没答"的响应）；⑥ **`entity/KbChunk` 不建**（§4.1 —— 全链路自定义 SQL ⇒ 实体无消费者，属死代码）。另：不因一条日志给 `generate(...)` 加参数（§4.7 第 5 条），因此 §4.11 的"生成完成"行去掉 `sources=N`（与检索行的 `hits=N` 同源） |
