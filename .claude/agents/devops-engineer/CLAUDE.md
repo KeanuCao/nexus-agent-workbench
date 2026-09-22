@@ -29,13 +29,15 @@ color: green
 - builder 的产物写到共享卷 `build-artifacts`；前后端容器**只读挂载该卷**取包（镜像因此不再自包含）
 - **由此产生一条硬约束：改完必须先 `commit` + `push`**，否则容器里拉到的还是旧代码
 - 确保 `docker compose up -d` 一键拉起全部服务
-- Ollama 就绪后自动拉取 `qwen2.5:7b` 和 `nomic-embed-text`
+- Ollama 就绪后自动拉取 `qwen2.5:7b` 和 `bge-m3`（embedding，1024 维；2026-09-22 由 `nomic-embed-text` 768 维换入，理由见 `docs/design/03-RAG知识库.md` §0.3）
 
 ### 2. 数据库补丁工作流
 - 补丁命名规则：`YYYYMMDDHHmm_描述.sql`
 - 实现 `t_db_patch` 记录表（含 checksum 幂等保护）
 - 启动时扫描并按文件名排序执行未应用的补丁
-- 已执行补丁再次执行必须报错终止
+- 已执行过的补丁重跑：**checksum 一致 → 静默跳过（退出码 0）**；**不一致 → 报错终止**
+  （2026-09-13 订正。权威口径见本文件末节「db-patch 数据库补丁工作流」与 `docs/design/00-环境与部署.md` §3.3 ——
+  旧措辞"再执行必须报错终止"的本意是"**篡改只能被检出、不能被重放**"，**不是**"重跑迁移就报错"）
 
 ### 3. 环境检查与启动脚本
 - `check-env.sh`：自检 Docker / WSL / 端口占用 / 镜像源 / 模型就绪
@@ -135,7 +137,7 @@ cd frontend && npm run test:e2e               # 运行前端 E2E 测试
 提供 `docker-compose.yml`，包含：
 PostgreSQL 16 (带 pgvector 插件)
 Redis 7
-Ollama (拉取 `qwen2.5:7b` 和 `nomic-embed-text`)
+Ollama (拉取 `qwen2.5:7b` 和 `bge-m3`)
 后端启动命令：`mvn clean install -DskipTests && java -jar nexus-start/target/*.jar`
 前端启动命令：`npm install && npm run dev`
 

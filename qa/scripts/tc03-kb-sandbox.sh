@@ -14,9 +14,10 @@
 # 它做的事（每一步都只做动作、只打印结果，不打 PASS/FAIL —— 期望值写在 TC-03.md 里）：
 #   ① 前置（只读）：docker / nexus-postgres 可达 + **沙箱库的存在性指纹（跑前）**
 #   ② 建沙箱库 nexus_patch_probe（先 DROP IF EXISTS：上一次被打断留下的同名库在此清掉 —— 幂等）
-#   ③ 重放两份真实补丁（补丁1 多租户基础表 → 补丁2 知识库表），打印各自的退出码与输出尾部
+#   ③ 重放三份真实补丁（补丁1 多租户基础表 → 补丁2 知识库表 → 维度补丁 768→1024），
+#      打印各自的退出码与输出尾部（维度补丁在沙箱里 DROP + 重建两张表 —— 一次性数据，无所谓）
 #   ④ 打印两张表与它们的全部索引（含唯一约束、含 HNSW）
-#   ⑤ 造两行探针分块（同一向量：让三种 ORDER BY 写法的计划都稳定可读）
+#   ⑤ 造两行探针分块（同一向量、1024 维：让三种 ORDER BY 写法的计划都稳定可读）
 #   ⑥ 三种写法的 EXPLAIN（都先 SET enable_seqscan=off —— 小表上规划器会直接选 Seq Scan，
 #      那不是"索引不可用"，而是代价估算的结果；关掉顺序扫描才能问出"这条语句能不能走索引"）
 #        B1 规范写法 ORDER BY c.embedding <=> <向量>        （本项目采用的形态）
@@ -55,14 +56,19 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/tc-common.sh"
 readonly TC03_SANDBOX_DB='nexus_patch_probe'
 readonly TC03_PATCH_TENANT="${TC_REPO_DIR}/db-patch/202609131000_初始化多租户基础表.sql"
 readonly TC03_PATCH_KB="${TC_REPO_DIR}/db-patch/202609221000_初始化知识库表.sql"
+# 维度补丁：768 → 1024（2026-09-22 晚新增；作者当天把名字里的空格去掉了 —— 带空格会让所有 shell 引用都得加引号）
+readonly TC03_PATCH_KB_1024="${TC_REPO_DIR}/db-patch/202609221100_知识库向量维度改1024.sql"
 readonly TC03_PG_CONTAINER='nexus-postgres'
 
 # psql 的三条通道：Q = 连 postgres 库（做库级 DDL）；P = 连沙箱库（做表级动作）
 readonly TC03_Q=(docker exec -i "$TC03_PG_CONTAINER" psql -U nexus -q -v ON_ERROR_STOP=1)
 readonly TC03_P=(docker exec -i "$TC03_PG_CONTAINER" psql -U nexus -q -v ON_ERROR_STOP=1 -d "$TC03_SANDBOX_DB")
 
-# 探针向量：768 维常量向量（与 t_kb_chunk.embedding vector(768) 同维）
-readonly TC03_PROBE_VECTOR="('[' || repeat('0.02,',767) || '0.02]')::vector"
+# 探针向量：1024 维常量向量（与 t_kb_chunk.embedding vector(1024) 同维）
+# ⚠️ 这个维度是**常量、与补丁里的列定义是两处**（同 MAX_FILE_NAME_LENGTH↔VARCHAR(255) 那类取舍）：
+#    换 embedding 模型时必须**它与补丁同改**。2026-09-22 晚：nomic-embed-text(768) → bge-m3(1024)，
+#    补丁重建为 vector(1024) 并清空数据；此处若不同步，本脚本会在**类型不匹配**上失败。
+readonly TC03_PROBE_VECTOR="('[' || repeat('0.02,',1023) || '0.02]')::vector"
 
 # ── 清理脚手架：与 lib 同款口径（信号不会触发 EXIT trap，先转成一次正常退出）──────────
 tc03_sandbox_cleanup() {
@@ -89,7 +95,8 @@ if ! docker ps --format '{{.Names}}' | tr -d '\r' | grep -qx "$TC03_PG_CONTAINER
   exit 3
 fi
 printf '  容器：%s 在运行\n' "$TC03_PG_CONTAINER"
-printf '  补丁：\n    %s\n    %s\n' "$TC03_PATCH_TENANT" "$TC03_PATCH_KB"
+printf '  补丁（按文件名字典序，与引擎同序）：\n    %s\n    %s\n    %s\n' \
+  "$TC03_PATCH_TENANT" "$TC03_PATCH_KB" "$TC03_PATCH_KB_1024"
 tc03_sandbox_existence '指纹（跑前）'
 
 tc_section "② 建沙箱库 ${TC03_SANDBOX_DB}（真实 nexus 库零写操作）"
@@ -97,7 +104,7 @@ tc_section "② 建沙箱库 ${TC03_SANDBOX_DB}（真实 nexus 库零写操作�
 "${TC03_Q[@]}" -d postgres -c "CREATE DATABASE ${TC03_SANDBOX_DB}" >/dev/null 2>&1 || true
 tc03_sandbox_existence '建库后'
 
-tc_section '③ 重放真实补丁（补丁1 → 补丁2）'
+tc_section '③ 重放真实补丁（补丁1 → 补丁2 → 维度补丁）'
 tc03_replay_patch() {  # <标签> <补丁文件>
   local output code
   output="$("${TC03_P[@]}" -f - < "$2" 2>&1)"
@@ -109,6 +116,8 @@ tc03_replay_patch() {  # <标签> <补丁文件>
 }
 tc03_replay_patch '补丁1 多租户基础表' "$TC03_PATCH_TENANT"
 tc03_replay_patch '补丁2 知识库表' "$TC03_PATCH_KB"
+# 维度补丁会 DROP + 重建两张表（vector(768) → vector(1024)）—— 不重放它，下面 1024 维的探针向量必然失败
+tc03_replay_patch '维度补丁 768 → 1024' "$TC03_PATCH_KB_1024"
 
 tc_section '④ 两张表与它们的全部索引（含唯一约束、含 HNSW）'
 "${TC03_P[@]}" -P pager=off -c \
@@ -116,7 +125,7 @@ tc_section '④ 两张表与它们的全部索引（含唯一约束、含 HNSW�
     WHERE tablename IN ('t_kb_document', 't_kb_chunk') ORDER BY tablename, indexname" 2>&1
 
 tc_section '⑤ 造两行探针分块（同一向量）'
-"${TC03_P[@]}" >/dev/null 2>&1 <<SQL
+"${TC03_P[@]}" <<SQL
 INSERT INTO t_kb_document (tenant_id, file_name, file_type, file_size, char_count, chunk_count)
 SELECT tenant_id, 'tc03-probe.txt', 'TXT', 10, 8, 2 FROM t_tenant WHERE tenant_code = 'default';
 INSERT INTO t_kb_chunk (tenant_id, document_id, chunk_index, content, char_count, embedding)
@@ -144,15 +153,16 @@ tc_section '⑦ 级联删除：删文档行 → 分块行数（ON DELETE CASCADE
 "${TC03_P[@]}" -tAc "SELECT '  删文档后：分块行数=' || count(*) FROM t_kb_chunk" 2>&1
 
 tc_section '⑧ 唯一约束：同一 (document_id, chunk_index) 插两次'
-"${TC03_P[@]}" >/dev/null 2>&1 <<'SQL'
+# heredoc 用**非引号**形式：${TC03_PROBE_VECTOR} 必须被展开（引号形式会让它原样进 SQL、整段无声失败）
+"${TC03_P[@]}" <<SQL
 INSERT INTO t_kb_document (tenant_id, file_name, file_type, file_size, char_count, chunk_count)
 SELECT tenant_id, 'tc03-dup.txt', 'TXT', 1, 1, 1 FROM t_tenant WHERE tenant_code = 'demo';
 INSERT INTO t_kb_chunk (tenant_id, document_id, chunk_index, content, char_count, embedding)
-SELECT d.tenant_id, d.document_id, 0, '甲', 1, ('[' || repeat('0.01,',767) || '0.01]')::vector
+SELECT d.tenant_id, d.document_id, 0, '甲', 1, ${TC03_PROBE_VECTOR}
 FROM t_kb_document d WHERE d.file_name = 'tc03-dup.txt';
 SQL
 "${TC03_P[@]}" -c "INSERT INTO t_kb_chunk (tenant_id, document_id, chunk_index, content, char_count, embedding)
-                   SELECT d.tenant_id, d.document_id, 0, '乙', 1, ('[' || repeat('0.01,',767) || '0.01]')::vector
+                   SELECT d.tenant_id, d.document_id, 0, '乙', 1, ${TC03_PROBE_VECTOR}
                    FROM t_kb_document d WHERE d.file_name = 'tc03-dup.txt'" 2>&1 | sed 's/^/  /'
 
 tc_section '⑨ 收尾：DROP 沙箱库'

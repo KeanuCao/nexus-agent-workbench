@@ -14,9 +14,10 @@ import java.time.Duration;
 /**
  * Ollama 探活：请求 {@code GET /api/version}，拿到响应体即视为可用。
  *
- * <p>语义边界：只探测 "Ollama 进程是否可用"，<b>不</b>校验 {@code qwen2.5:7b} /
- * {@code nomic-embed-text} 是否已拉取完成 —— 模型就绪由 up.sh 轮询 {@code /api/tags} 判定
- * （设计文档 §2.5 / §4.3），健康检查若把模型体积纳入判据会把启动期拖成误报。
+ * <p>语义边界：只探测 "Ollama 进程是否可用"，<b>不</b>校验对话模型 {@code qwen2.5:7b} /
+ * embedding 模型（2026-09-22 晚起 {@code bge-m3}，此前 {@code nomic-embed-text}）是否已拉取完成
+ * —— 模型就绪由 up.sh 轮询 {@code /api/tags} 判定（设计文档 §2.5 / §4.3），
+ * 健康检查若把模型体积纳入判据会把启动期拖成误报。
  *
  * <p>HTTP 客户端选型：Spring 6.1 的 {@link RestClient}（spring-web 自带，零额外依赖），
  * 相比 RestTemplate 是 Boot 3.x 的现代写法，且不引入 OkHttp/WebClient 等重量级依赖。

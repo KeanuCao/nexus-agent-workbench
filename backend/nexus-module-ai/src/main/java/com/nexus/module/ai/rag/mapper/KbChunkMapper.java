@@ -197,7 +197,8 @@ public interface KbChunkMapper {
      * @param chunkIndex    该块在文档内的序号，<b>0 起</b>（顺序即 {@code chunk_index}，设计 §4.4 规则 1）
      * @param content       分块原文（引用即原文，不截断、不摘要）
      * @param charCount     本块字符数（{@code String.length()} 口径，与 {@code TextChunker} 同源）
-     * @param vectorLiteral 向量文本，形如 {@code [0.1,0.2,...]}（768 维）
+     * @param vectorLiteral 向量文本，形如 {@code [0.1,0.2,...]}（维度随 embedding 模型，
+     *                      2026-09-22 晚起 {@code bge-m3} = 1024；本类不关心，只透传）
      * @author nexus
      */
     record ChunkRow(int chunkIndex, String content, int charCount, String vectorLiteral) {

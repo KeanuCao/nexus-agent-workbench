@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,18 +49,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class OllamaEmbeddingServiceTest {
 
-    /** 表定义维度（{@code t_kb_chunk.embedding vector(768)}，探针 A 实测）—— 桩必须按它造向量。 */
-    private static final int DIMENSION = 768;
+    /** 表定义维度（{@code t_kb_chunk.embedding vector(1024)}）—— 桩必须按它造向量。
+     * <p>与生产的 {@code EXPECTED_DIMENSION} 和 db-patch 的列定义**同源**：2026-09-22 晚 embedding 由
+     * {@code nomic-embed-text}（768 维）换成 {@code bge-m3}（1024 维）时，三处必须同一次改
+     * —— 只改一处就是 {@code mvn -pl nexus-module-ai test} 红。 */
+    private static final int DIMENSION = 1024;
 
-    /** 一个 768 维向量在 JSON 里的样子（复用同一份字面量：它很长，不该在断言里拼第二遍）。 */
-    private static final String VECTOR_768 = vectorJson(0.1d);
+    /** 一个 1024 维向量在 JSON 里的样子（复用同一份字面量：它很长，不该在断言里拼第二遍）。 */
+    private static final String VECTOR_1024 = vectorJson(0.1d);
 
     private HttpServer server;
 
     /** 桩收到的请求体（按到达顺序）；本类只用它做"发了什么"的观察。 */
     private final List<String> requestBodies = Collections.synchronizedList(new ArrayList<>());
 
-    /** 桩要回的响应体；{@code null} = 按入参条数自动回同样多的 768 维向量（正常路径的默认行为）。 */
+    /** 桩要回的响应体；{@code null} = 按入参条数自动回同样多的 1024 维向量（正常路径的默认行为）。 */
     private volatile String stubResponse;
 
     /** 桩要回的向量条数；{@code null} = 与入参条数相同（造"条数不符"时显式给一个不同的值）。 */
@@ -71,6 +75,8 @@ class OllamaEmbeddingServiceTest {
     /** 桩被调用的次数（"空入参不发请求"这类断言看它）。 */
     private final AtomicInteger requestCount = new AtomicInteger();
 
+    private AiProperties aiProperties;
+
     private RagProperties ragProperties;
 
     private OllamaEmbeddingService service;
@@ -81,7 +87,7 @@ class OllamaEmbeddingServiceTest {
         server.createContext("/api/embed", this::handle);
         server.start();
 
-        AiProperties aiProperties = new AiProperties();
+        aiProperties = new AiProperties();
         // 指向桩：127.0.0.1 + 内核分配的随机端口（避免与真 Ollama 的 11434 或其它测试撞端口）
         aiProperties.getOllama().setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
         aiProperties.getOllama().setEmbedPath("/api/embed");
@@ -90,20 +96,40 @@ class OllamaEmbeddingServiceTest {
         service = new OllamaEmbeddingService(aiProperties, ragProperties, new ObjectMapper());
     }
 
+    /**
+     * 用**指定的**两个前缀建一个服务 —— 前缀是构造期读入的（见 {@code OllamaEmbeddingService} 的构造器），
+     * 所以必须在 {@code new} 之前设好。
+     *
+     * <p>为什么要显式给：D14 的"任务前缀"是**可配**的，而 2026-09-22 晚换 bge-m3 之后，
+     * 两个前缀的**默认值已改成空串**（bge-m3 不需要任务前缀，见 db-patch 的
+     * {@code 202609221100_知识库向量维度改1024.sql} 头部"三处必须同一次发布"清单）。
+     * 本类的两个前缀用例因此**自己把前缀设上**去验"机制还在"，而不是绑定当前默认值。
+     *
+     * @param documentPrefix 入库侧前缀
+     * @param queryPrefix    查询侧前缀
+     * @return 指向本测试桩的服务实例
+     */
+    private OllamaEmbeddingService serviceWithPrefixes(String documentPrefix, String queryPrefix) {
+        ragProperties.setDocumentPrefix(documentPrefix);
+        ragProperties.setQueryPrefix(queryPrefix);
+        return new OllamaEmbeddingService(aiProperties, ragProperties, new ObjectMapper());
+    }
+
     @AfterEach
     void tearDown() {
         server.stop(0);
     }
 
     @Test
-    @DisplayName("★ 批量：17 条文本 → 2 次请求（16 + 1），返回 17 个 768 维向量，且带入库侧前缀")
+    @DisplayName("★ 批量：17 条文本 → 2 次请求（16 + 1），返回 17 个 1024 维向量；**配了前缀时**每条都带入库侧前缀")
     void shouldEmbedInBatchesWithDocumentPrefix() {
         List<String> texts = new ArrayList<>();
         for (int i = 0; i < 17; i++) {
             texts.add("第 " + i + " 块");
         }
+        OllamaEmbeddingService prefixed = serviceWithPrefixes("search_document: ", "search_query: ");
 
-        List<float[]> vectors = service.embedDocuments(texts);
+        List<float[]> vectors = prefixed.embedDocuments(texts);
 
         assertEquals(17, vectors.size(), "返回条数必须与入参一一对应");
         for (float[] vector : vectors) {
@@ -113,19 +139,41 @@ class OllamaEmbeddingServiceTest {
         assertEquals(16, occurrences(requestBodies.get(0), "search_document: "),
                 "第 1 批 16 条，每条都要带入库侧前缀（决策 D14）");
         assertEquals(1, occurrences(requestBodies.get(1), "search_document: "));
-        assertTrue(requestBodies.get(0).contains("\"model\":\"nomic-embed-text\""),
-                "请求体里的模型名必须是 embedding 模型，不是对话模型 qwen2.5:7b");
+        assertTrue(requestBodies.get(0).contains("\"model\":\"bge-m3\""),
+                "请求体里的模型名必须与生产的 EMBED_MODEL 同源（bge-m3），不是对话模型 qwen2.5:7b");
     }
 
     @Test
-    @DisplayName("★ 查询侧前缀与入库侧不同（search_query / search_document 成对同源）")
+    @DisplayName("★ 查询侧用 query 前缀、不与入库侧串味（配了前缀时）")
     void shouldUseQueryPrefixForQueryEmbedding() {
-        float[] vector = service.embedQuery("去年利润是多少");
+        OllamaEmbeddingService prefixed = serviceWithPrefixes("search_document: ", "search_query: ");
+
+        float[] vector = prefixed.embedQuery("去年利润是多少");
 
         assertEquals(DIMENSION, vector.length);
         assertEquals(1, requestCount.get(), "单条查询只发一次请求");
         assertTrue(requestBodies.get(0).contains("\"input\":[\"search_query: 去年利润是多少\"]"),
                 "查询必须加 search_query 前缀（且只加一次），实际请求体：" + requestBodies.get(0));
+        assertFalse(requestBodies.get(0).contains("search_document: "),
+                "入库侧前缀不得出现在查询请求里（两侧串味 = 检索质量静默劣化）");
+    }
+
+    @Test
+    @DisplayName("★ 默认（空前缀）：文本原样发送，两侧都不加任何前缀 —— bge-m3 不需要任务前缀")
+    void shouldNotAddAnyPrefixWhenConfiguredEmpty() {
+        // 这是**当前产品的活判据**：2026-09-22 晚换 bge-m3 时，document-prefix / query-prefix 的
+        // 默认值改成空串（RagProperties 的 Java 默认值与 application.yml 两处同源）。
+        // 若将来有人把默认值改回非空，这条会红 —— 那正是要看见的信号（前缀会静默改变检索质量）。
+        assertEquals("", ragProperties.getDocumentPrefix(), "默认入库侧前缀应为空串");
+        assertEquals("", ragProperties.getQueryPrefix(), "默认查询侧前缀应为空串");
+
+        service.embedDocuments(List.of("甲"));
+        service.embedQuery("乙");
+
+        assertEquals("{\"model\":\"bge-m3\",\"input\":[\"甲\"]}", requestBodies.get(0),
+                "入库侧：文本必须原样发送，不拼任何前缀");
+        assertEquals("{\"model\":\"bge-m3\",\"input\":[\"乙\"]}", requestBodies.get(1),
+                "查询侧：同样原样发送");
     }
 
     @Test
@@ -148,21 +196,21 @@ class OllamaEmbeddingServiceTest {
     }
 
     @Test
-    @DisplayName("★ 维度与表定义不符 → 系统异常（768 维是 t_kb_chunk.embedding 的真源）")
+    @DisplayName("★ 维度与表定义不符 → 系统异常（1024 维是 t_kb_chunk.embedding 的真源）")
     void shouldFailWithSystemExceptionWhenDimensionMismatch() {
-        // 767 维：探针 A 说过模型给 768，这里造一个"模型换了但表没改"的形态
-        stubResponse = "{\"embeddings\":[" + vectorJson(new double[767]) + "]}";
+        // 1023 维：模型现在给 1024，这里造一个"模型换了但表没改"的形态
+        stubResponse = "{\"embeddings\":[" + vectorJson(new double[1023]) + "]}";
 
         SystemException ex = assertThrows(SystemException.class,
                 () -> service.embedDocuments(List.of("甲")));
 
-        assertTrue(ex.getMessage().contains("768"), "文案要带'期望 vs 实际'，实际：" + ex.getMessage());
+        assertTrue(ex.getMessage().contains("1024"), "文案要带'期望 vs 实际'，实际：" + ex.getMessage());
     }
 
     @Test
     @DisplayName("响应缺 embeddings 数组 → 系统异常（含顶层字段名的日志是排查依据）")
     void shouldFailWithSystemExceptionWhenEmbeddingsMissing() {
-        stubResponse = "{\"model\":\"nomic-embed-text\"}";
+        stubResponse = "{\"model\":\"bge-m3\"}";
 
         assertThrows(SystemException.class, () -> service.embedDocuments(List.of("甲")));
     }
@@ -170,7 +218,7 @@ class OllamaEmbeddingServiceTest {
     @Test
     @DisplayName("★ HTTP 200 + {\"error\":...}（模型没拉取）→ 20100")
     void shouldFailWith20100OnUpstreamErrorPayload() {
-        stubResponse = "{\"error\":\"model 'nomic-embed-text' not found, try pulling it first\"}";
+        stubResponse = "{\"error\":\"model 'bge-m3' not found, try pulling it first\"}";
 
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> service.embedDocuments(List.of("甲")));
@@ -235,12 +283,12 @@ class OllamaEmbeddingServiceTest {
     private String autoResponse(String requestBody) throws IOException {
         int inputCount = new ObjectMapper().readTree(requestBody).path("input").size();
         int vectorCount = stubVectorCount == null ? inputCount : stubVectorCount;
-        StringBuilder builder = new StringBuilder("{\"model\":\"nomic-embed-text\",\"embeddings\":[");
+        StringBuilder builder = new StringBuilder("{\"model\":\"bge-m3\",\"embeddings\":[");
         for (int i = 0; i < vectorCount; i++) {
             if (i > 0) {
                 builder.append(',');
             }
-            builder.append(VECTOR_768);
+            builder.append(VECTOR_1024);
         }
         return builder.append("]}").toString();
     }

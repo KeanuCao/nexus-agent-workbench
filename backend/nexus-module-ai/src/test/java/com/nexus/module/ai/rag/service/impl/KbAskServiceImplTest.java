@@ -83,7 +83,9 @@ class KbAskServiceImplTest {
         service = new KbAskServiceImpl(embeddingService, chunkMapper, generator, ragProperties);
 
         TenantContext.set(USER_ID, TENANT_ID, "unit-test-jti");
-        when(embeddingService.embedQuery(anyString())).thenReturn(new float[768]);
+        // 查询向量的维度跟生产的 EXPECTED_DIMENSION 走（2026-09-22 晚 768 → 1024）；本类**不校验维度**，
+        // 桩里给对维度只是为了不写出一个会误导人的数字
+        when(embeddingService.embedQuery(anyString())).thenReturn(new float[1024]);
     }
 
     @AfterEach
@@ -253,7 +255,7 @@ class KbAskServiceImplTest {
         });
         when(embeddingService.embedQuery(anyString())).thenAnswer(invocation -> {
             Thread.sleep(20L);
-            return new float[768];
+            return new float[1024];
         });
 
         KbAnswerVO answer = service.ask(question("问题", null));

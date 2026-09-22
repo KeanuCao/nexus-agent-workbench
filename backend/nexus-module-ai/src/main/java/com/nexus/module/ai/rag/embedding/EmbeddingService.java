@@ -11,14 +11,18 @@ import java.util.List;
  * <h2>为什么自成一个端口，而不复用 {@code AiModelService}</h2>
  * 那个端口是<b>生成</b>端口（流式、有回调与取消语义），而向量化是另一种调用：
  * 批量入参、无流、返回定长数组。塞进同一个端口会让"两条路径"互相污染 ——
- * 比如 {@code CancelToken} 对 embedding 毫无意义，而 {@code Chunk} 也表达不了 768 个浮点数。
+ * 比如 {@code CancelToken} 对 embedding 毫无意义，而 {@code Chunk} 也表达不了上千个浮点数
+ * （维度见实现类的 {@code EXPECTED_DIMENSION}，随模型变）。
  * HTTP 客户端仍然复用阶段2 既定的 {@code RestClient}（<b>不引第二套客户端</b>）。
  *
  * <h2>两个方法为什么刻意分开（而不是一个方法 + 方向参数）</h2>
- * 入库与查询要加<b>不同的</b>任务前缀（决策 D14：{@code search_document: } vs {@code search_query: }），
- * 而"该加哪个前缀"是实现内部的事：拆成两个方法后，调用方（{@code KbDocumentServiceImpl} /
- * {@code KbAskServiceImpl}）拿到的是一句自解释的调用，前缀策略不会泄漏到业务代码里，
- * 也不存在"传错方向"这种参数。
+ * 入库与查询要加<b>不同的</b>任务前缀（决策 D14 的机制：入库 {@code search_document: }、
+ * 查询 {@code search_query: }；<b>当前模型 {@code bge-m3} 不需要它们，两侧配置默认都是空串</b>，
+ * 见实现类），而"该加哪个前缀"是实现内部的事：拆成两个方法后，调用方
+ * （{@code KbDocumentServiceImpl} / {@code KbAskServiceImpl}）拿到的是一句自解释的调用，
+ * 前缀策略不会泄漏到业务代码里，也不存在"传错方向"这种参数。
+ * ⚠️ 前缀当前是关闭的，但这两个方法<b>不合并</b>：预处理策略本就该收在实现里，
+ * 端口不该随一个配置值的取值而变形状（将来换回需要前缀的模型、或两侧改用不同预处理，都靠这条边界）。
  *
  * <h2>实现要遵守的失败约定（与阶段2 的 provider 完全同口径）</h2>
  * <ul>
