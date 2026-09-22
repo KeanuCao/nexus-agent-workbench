@@ -7,7 +7,7 @@
 # 契约依据：docs/api/README.md §7（四个接口 §7.1~§7.4、两个响应结构 §7.5/§7.6、失败形态 §7.7）
 #
 # 为什么有它：这些用例的步骤都要「先登录拿 token，再把 token 喂给下一条命令」，而上传一份 1.6MB
-#   的 PDF 要 80~90 秒、提问要 3~10 秒 —— 手工拼装正是「人最不擅长、也最容易出错」的一环，
+#   的 PDF 要 **130 秒左右**（2026-09-22 换 bge-m3 后实测 129.75 秒）、提问要 3~10 秒 —— 手工拼装正是「人最不擅长、也最容易出错」的一环，
 #   而拼接错误会被误读成产品缺陷。所以机械动作归脚本，**判据留在 TC 文档**：
 #   本脚本只发请求、只打印原始观察（响应原文 + 机械字段表 + [kb] 日志），不打 PASS/FAIL。
 #
@@ -179,7 +179,7 @@ tc03_action_upload() {  # 上传 TC03_FILE（multipart）
   printf '\nPOST %s/api/kb/documents   [上传：%s]\n' "$TC03_BASE_URL" "$tc03_file_resolved"
   printf '  multipart 字段名=%s  filename=%s  手工 Content-Type=%s\n' "$TC03_FIELD" \
     "${TC03_FILENAME:-（未设，取文件本身的路径名）}" "${TC03_CONTENT_TYPE:-（未设，由 curl 带 boundary）}"
-  # -w 里带上总耗时：验收要的「上传约 80~90 秒」就是它（契约 §7.1 第 3 条 / 设计 §5.1-4）
+  # -w 里带上总耗时：验收要的「上传约 130 秒」就是它（契约 §7.1 第 3 条 / 设计 §5.1-4）
   meta="$(curl -s -o "$outfile" -w '%{http_code} %{time_total}' -X POST \
         -H "Authorization: Bearer ${admin_token}" "${header_args[@]+"${header_args[@]}"}" \
         "${field_args[@]}" "${TC03_BASE_URL}/api/kb/documents" || true)"
