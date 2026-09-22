@@ -793,7 +793,7 @@ sequenceDiagram
 | 文件 | 动作 | 要点 |
 | --- | --- | --- |
 | `src/views/KnowledgeView.vue` | **改**（占位页 → 完整页面） | 三段式：上传区（`el-upload` + `:http-request`）+ 文档表格（`el-table` + `el-popconfirm` 删除）+ 问答区（输入 + `el-button` + 答案 + 引用卡片）。顶部一条 `el-alert` 说明本轮边界（§5.2） |
-| `src/api/kb.ts` | **新** | 四个函数：`uploadDocument(file, onProgress?)` / `listDocuments()` / `deleteDocument(id)` / `askKb(req)`。wire 类型（`KbDocumentVO` / `KbDocumentListVO` / `KbAskRequest` / `KbAnswerVO` / `KbSourceVO`）定义在本文件，每个 interface 注明契约出处（对齐 `api/auth.ts` / `api/chat.ts` 的既有风格） |
+| `src/api/kb.ts` | **新** | 四个函数：`uploadDocument(file)` / `listDocuments()` / `deleteDocument(id)` / `askKb(req)`（实施时订正：初版这里写了 `onProgress?`，与同节的签名块不一致，且 §5.2 没有百分比 UI —— 按签名块实现，**不带进度回调**）。wire 类型（`KbDocumentVO` / `KbDocumentListVO` / `KbAskRequest` / `KbAnswerVO` / `KbSourceVO` / `KbRetrievalVO` / `KbGenerationVO`）定义在本文件，每个 interface 注明契约出处（对齐 `api/auth.ts` / `api/chat.ts` 的既有风格） |
 | `src/router/index.ts` | **不改** | `/knowledge` 路由已存在且**已受守卫保护**（无 `public`）—— 上传/问答接口不在白名单，缺 token 时守卫会带 `redirect` 跳登录（阶段1 既定行为） |
 | `src/components/AppNav.vue` | **不改** | 「知识库」菜单项已存在（始终显示）；与「对话」不同的是它没有 `v-if="userStore.isLoggedIn"` —— **本轮不动**（收藏夹式直链会被守卫拦到登录页，行为正确） |
 | `src/api/request.ts` | **不改** | 超时在 `api/kb.ts` 的**调用点**逐请求覆盖（§5.1-4），不必改实例默认值 |
