@@ -370,7 +370,7 @@ TOKEN=$(curl -s -X POST "http://localhost:${BACKEND_PORT}/api/auth/login" \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"admin123"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 
-# ① 上传（-F 即 multipart；curl 会自动带上 boundary —— 这正是前端不能手写 Content-Type 的原因）
+# ① 上传（-F 即 multipart，curl 会自动带上 boundary；前端侧对应"必须让请求头带 boundary"，见 §5.1-2）
 curl -s -X POST "http://localhost:${BACKEND_PORT}/api/kb/documents" \
   -H "Authorization: Bearer ${TOKEN}" \
   -F "file=@/mnt/c/wp/nexus-agent-workbench/qa/fixtures/rag/公司年报.pdf"
@@ -836,7 +836,7 @@ sequenceDiagram
 | `src/api/kb.ts` | **新** | 四个函数：`uploadDocument(file)` / `listDocuments()` / `deleteDocument(id)` / `askKb(req)`（实施时订正：初版这里写了 `onProgress?`，与同节的签名块不一致，且 §5.2 没有百分比 UI —— 按签名块实现，**不带进度回调**）。wire 类型（`KbDocumentVO` / `KbDocumentListVO` / `KbAskRequest` / `KbAnswerVO` / `KbSourceVO` / `KbRetrievalVO` / `KbGenerationVO`）定义在本文件，每个 interface 注明契约出处（对齐 `api/auth.ts` / `api/chat.ts` 的既有风格） |
 | `src/router/index.ts` | **不改** | `/knowledge` 路由已存在且**已受守卫保护**（无 `public`）—— 上传/问答接口不在白名单，缺 token 时守卫会带 `redirect` 跳登录（阶段1 既定行为） |
 | `src/components/AppNav.vue` | **不改** | 「知识库」菜单项已存在（始终显示）；与「对话」不同的是它没有 `v-if="userStore.isLoggedIn"` —— **本轮不动**（收藏夹式直链会被守卫拦到登录页，行为正确） |
-| `src/api/request.ts` | **不改** | 超时在 `api/kb.ts` 的**调用点**逐请求覆盖（§5.1-4），不必改实例默认值 |
+| `src/api/request.ts` | **改**（2026-09-22 实测订正，原写"不改"） | ① 请求拦截器加一条：`if (config.data instanceof FormData) config.headers.delete('Content-Type')` —— 不这么写上传**必 415**（§5.1-2）；② 超时仍在 `api/kb.ts` 的**调用点**逐请求覆盖（§5.1-4），**不动**实例默认值 |
 
 **四个函数的签名与要点**（`api/kb.ts`）：
 
@@ -844,7 +844,7 @@ sequenceDiagram
 export async function uploadDocument(file: File): Promise<KbDocumentVO>
 // service.post('/kb/documents', formData, { timeout: 300_000 })   // ★ 300s：按实测放宽（§5.1-4）
 //  - formData.append('file', file) —— 字段名必须是 file（契约 §3.1），写错就是 40001
-//  - ★ 不要手工设置 Content-Type（见 §5.1-2）
+//  - ★ 必须显式声明 headers: { 'Content-Type': 'multipart/form-data' }（见 §5.1-2；不写就是 415）
 
 export async function listDocuments(): Promise<KbDocumentListVO>   // service.get('/kb/documents')
 
@@ -861,10 +861,23 @@ export async function askKb(req: KbAskRequest): Promise<KbAnswerVO>
    ⇒ **401 不会跳登录页、`Result` 不会被解包、失败文案不会统一**。必须用 `:http-request` 自定义，
    在回调里调 `uploadDocument(file)`，再手工调用 `onSuccess` / `onError`（Element Plus 的类型要求）。
    **判据**：把 localStorage 里的 token 改坏再上传 → 应当跳登录页（而不是只在控制台里看到一个错误）。
-2. **不要把 `Content-Type` 写死成 `multipart/form-data`。** `request.ts` 的实例默认头是 `application/json`，
-   而 axios 1.x 在 `data` 是 `FormData` 时会**主动删掉**请求头、让浏览器自己带上 boundary。
-   手工写死会**丢掉 boundary** ⇒ 后端 `MultipartException` ⇒ `40001`。
-   **待实测确认**：上传一次看是否 200；若返回 `40001` 且后端日志说"缺 boundary"，就是这条。
+2. **`Content-Type` 必须让请求头带上 boundary，而 axios 的实例默认头会把它做坏（2026-09-22 实测订正）。**
+   `request.ts` 的实例默认头是 `application/json`，于是 axios 的 `transformRequest`
+   （`lib/defaults/index.js`：`hasJSONContentType ? JSON.stringify(formDataToJSON(data)) : data`）
+   会把 `FormData` **JSON 序列化**成 11 字节的 `{"file":{}}` —— **文件字节根本没发出**；
+   适配器拿到 body 时 `data` 已经不是 `FormData` 了，`lib/helpers/resolveConfig.js` 里
+   那段"是 `FormData` 就删掉该头"**永不触发** ⇒ 请求头留在 `application/json` ⇒
+   后端在**映射阶段**以 `HttpMediaTypeNotSupportedException` 拒收，用户读到"请使用 application/json"。
+   **正确做法**：上传时显式声明 `headers: { 'Content-Type': 'multipart/form-data' }` ——
+   两个适配器都会把**这个不带 boundary 的值**删掉、由浏览器补 `; boundary=…`，所以这么写是安全的；
+   等价写法是在拦截器里对 `instanceof FormData` 的请求删掉该头（`request.ts` 已加这一条，见 §5 文件表）。
+   **绝不要自己拼 `; boundary=…`**：那个值只有浏览器知道；本版 axios 会连它一起摘掉，
+   所以"没炸"是 axios 兜底、不是写法正确。
+   ★ **本条初版写反了**（写成"不要写死 `multipart/form-data`…手工写死会丢 boundary"，还挂着"待实测确认"）
+   —— 照初版实现就是把 415 原样写回来。订正 4 处：本条、§5 签名块注释、§3.9 探针①的注释、
+   §5 文件表 `request.ts` 由"不改"改为"改"；经过与处置见 §12。
+   **判据**：上传应得 `200`；若得 `40001`（修复前是 `415`）且后端日志出现
+   `multipart 接口收到非 multipart 请求`，就是这条。
 3. **引用片段是"用户上传的外部文本"，必须用插值渲染。**
    `{{ source.content }}`（或 `v-text`），**绝不用 `v-html`** —— PDF/TXT 里出现 `<script>` 或 `<img onerror=...>`
    在 `v-html` 下就是一次 XSS。答案文本同理。
@@ -1300,3 +1313,4 @@ embedding / 答案缓存（同一问题重复问会重复调用上游）、批�
 | 2026-09-22 | **沙箱库重放补丁 + 索引/级联/约束实测；订正 §4.6 第 2 条的理由** | 用一次性沙箱库（`nexus_patch_probe`，真实 `nexus` 库**零写操作**）重放「补丁1 + 补丁2」→ 两条 **exit 0**（新补丁**首次被真正执行**，此前是"没人跑过"的风险）。实测五点：① 本项目的 `ORDER BY 嵌入列 <=> 常量` → **`Index Scan using idx_kb_chunk_embedding_hnsw`**；② `ORDER BY score DESC`（别名）→ **`Sort` + `Seq Scan`**（§4.6 第 1 条成立）；③ **阈值进 `WHERE` → `Index Scan` + `Filter` —— 索引照样可用** ⇒ **§4.6 第 2 条初版"会让索引失效"的理由被实测推翻**，已改为按**语义**（TopK 的定义）选择应用层过滤；④ 删文档 → 分块**级联清零**；⑤ 唯一约束 `uk_kb_chunk_doc_index` 如期拦住重复块。**连带订正 3 处 `EXPLAIN` 判据**（§4.6 / §7.3 / 补丁注释）：**必须先 `SET enable_seqscan = off`**，否则表小时规划器选 Seq Scan 会让判据**假失败**。⚠️ 复现时注意：`wsl … bash -s < 脚本` 会让脚本与 `docker exec -i` 争用同一个 stdin（症状是输出为空、脚本静默半途而废、**沙箱库残留**）—— 落成文件再执行 |
 | 2026-09-22 | **测试段交付：修掉一个阻塞验收的产品缺陷（nginx 1MB 体量墙）** | qa-engineer 交付 6 个单测类（**59 条，59/59 绿**）+ TC-03（**33 条 / 7 组**）+ 两条 qa 脚本（都实跑过）+ 5 件夹具（含**真·无文本层**的 `扫描版.pdf` 与 GBK 夹具）；其只读探针发现**走 8088 上传 >1MB 被 413 挡下**（`nginx.conf` 缺 `client_max_body_size`，nginx 默认 **1m**；**1.68MB 的验收夹具必挂**，而直连 8089 正常、响应体还不是 `Result`）。主会话复核后修：加 `client_max_body_size 12m;` + **重建前端镜像** → 复测 1.68MB 走 8088 得 **`401` + 标准 `Result`** ✅。⇒ **§6.0 / §6.1 / §6.5 三处"本阶段零改动"的表述同步订正**（初版判断错了，且这是"只有走 nginx 才现形"的**第二例**，前一例是阶段2 的 `proxy_buffering`）。另：qa 对共享库 `tc-common.sh` 的改动经复核**向后兼容**（三个 HTTP 动作各加**可选**基地址参数，静态核对全部调用点 + 实跑 `tc01-login-then-me.sh` 退出码 0） |
 | 2026-09-22 | ★ **换 embedding 模型：`nomic-embed-text`(768) → `bge-m3`(1024)** | 起因：**端到端验收有一条判据不成立** —— 问「去年利润是多少」返回 `grounded=true` 但答"未找到"，引用的 5 条与问题无关。devops 用数字排除了四个替代假设（前缀/生成/解析/阈值），定位到**召回不足**：含答案的块在 587 块中**排第 27 名**，而无关块也拿 0.71~0.75 分（阈值标定救不了）。处置见新增的 **§0.3**：改 `EMBED_MODEL`/`EXPECTED_DIMENSION` 两个常量 + 前缀置空（`search_*:` 是 nomic 的模型卡建议，bge-m3 不期望）+ **新增补丁 `202609221100` 重建两表为 `vector(1024)`（清空数据）** + **重灌文档**。连带同步：`docker-compose.yml` 的 `ollama-init` 模型清单、`scripts/lib/probe.sh`、契约 §4.5 的模型就绪判据（**均属"活配置"**，历史记录只标注不改写）。**仍未解决**：混合检索 / rerank / 分块粒度（§10.3，下一次复测若仍不进前 3 就按此顺序上）。另新增 §9 风险 13 记录本事件 |
+| 2026-09-22 | ★ **修掉一个阻塞手动验收的 415：FormData 被 JSON 化，文件字节从未发出** | 手动走查上传报"请求格式不支持，请使用 application/json"。**按纪律派 `backend-engineer` 复现定位**（诊断归角色，主会话不动手）。根因：`request.ts` 实例默认头 `application/json` ⇒ axios `transformRequest` 把 `FormData` JSON 序列化成 **11 字节 `{"file":{}}`**，**文件字节根本没离开浏览器**；"`data` 是 `FormData` 就删头"那段因 `data` 已非 `FormData` **永不触发**。⇒ **本文档 §5.1-2 初版写的正是相反的口径**（"不要写死 `multipart/form-data`…会丢 boundary"），照初版实现就是把 415 写回来 —— 已按实测订正 **4 处**：§5.1-2 正文、§5 签名块注释、§3.9 探针①注释、§5 文件表（`request.ts` 由"不改"改"改"）。**处置**：前端 2 处（`kb.ts` 显式声明 `multipart/form-data`；`request.ts` 拦截器对 `FormData` 删头 —— 实测修前 body=字符串 `{"file":{}}`、修后=真 `FormData`）；后端把 **multipart 接口的 415 收成 `200 + 40001`**（按 `ex.getSupportedMediaTypes()` 判端点；非 multipart 仍是 `415 + 40002`，4 格行为探针全过）⇒ 契约 §7.1 与 openapi 的"415 响应体不是 `Result`"表述同步作废。★ **教训**：凡"库会自动帮我做 X"的设计断言，**必须实测**——本文档唯一挂着"待实测确认"的一条，恰恰就是错的。 |

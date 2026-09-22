@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
@@ -37,6 +38,10 @@ import java.util.List;
  *     <tr><td>{@link UnauthorizedException}</td><td>401</td><td>40100 / 40101 / 40102</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link MethodArgumentNotValidException}</td><td>200</td><td>40001</td><td>warn（打字段级明细，不打堆栈）</td><td>是</td></tr>
  *     <tr><td>{@link HttpMessageNotReadableException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link HttpMediaTypeNotSupportedException}（目标接口 <b>consumes JSON</b>）</td><td><b>415</b></td>
+ *         <td>40002</td><td>warn</td><td>是</td></tr>
+ *     <tr><td>{@link HttpMediaTypeNotSupportedException}（目标接口 <b>consumes multipart</b>，2026-09-22 补）</td>
+ *         <td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link MaxUploadSizeExceededException}</td><td>200</td><td>40003</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link MultipartException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
  *     <tr><td>{@link MissingServletRequestPartException}</td><td>200</td><td>40001</td><td>warn</td><td>是</td></tr>
@@ -72,6 +77,12 @@ import java.util.List;
  * 事前处置</b>：阶段2 的 {@code HttpMediaTypeNotSupportedException} 曾经落进兜底、把客户端的请求
  * 拼写问题报成 500「系统繁忙」，把排查方向整个带偏（{@code docs/api/README.md} §1.2 有完整记载）。
  * 与其等上传接口上线后再被实测暴露一次，不如把这一族一次性收口。
+ *
+ * <p>第五格是 2026-09-22 由<b>上线后的实测</b>补的：上传接口"带错 / 缺 {@code Content-Type}"这一格
+ * <b>不在上面那四个出口里</b> —— 它由映射阶段的 {@code consumes} 条件抛
+ * {@code HttpMediaTypeNotSupportedException}（不是 {@code MultipartException}），若沿用阶段2 那条
+ * 415 出口，用户会读到"请使用 application/json"这条<b>反向误导</b>的文案（他真正该做的是让浏览器
+ * 带上 boundary）。故 {@link #handleHttpMediaTypeNotSupported} 里按"该接口消费什么媒体类型"分流。
  *
  * @author nexus
  */
@@ -177,7 +188,7 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 请求的媒体类型不受支持（阶段2 新增）：缺 {@code Content-Type} 或不是 {@code application/json}。
+     * 请求的媒体类型不受支持（阶段2 新增；2026-09-22 起按目标接口的 {@code consumes} 分两格）。
      *
      * <p><b>为什么必须单开一条（这是实测出来的缺陷）</b>：没有它时，{@code HttpMediaTypeNotSupportedException}
      * 会落进 {@link #handleException} 兜底 → 客户端<b>忘带头</b>被报成 <b>500 + 50000「系统繁忙」</b>。
@@ -189,15 +200,52 @@ public class GlobalExceptionHandler {
      * 与 401/404 同类；{@link ResultCode#PARAM_INVALID} 那条配套 200 的理由（业务失败不污染
      * 前端的失败分支）在这里不成立 —— 请求根本没被解析成业务入参。
      *
+     * <p><b>2026-09-22 分流（第二格）：目标接口消费 multipart 时走 200 + 40001</b>。上传接口
+     * {@code POST /api/kb/documents}（{@code consumes = multipart/form-data}）收到非 multipart 请求时，
+     * {@code @RequestMapping} 的 {@code consumes} 条件在<b>映射阶段</b>就把请求挡下并抛本异常 ——
+     * 它到不了 {@code MultipartException}、也到不了参数绑定，所以上面那四个"请求形状"出口一个都不命中。
+     * 若沿用 415 + {@link ResultCode#UNSUPPORTED_MEDIA_TYPE}，返回的文案"请使用 <b>application/json</b>"
+     * 是<b>反向误导</b>（用户会去改 JSON 头，而正确动作是让浏览器带上 boundary）；契约把这一格写死为
+     * <b>200 + 40001</b>（{@code docs/api/README.md} §7.7 第 2 行与 §7.8 的备注；机器可读版
+     * {@code docs/api/openapi.yaml} 的上传 operation <b>只声明 200/401/503</b>，没有 415）。
+     *
      * @param ex 媒体类型不支持异常
-     * @return HTTP 415 + 40002
+     * @return 目标接口消费 multipart 时 200 + 40001；否则 415 + 40002
      */
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     public ResponseEntity<Result<Void>> handleHttpMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
-        // 只记"收到的是什么"，不记 content-type 明细：这条日志的价值在于定位"哪个调用方忘了带头"
+        if (isMultipartEndpoint(ex)) {
+            // 只记"收到的是什么"，不记 content-type 明细：这条日志的价值在于定位"哪个调用方的头没带对"
+            log.warn("multipart 接口收到非 multipart 请求（缺 Content-Type 或带错了头）：contentType={}",
+                    ex.getContentType());
+            return ResponseEntity.ok(Result.failure(ResultCode.PARAM_INVALID));
+        }
         log.warn("请求媒体类型不受支持：contentType={}", ex.getContentType());
         return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
                 .body(Result.failure(ResultCode.UNSUPPORTED_MEDIA_TYPE));
+    }
+
+    /**
+     * 判断抛出 415 的那个映射是否在消费 {@code multipart/form-data}（决定 415 出口走哪一格）。
+     *
+     * <p><b>判据取自异常自带的 {@code supportedMediaTypes}</b>，不依赖 URL 白名单：spring-webmvc 6.1 的
+     * {@code RequestMappingInfoHandlerMapping.handleNoMatch} 是用
+     * {@code new ArrayList<>(PartialMatchHelper.getConsumableMediaTypes())} 构造这个列表的
+     * （即"部分匹配的那个映射的 {@code consumes} 值"）。
+     *
+     * <p>为什么这条判据不会误伤 JSON 接口：{@code @RequestBody} 解析阶段抛出的同类异常，其列表来自
+     * {@code HttpMessageConverter} 的支持类型，<b>不可能</b>含 {@code multipart/form-data}。
+     *
+     * @param ex 媒体类型不支持异常
+     * @return 目标接口消费 multipart 时为 {@code true}
+     */
+    private static boolean isMultipartEndpoint(HttpMediaTypeNotSupportedException ex) {
+        for (MediaType supported : ex.getSupportedMediaTypes()) {
+            if (supported.isCompatibleWith(MediaType.MULTIPART_FORM_DATA)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -232,8 +280,15 @@ public class GlobalExceptionHandler {
      *
      * <p>出口 <b>200 + 40001</b>，刻意<b>不</b>复用 {@link ResultCode#UNSUPPORTED_MEDIA_TYPE}（415）：
      * 那个码的文案写死是"请使用 <b>application/json</b>"，贴到上传接口上是<b>反向误导</b>
-     * ——用户会去改 JSON 头，而真正要做的是"别手工设置 Content-Type、让浏览器带上 boundary"。
-     * 所以 multipart 这一类的失败一律走 40001，靠本条日志说清是哪一种（设计 §3.8 的备注）。
+     * ——用户会去改 JSON 头，而真正要做的是让上传请求带上<b>带 boundary 的 {@code multipart/form-data}</b>
+     * （实现口径见契约 §7.1 约定 2）。所以 multipart 这一类的失败一律走 40001，靠本条日志说清是哪一种
+     * （设计 §3.8 的备注）。
+     *
+     * <p><b>与 415 出口的分工（2026-09-22 补）</b>：本出口只在"请求确实进了 multipart 解析"时才命中。
+     * 若请求<b>压根不是</b> multipart（缺头 / 带错头），Spring 在<b>映射阶段</b>就按 {@code consumes}
+     * 条件把它挡下并抛 {@link HttpMediaTypeNotSupportedException} —— 那一路<b>到不了这里</b>，
+     * 由 {@link #handleHttpMediaTypeNotSupported} 的分流分支同样回 200 + 40001
+     * （详见该方法的注释：为什么不能沿用 415 + 40002）。
      *
      * <p>warn 级、不打堆栈：与其它客户端缺陷出口一致 —— 请求都没拼对，不是服务端故障。
      *

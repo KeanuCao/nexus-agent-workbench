@@ -145,6 +145,26 @@ service.interceptors.request.use(
     if (userStore.token) {
       config.headers.Authorization = `${userStore.tokenType} ${userStore.token}`
     }
+
+    // FormData 请求一律摘掉 Content-Type（2026-09-22 上传 415 / code 40002 事故的通用防线）。
+    //
+    // **为什么需要它**：上面的实例默认头是 `application/json`，而 axios 的 `transformRequest`
+    // 一见请求头含 `application/json` 就把 FormData 转成 JSON 字符串
+    // （`axios/lib/defaults/index.js:57`：`hasJSONContentType ? JSON.stringify(formDataToJSON(data)) : data`）
+    // ⇒ 发出去的是 `{"file":{}}`、**文件字节一个都没发**，且 data 到适配器时已不是 FormData，
+    // 适配器"摘头交给浏览器"的逻辑（`helpers/resolveConfig.js:65-73`）永不触发 ⇒ 后端收到
+    // `application/json` ⇒ 415。摘掉该头后：transform 阶段原样保留 FormData，boundary 由浏览器补。
+    //
+    // **影响面**：仅 `data` 是 FormData 的请求（目前全项目只有 `api/kb.ts` 的上传）。
+    // login / health / ask / logout / delete 的 data 是普通对象或 undefined，**一律不进这个分支**。
+    //
+    // **中间态说明**（排查时别被它误导）：摘掉后 `dispatchRequest` 的兜底
+    // （`lib/core/dispatchRequest.js:48-50`）会把该头临时置成 `application/x-www-form-urlencoded`；
+    // 适配器入口的 `resolveConfig` 见到 FormData 后同样会把它摘掉，因此最终发出去的仍是
+    // 浏览器生成的 `multipart/form-data; boundary=…`（本机 axios 1.20.0 已实测整条链路）。
+    if (config.data instanceof FormData) {
+      config.headers.delete('Content-Type')
+    }
     return config
   },
   (error: AxiosError) => Promise.reject(error)

@@ -25,9 +25,13 @@ import java.io.IOException;
  *
  * <p>路径约定：不在类上挂 {@code @RequestMapping}，完整路径与 {@code produces}/{@code consumes}
  * 都写在方法注解上（CLAUDE.md 宪法要求显式声明接口契约，与 {@code HealthController} /
- * {@code ChatController} 同一风格）。★ 上传接口的 {@code consumes = multipart/form-data}
- * 是<b>契约的一部分</b>：前端手工把它写死成 {@code multipart/form-data} 会丢掉 boundary
- * （见设计 §5.1-2），而这里声明它只影响"服务端接受什么"。
+ * {@code ChatController} 同一风格）。★ 这里声明 {@code consumes = multipart/form-data} 只影响
+ * "服务端接受什么"；前端侧<b>必须</b>让请求头是<b>带 boundary 的</b> {@code multipart/form-data}
+ * —— 显式声明 {@code 'Content-Type': 'multipart/form-data'} 即可（axios 的浏览器适配器会把这个头删掉、
+ * 由浏览器补 boundary；实测口径见契约 §7.1 约定 2）。⚠️ 请求头不对时本接口在<b>映射阶段</b>就被
+ * {@code consumes} 条件挡下（{@code HttpMediaTypeNotSupportedException}，到不了
+ * {@code MultipartException}），由 {@code GlobalExceptionHandler} 按"该接口是否消费 multipart"
+ * 分流成 <b>200 + 40001</b>（契约 §7.7 第 2 行）。
  *
  * <h2>三层失败出口（谁在哪里处置）</h2>
  * <table border="1">
@@ -35,7 +39,8 @@ import java.io.IOException;
  *     <tr><th>失败</th><th>载体</th><th>HTTP</th><th>code</th></tr>
  *     <tr><td>没带 token / token 失效</td><td>过滤器直接写 {@code Result}</td><td>401</td><td>40100/40101/40102</td></tr>
  *     <tr><td>请求不是 multipart、缺 {@code file} 字段、文件超 10MB</td>
- *         <td>全局异常处理器的四个新出口</td><td>200</td><td>40001 / 40003</td></tr>
+ *         <td>全局异常处理器的出口（含 415 出口里按 multipart 分流的那一格，2026-09-22 补）</td>
+ *         <td>200</td><td>40001 / 40003</td></tr>
  *     <tr><td>文件为空（0 字节）</td><td>本类预检</td><td>200</td><td>40001</td></tr>
  *     <tr><td>类型不支持 / 解析不出文本 / 分块超限</td><td>服务层</td><td>200</td><td>10201 / 10203 / 10204</td></tr>
  *     <tr><td>向量化时上游不可用</td><td>服务层（事务回滚）</td><td><b>503</b></td><td>20100</td></tr>
