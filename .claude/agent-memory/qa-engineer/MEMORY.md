@@ -6,3 +6,5 @@
 - [重建容器会打断 nginx 上游](recreate-breaks-nginx-upstream.md) — `--force-recreate` 换 IP ⇒ 8088 变 502，跑前/还原后都要验链路
 - [桩要复刻契约语义](stub-faithfulness.md) — 桩少一条判定就等于开后门（logout 未过过滤器那次的教训）；干跑输出要逐行读
 - [TC 增删的记录纪律](tc-edit-record-discipline.md) — 删用例必须登记（附录写"评估过"、编号留空号不重排）；「手工形态跑过」≠「脚本形态跑过」
+- [本地自编自跑单测的路线](local-test-compile-route.md) — 宿主无 mvn：JDK17 + `.tmp` 的 jar 缓存 + javac argfile（`-encoding UTF-8` 必加）+ junit console standalone；59 条 4 秒跑完
+- [8088 的 1MB 体量墙](nginx-1mb-body-wall.md) — 走 nginx 上传 >1MB 被 413 挡（实测），验收夹具 1.6MB 受影响；只读探针写法 + 修好后删这条
