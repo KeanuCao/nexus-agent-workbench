@@ -17,7 +17,7 @@ if [ ! -f "$JAR" ]; then
     echo "    docker compose up -d builder" >&2
     echo "    docker compose exec builder git-sync        # 拉取【已 push】的代码" >&2
     echo "    docker compose exec builder build-backend   # 产出 /artifacts/backend/app.jar" >&2
-    echo "  或者直接跑一键脚本：./scripts/up.sh" >&2
+    echo "  或者直接跑一键脚本：./scripts/sh/up.sh" >&2
     exit 1
 fi
 

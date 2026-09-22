@@ -6,7 +6,7 @@
 #   一次部署 ≤ 1 分钟（缓存热时）、交互 ≤ 3 次、部署期间不派活、失败即停等人。
 #
 # 执行位置：**WSL 发行版内**（docker 在其中；脚本直接调 docker，不经双层 shell）
-#   wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/.claude/skills/deploy/deploy.py
+#   wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/scripts/py/deploy.py
 #
 # 八步（对应用户给的清单）：
 #   1 前置（docker/compose/builder 可用）
@@ -38,8 +38,23 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# ── 路径（脚本位置即真源：<repo>/.claude/skills/deploy/deploy.py）─────────────
-REPO = Path(__file__).resolve().parents[3]
+# ── 路径（按仓库标记上溯定位，不写死层级）─────────────────────────────────────
+def _find_repo_root(start: Path) -> Path:
+    """
+    从脚本位置逐级上溯，找含 `docker-compose/docker-compose.yml` 的那一层作为仓库根。
+
+    为什么不写死 `Path(__file__).resolve().parents[N]`：2026-09-23 本脚本从
+    `.claude/skills/deploy/` 迁到 `scripts/py/`，层级一变 parents[N] 就**静默指错**
+    —— 脚本照跑，只是 REPO/compose/env 全指到别处，故障形态是"判据莫名其妙"而不是报错。
+    改成按标记上溯后，再搬目录也不必改这里；真找不到标记则当场退出去（响亮失败）。
+    """
+    for d in (start, *start.parents):
+        if (d / "docker-compose" / "docker-compose.yml").is_file():
+            return d
+    raise SystemExit(f"[deploy] 致命：从 {start} 上溯未见 docker-compose/docker-compose.yml，无法定位仓库根")
+
+
+REPO = _find_repo_root(Path(__file__).resolve().parent)
 COMPOSE_DIR = REPO / "docker-compose"
 ENV_FILE = COMPOSE_DIR / ".env"
 ENV_LOCAL = COMPOSE_DIR / ".env.local"

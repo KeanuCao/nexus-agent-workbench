@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/lib/probe.sh —— 共享探针库（check-env.sh / up.sh / 后续 check-health.sh 共用）
+# scripts/sh/lib/probe.sh —— 共享探针库（check-env.sh / up.sh / 后续 check-health.sh 共用）
 #
 # 为什么单独抽一个库（面试可讲的取舍）：
 #   "依赖是否就绪"的判据如果在多个脚本里各写一份，迟早漂移 —— 典型事故是 up.sh 的轮询
@@ -46,12 +46,25 @@
 #   却会把"已评审的文件"重新变成未评审状态。语义差异已在上表逐条说明，评审可直接对照。
 # =============================================================================
 
-# ── 路径：本文件位于 <repo>/scripts/lib/probe.sh ──────────────────────────────
+# ── 路径：本文件位于 <repo>/scripts/sh/lib/probe.sh ───────────────────────────
+# ⚠️ 下行的上溯层数是**位置敏感**的：lib/ → sh/ → scripts/ → <repo>，三段。
+#    2026-09-23 本文件从 scripts/lib/ 迁到 scripts/sh/lib/ 时这里就跟着改过（上一版是 `../..`）——
+#    搬动目录时**必须**一并复核这一行，否则三个消费脚本会拿错 NEXUS_COMPOSE_DIR，
+#    表现为"判据莫名其妙"而不是报错（本项目最贵的故障形态）。
 NEXUS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NEXUS_REPO_ROOT="$(cd "${NEXUS_LIB_DIR}/../.." && pwd)"
+NEXUS_REPO_ROOT="$(cd "${NEXUS_LIB_DIR}/../../.." && pwd)"
 NEXUS_COMPOSE_DIR="${NEXUS_REPO_ROOT}/docker-compose"
 NEXUS_ENV_FILE="${NEXUS_COMPOSE_DIR}/.env"
 NEXUS_COMPOSE_FILE="${NEXUS_COMPOSE_DIR}/docker-compose.yml"
+
+# 定位自检：上溯层数写错时**当场死掉**，而不是带着错的仓库根往下跑。
+# 为什么用 exit 而不是 return：三个消费脚本**刻意都没开 set -e**（各自头部写了理由），
+#   `return 1` 会被它们当成"寻源失败"继续往下执行 —— 错根静默传播正是要防的事。
+if [ ! -f "${NEXUS_COMPOSE_FILE}" ]; then
+    printf '[probe] 致命：仓库根定位错 —— 从 %s 上溯算出 %s，那里没有 docker-compose/docker-compose.yml\n' \
+        "${NEXUS_LIB_DIR}" "${NEXUS_REPO_ROOT}" >&2
+    exit 1
+fi
 
 # 探活目标地址一律用 127.0.0.1 而非 localhost：
 #   WSL 内 localhost 可能同时解析出 ::1 与 127.0.0.1，而 docker 的端口发布默认只监听 IPv4

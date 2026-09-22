@@ -33,7 +33,7 @@ trigger: |
 ## 执行
 
 ```bash
-MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/.claude/skills/deploy/deploy.py
+MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/scripts/py/deploy.py
 ```
 
 ★ **`MSYS_NO_PATHCONV=1` 不能省**：Git Bash 会把 `/mnt/c/...` 改写成 `C:/Program Files/Git/mnt/c/...`

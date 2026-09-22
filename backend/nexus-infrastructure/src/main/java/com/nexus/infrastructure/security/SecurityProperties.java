@@ -21,7 +21,7 @@ public class SecurityProperties {
      * <p><b>默认值即"必须免鉴权"的三条，每一条都有明确理由</b>（设计 §6.4）：
      * <ul>
      *     <li>{@code /api/auth/login}：登录本身当然不能要求先登录；</li>
-     *     <li>{@code /api/health}：容器与 scripts/up.sh、check-env.sh、check-health.sh 的探活口
+     *     <li>{@code /api/health}：容器与 scripts/sh/up.sh、check-env.sh、check-health.sh 的探活口
      *         —— 给它加鉴权会让 0.3 已验收的三个脚本全线 FAIL；</li>
      *     <li>{@code /actuator/**}：docker-compose healthcheck 的探活口。</li>
      * </ul>

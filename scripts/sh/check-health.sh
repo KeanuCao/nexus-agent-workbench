@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/check-health.sh —— 运行期巡检（环境**起来之后**执行；失败**仅报告、绝不中止任何流程**）
+# scripts/sh/check-health.sh —— 运行期巡检（环境**起来之后**执行；失败**仅报告、绝不中止任何流程**）
 #
 # 执行位置：WSL 发行版 nexus-agent-workbench 内
-#   cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-health.sh
+#   cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-health.sh
 # Windows 侧一键触发：
-#   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/check-health.sh"
+#   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/check-health.sh"
 #
 # ┌───────────────────────────────────────────────────────────────────────────┐
 # │ 语义分野：本脚本与 check-env.sh **相反**，所以必须是两个独立脚本             │
@@ -18,7 +18,7 @@
 # │  ⇒ **禁止在 up.sh（或任何流程）里把本脚本当门禁调用**：本脚本判 FAIL 就把   │
 # │    流程掐掉，等于把"环境还没起"这种**完全正常的状态**当成错误。             │
 # │  ⇒ 本脚本在"一个容器都没起"时必须**正常跑完**并给全 FAIL 报告 +            │
-# │    "若尚未启动，请先执行 ./scripts/up.sh" 的提示，而不是报环境错误退出。    │
+# │    "若尚未启动，请先执行 ./scripts/sh/up.sh" 的提示，而不是报环境错误退出。    │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
 # 退出码契约（**与 check-env.sh 相反**，别互相套用）：
@@ -59,7 +59,7 @@
 #   · 不提示修改 /etc/docker/daemon.json（镜像加速走 Dockerfile/compose 前缀）
 #   · 本脚本**只读**：不 start/stop/restart 任何容器、不写文件、不改 .env
 #
-# 探针函数全部来自 scripts/lib/probe.sh（本文件不写内联的 curl/docker 探活命令，
+# 探针函数全部来自 scripts/sh/lib/probe.sh（本文件不写内联的 curl/docker 探活命令，
 # 也不写端口/模型名字面量 —— 判据治一处，评审时按此检查）。
 # =============================================================================
 
@@ -75,7 +75,7 @@ nexus_load_env
 
 usage() {
     cat <<'USAGE'
-用法: ./scripts/check-health.sh [--help]
+用法: ./scripts/sh/check-health.sh [--help]
 
 运行期巡检：环境**起来之后**执行，输出"此刻快照"式的健康报告。
 本脚本是**报告**，不是门禁 —— 失败只打印，不中止任何流程。
@@ -89,7 +89,7 @@ usage() {
   check-env.sh    启动前置门禁：环境起来之前跑，每条 FAIL 必须在"零容器"的机器上可复现，
                   FAIL ⇒ 中止 up.sh
   check-health.sh 运行期报告：环境起来之后跑，"一个容器都没起"属**正常场景**，
-                  本脚本照常跑完并提示先执行 ./scripts/up.sh
+                  本脚本照常跑完并提示先执行 ./scripts/sh/up.sh
   ⇒ **不要在 up.sh 里调用本脚本当门禁**（会把"环境还没起"误判成错误而掐断流程）
 
 检查对象:
@@ -102,8 +102,8 @@ usage() {
 警告: 不要照 docs/drafts/环境检查脚本.md 抄 —— 该草稿有 8 处判据已核实有误。
 
 示例:
-  ./scripts/check-health.sh            # 跑一次巡检
-  ./scripts/check-health.sh --help     # 看本说明
+  ./scripts/sh/check-health.sh            # 跑一次巡检
+  ./scripts/sh/check-health.sh --help     # 看本说明
 USAGE
 }
 
@@ -308,7 +308,7 @@ else
                     *)        _hint "未知依赖 ${d}：docker logs --tail 50 nexus-${d}" ;;
                 esac
             done
-            _hint "依赖恢复后本脚本可直接重跑（只读、幂等）；要整体重建再跑 ./scripts/up.sh" ;;
+            _hint "依赖恢复后本脚本可直接重跑（只读、幂等）；要整体重建再跑 ./scripts/sh/up.sh" ;;
         NO_RESPONSE)
             _fail "GET http://${NEXUS_PROBE_HOST}:${NEXUS_BACKEND_PORT}/api/health → 无响应（curl 连不上）"
             _hint "含义：后端进程没起，或端口不对 —— 不适用“503 = 依赖挂了”的处置，两者完全不同"
@@ -564,7 +564,7 @@ if [ "$RUNNING_N" -eq 0 ]; then
     else
         printf '%s\n' " 本轮看到 **0 个本项目容器在运行**。"
         printf '%s\n' " 若这是一台尚未启动的机器：这是**正常状态**（不是环境坏了），请先执行"
-        printf '%s\n' "       ./scripts/up.sh"
+        printf '%s\n' "       ./scripts/sh/up.sh"
         printf '%s\n' " 若你刚跑过 up.sh：说明拉起失败，按上面的 [FAIL] 项逐个查；容器清单用"
         printf '%s\n' "       cd ${NEXUS_COMPOSE_DIR} && docker compose ps -a     # 必须带 -a：一次性容器已退出，默认不显示"
     fi
@@ -583,7 +583,7 @@ else
     printf '\n 结论：有 %d 项未通过，见上面的 [FAIL] 行\n' "$FAIL_N"
 fi
 printf '%s\n' " 退出码契约：0 = 无 FAIL；1 = 存在 FAIL（**只表达报告结论**，任何流程都不得据此中止）"
-printf '%s\n' " 本脚本是运行期报告，不是启动门禁；环境未起时请先跑 ./scripts/up.sh"
+printf '%s\n' " 本脚本是运行期报告，不是启动门禁；环境未起时请先跑 ./scripts/sh/up.sh"
 printf '%s\n' "=============================================================================="
 
 [ "$FAIL_N" -eq 0 ] || exit 1

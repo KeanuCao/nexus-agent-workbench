@@ -30,5 +30,5 @@ metadata:
 
 **0.3.3 交付时的两个决策（2026-09-12，别被后人"顺手改回去"）：**
 
-- **probe.sh 保留 `nexus_` 前缀，不做改名对齐** 0.3.5 规格名（`probe_container_state` / `probe_ollama_init_exit` / `probe_api_health` / `probe_actuator_health` / `probe_models_ready` / `probe_port_of`）。理由：改名要同步改 up.sh / check-env.sh 两处**已交付**脚本，行为收益为零；且 `nexus_oneshot_state` / `nexus_probe_models` 返回的信息比规格名暗示的**多**（"没跑过/正在跑/已退出"三态、缺失模型清单），布尔/单值返回装不下。规格名 ↔ 实际名的对照表写在 `scripts/lib/probe.sh` 头注释里，评审可直接对照。
+- **probe.sh 保留 `nexus_` 前缀，不做改名对齐** 0.3.5 规格名（`probe_container_state` / `probe_ollama_init_exit` / `probe_api_health` / `probe_actuator_health` / `probe_models_ready` / `probe_port_of`）。理由：改名要同步改 up.sh / check-env.sh 两处**已交付**脚本，行为收益为零；且 `nexus_oneshot_state` / `nexus_probe_models` 返回的信息比规格名暗示的**多**（"没跑过/正在跑/已退出"三态、缺失模型清单），布尔/单值返回装不下。规格名 ↔ 实际名的对照表写在 `scripts/sh/lib/probe.sh` 头注释里，评审可直接对照。
 - **`nexus_probe_actuator_health` 已实现**（上一轮曾以"容器级判据读 compose healthcheck 即可"为由不实现）。它只在 **L1/L2 结论对不上时**当解释器调用：① 容器 healthy 但 `/api/health` 503；② 容器 unhealthy 却 `/api/health` 全 UP（**只有它能说清是哪个 Boot indicator 挂的，且 diskSpace 只有这里覆盖**）；③ 需要 healthcheck 报错原文对照。正常路径（healthy + UP）不调用，省一次 HTTP。

@@ -15,7 +15,7 @@ color: cyan
 - 当前项目：发行版 `nexus-agent-workbench`；仓库 `C:\wp\nexus-agent-workbench` ↔ WSL `/mnt/c/wp/nexus-agent-workbench`。
 - Windows 侧调用 WSL：`wsl -d nexus-agent-workbench -- bash -c "…"`。
 - 构建产物由 `nexus-builder` 容器产出（容器内 `git pull` → `build-*`，产物落共享卷 `build-artifacts`）。
-- **本 agent 不负责起停环境**：需要环境时先确认已就绪（`./scripts/check-health.sh`），不擅自跑 `up.sh`、不重建镜像。
+- **本 agent 不负责起停环境**：需要环境时先确认已就绪（`./scripts/sh/check-health.sh`），不擅自跑 `up.sh`、不重建镜像。
 
 ## 🔴 红线（绝对不做）
 - ❌ **对业务状态做写操作**（业务库/业务表/业务数据/已发布契约物）—— 见下方《Test Harmlessness》，**资质性红线，不达标即不合格**。

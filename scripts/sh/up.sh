@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/up.sh —— 一键拉起全套环境（设计文档 §4.3 的九步流程）
+# scripts/sh/up.sh —— 一键拉起全套环境（设计文档 §4.3 的九步流程）
 #
 # 执行位置：WSL 发行版 nexus-agent-workbench 内
-#   cd /mnt/c/wp/nexus-agent-workbench && ./scripts/up.sh
+#   cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/up.sh
 # Windows 侧一键触发（写入 README）：
-#   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/up.sh"
+#   wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/up.sh"
 #
 # 九步（顺序即依赖关系，勿随意调整）：
 #   1 前置自检（check-env.sh）—— 任一 FAIL 即中止
@@ -85,7 +85,7 @@ printf ' 仓库根 : %s\n' "$NEXUS_REPO_ROOT"
 printf '%s\n' "=============================================================================="
 
 # ── 1/9 前置自检 ─────────────────────────────────────────────────────────────
-step "1/9" "前置自检（scripts/check-env.sh）"
+step "1/9" "前置自检（scripts/sh/check-env.sh）"
 if bash "${SCRIPT_DIR}/check-env.sh"; then
     ok "前置检查通过（无 FAIL；WARN 不阻断）"
 else
@@ -302,7 +302,7 @@ printf '\n  常用命令（都在 WSL 内、docker-compose 目录下执行）：
 printf '    docker compose ps -a                      # 容器状态（-a 才看得到已退出的一次性容器）\n'
 printf '    docker compose logs -f nexus-backend      # 后端日志\n'
 printf '    docker compose stop / docker compose down # 停止（数据在命名卷，down 不会丢库）\n'
-printf '    ./scripts/check-env.sh                    # 重新体检（含端口/镜像源/模型）\n'
+printf '    ./scripts/sh/check-env.sh                    # 重新体检（含端口/镜像源/模型）\n'
 printf '\n  前端本地开发（Windows 侧）：cd frontend && npm install && npm run dev  → http://localhost:5173\n'
 
 # ── 汇总 ─────────────────────────────────────────────────────────────────────
@@ -312,7 +312,7 @@ if [ "$UP_FAIL_N" -eq 0 ]; then
     exit 0
 else
     printf ' 结论：有 %d 项未通过，见上面的 [FAIL] 行\n' "$UP_FAIL_N"
-    printf '%s\n' " 提示：容器已起来时，单独重跑健康判据用 ./scripts/check-health.sh（运行期巡检，只报告不中止）；"
-    printf '%s\n' "       依赖故障恢复后直接重跑 ./scripts/up.sh 即可（全流程幂等）"
+    printf '%s\n' " 提示：容器已起来时，单独重跑健康判据用 ./scripts/sh/check-health.sh（运行期巡检，只报告不中止）；"
+    printf '%s\n' "       依赖故障恢复后直接重跑 ./scripts/sh/up.sh 即可（全流程幂等）"
     exit 1
 fi

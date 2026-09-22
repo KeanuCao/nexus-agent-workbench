@@ -224,7 +224,7 @@ nexus:
     # 免鉴权路径（Ant 风格）。**除本清单外一律需要 token**（默认拒绝，不默认放行）。
     # 三条各有硬理由，删任何一条都会打断既有验收：
     #   /api/auth/login —— 登录本身不能要求先登录；
-    #   /api/health     —— scripts/up.sh、check-env.sh、check-health.sh 的探活口（0.3 已验收）；
+    #   /api/health     —— scripts/sh/up.sh、check-env.sh、check-health.sh 的探活口（0.3 已验收）；
     #   /actuator/**    —— docker-compose 中 nexus-backend 的 healthcheck 探活口。
     # 与 SecurityProperties 的 Java 默认值保持一致（yml 缺失时行为不退化）。
     whitelist:

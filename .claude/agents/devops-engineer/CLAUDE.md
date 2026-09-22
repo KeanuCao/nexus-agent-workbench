@@ -1,6 +1,6 @@
 ---
 name: devops-engineer
-description: 按需的环境调查与诊断专家（2026-09-23 职责收窄）：日常部署不再经本角色（已收敛为 .claude/skills/deploy/ 一键脚本，由主会话执行），本角色按需启动，做 WSL/Docker 环境的取证式排查，并维护 Docker Compose 编排、db-patch 工作流与构建容器
+description: 按需的环境调查与诊断专家（2026-09-23 职责收窄）：日常部署不再经本角色（已收敛为 scripts/py/deploy.py 一键脚本，由主会话执行），本角色按需启动，做 WSL/Docker 环境的取证式排查，并维护 Docker Compose 编排、db-patch 工作流与构建容器
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
 maxTurns: 100
@@ -18,7 +18,7 @@ color: green
 - **镜像加速规则**：通过 Dockerfile `FROM` 与 compose `image:` 字段直接写 `docker.m.daocloud.io` 前缀（官方镜像走 `docker.m.daocloud.io/library/<镜像>`），**禁止修改 `/etc/docker/daemon.json`**。
 - **db-patch 执行位置**：补丁由 nexus-builder 容器（专门的打包容器，含 git+mvn+npm+postgresql-client）执行迁移，不在后端启动流程中执行。
   > 2026-09-13 起 builder 改为**手工启停的常驻容器**，迁移入口是 `docker compose exec builder db-patch-migrate`（不再是 `run --rm`）。它不再挂载宿主源码 —— 补丁文件来自容器内 git 工作区，故**宿主必须先 push**。
-  > ⚠️ 日常部署里补丁走 `.claude/skills/deploy/` 第 4 步的**只读对账**（宿主 `*.sql` 个数 vs `t_db_patch` 行数，**相等即跳过迁移**）；本命令是**手工补跑**入口。
+  > ⚠️ 日常部署里补丁走部署脚本（`scripts/py/deploy.py`）第 4 步的**只读对账**（宿主 `*.sql` 个数 vs `t_db_patch` 行数，**相等即跳过迁移**）；本命令是**手工补跑**入口。
 
 ## 🧭 角色边界（2026-09-23 收窄）
 
@@ -29,7 +29,7 @@ color: green
   ⚠️ **禁止重复维护**：本 charter **不抄**它的八步与参数，此处只留调用式。
 
 ```bash
-MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/.claude/skills/deploy/deploy.py
+MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/scripts/py/deploy.py
 ```
 
 `MSYS_NO_PATHCONV=1` **不可省**：Git Bash 会把 `/mnt/c/...` 改写成 `C:/Program Files/Git/mnt/c/...`，实测报
@@ -69,7 +69,7 @@ MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent
 ### 3. 环境检查与启动脚本
 - `check-env.sh`：**启动前置门禁** —— 自检 Docker / WSL / 端口占用 / 镜像源（判据必须在零容器时也可复现）
   （2026-09-23 收口：原措辞里的"模型就绪"属**运行期判据**，已移出本脚本，见下条）
-- 运行期判据（容器状态 / 服务连通 / 模型就绪）归 `check-health.sh`（`scripts/check-health.sh`），
+- 运行期判据（容器状态 / 服务连通 / 模型就绪）归 `check-health.sh`（`scripts/sh/check-health.sh`），
   **不要塞进 check-env.sh** —— 见「已知陷阱」#10
 - `up.sh`：一键拉起全套环境
 - 输出 `wsl.abc.md` 记录 WSL 排查经验
@@ -133,9 +133,9 @@ MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent
 ### ── 环境准备与启动（Windows + WSL，Docker 使用国内镜像源）──
 命令在wsl中执行, wsl名称nexus-agent-workbench
 ```
-./scripts/check-env.sh                        # 启动前置门禁：Docker/WSL/端口/镜像源（运行期判据：容器状态/服务连通/模型就绪归 check-health.sh，见陷阱 10）
-./scripts/up.sh                               # 一键启动 docker compose 全套环境
-./scripts/check-health.sh                     # 运行期判据：容器状态 / 服务连通 / 模型就绪（陷阱 10）
+./scripts/sh/check-env.sh                    # 启动前置门禁：Docker/WSL/端口/镜像源（运行期判据：容器状态/服务连通/模型就绪归 check-health.sh，见陷阱 10）
+./scripts/sh/up.sh                           # 一键启动 docker compose 全套环境
+./scripts/sh/check-health.sh                 # 运行期判据：容器状态 / 服务连通 / 模型就绪（陷阱 10）
 docker compose -f docker-compose/docker-compose.yml up -d   # 或手动拉起基础设施
 ```
 
@@ -143,12 +143,14 @@ docker compose -f docker-compose/docker-compose.yml up -d   # 或手动拉起基
 从 Windows 侧调用（上面几种是 WSL 内的相对路径写法，这一条是宿主侧调用 WSL）：
 
 ```
-MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/.claude/skills/deploy/deploy.py
+MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/scripts/py/deploy.py
 ```
 - 参数**只有三个**，默认全不带：`--expect-sha <sha前缀>`（断言拉到的提交，防"没 push/merge 就部署"）、
   `--no-build`（跳过打包，复用上次产物）、`--rebuild`（强制 rebuild 运行镜像）。
 - ⚠️ **`MSYS_NO_PATHCONV=1` 不可省**：少了它 Git Bash 会把 `/mnt/c/...` 改写成 `C:/Program Files/Git/mnt/c/...`，实测报 `No such file or directory`。
 - 八步清单、输出读法、失败处置的**唯一真源是 `.claude/skills/deploy/SKILL.md`**，本 charter 不重复维护。
+- 脚本本体在 **`scripts/py/deploy.py`**（2026-09-23 从 skill 目录搬出：它属生产链路，与 builder / up.sh 同列；
+  skill 目录只留 SKILL.md）。搬动原因是"项目脚本不该住在个人技能目录里"，与流程无关。
 
 ### ── 后端（Maven 多模块）──
 ```
@@ -172,7 +174,7 @@ cd frontend && npm run test:e2e               # 运行前端 E2E 测试
 数据库内置补丁记录表（如 `t_db_patch`，含 patch_id、文件名、执行时间、checksum 等字段）。
 由 builder 容器执行迁移（`PatchCli`，见 `docs/design/00-环境与部署.md` §3）：扫描补丁目录，未执行过的补丁按顺序应用；已执行过的补丁**checksum 一致则静默跳过（退出码 0）**，**checksum 不一致才报错终止**（2026-09-13 订正：旧措辞"再执行必须报错终止"的准确含义是"篡改只能被检出、不能被重放"，不是"重跑迁移就报错"）。
 迁移入口：`docker compose exec builder db-patch-migrate`（builder 已改为手工启停的常驻容器，不再是 `run --rm`）。
-⚠️ 日常部署里补丁走 `.claude/skills/deploy/` 第 4 步的**只读对账**（宿主 `*.sql` 个数 vs `t_db_patch` 行数，**相等即跳过迁移**）；本命令是**手工补跑**入口。
+⚠️ 日常部署里补丁走部署脚本（`scripts/py/deploy.py`）第 4 步的**只读对账**（宿主 `*.sql` 个数 vs `t_db_patch` 行数，**相等即跳过迁移**）；本命令是**手工补跑**入口。
 涉及表结构变更时新增补丁文件，严禁修改已发布的历史补丁。
 
 

@@ -45,7 +45,7 @@
 | 迁移引擎 `PatchCli` | `backend/nexus-infrastructure/.../dbpatch/PatchCli.java` | ✅ 已实现；`javac -Xlint:all` 零告警通过；**待实机跑** |
 | 补丁目录与首条补丁 | `db-patch/202609131000_初始化多租户基础表.sql`、`..1010_初始化用户表.sql` | ✅ 已交付；**待实机执行** |
 | 迁移入口 | builder 镜像内 `/usr/local/bin/db-patch-migrate` | ✅ 已实现；**待实机验证** |
-| 执行入口调用 | `scripts/up.sh` 第 5 步（`compose exec builder db-patch-migrate`） | ✅ 已改写；**待端到端实跑** |
+| 执行入口调用 | `scripts/sh/up.sh` 第 5 步（`compose exec builder db-patch-migrate`） | ✅ 已改写；**待端到端实跑** |
 
 ⚠️ **架构变更（同日）**：`CLAUDE.md` 的 builder 条目被改写为「容器内 git pull + 手工启停 + 产物落共享目录」，
 0.2 的迁移入口随之从 `docker compose run --rm builder …` 改为 `docker compose exec builder …`。
@@ -60,7 +60,7 @@
 > 判据纪律：凡判据涉及**运行时状态**（容器状态、退出码、端口响应、探活结果），一律标注「需实测确认」；未实测的观察不得写成验收标准。
 
 - **输入**：0.1 的 `docker-compose/docker-compose.yml` + `.env`（宿主端口/凭据的唯一来源）；0.4 的 `GET /api/health` 契约；0.2 的 `db-patch-migrate` 命令（**尚未实现**，故 up.sh 中该步按「存在才执行」编写）
-- **输出**：`scripts/check-env.sh`、`scripts/up.sh`、`scripts/check-health.sh`、`scripts/lib/probe.sh`（见 0.3.5）、`wsl.abc.md`、README 一键启动章节
+- **输出**：`scripts/sh/check-env.sh`、`scripts/sh/up.sh`、`scripts/sh/check-health.sh`、`scripts/sh/lib/probe.sh`（见 0.3.5）、`wsl.abc.md`、README 一键启动章节
 - **依赖**：0.1（0.4 提供判据，可并行；0.2 只影响 up.sh 第 4 步何时可用）
 
 #### 📌 0.3 实现与验收现状（2026-09-12 对账）
@@ -70,11 +70,11 @@
 
 | 子任务 | 产物（行数） | 已实现 | 已验证（只读实跑 / 静态复核） | 待验收（完成前不勾选） |
 |---|---|---|---|---|
-| 0.3.1 | `scripts/check-env.sh`（375） | ✅ 2026-09-11 | ✅ `bash -n` 通过；实跑 `PASS 10 / WARN 0 / FAIL 0`，exit 0 | 负路径未逐项触发（设计文档 §7 的验证方式是「逐项触发 PASS/WARN/FAIL 各路径」，实跑只覆盖了全通过路径）；第 4 项双侧探测的实跑输出未留档（见 0.3.1 需实测确认） |
-| 0.3.2 | `scripts/up.sh`（298） | ✅ 2026-09-11 | ⚠️ 仅 `bash -n` 通过，**未实跑** | **九步端到端实跑**（唯一能验它的场景 = 干净机器全流程，含首次约 5GB 模型下载耗时） |
-| 0.3.3 | `scripts/check-health.sh`（585） | ✅ 2026-09-12 | ✅ `bash -n` 通过；实跑 `PASS 19 / WARN 1 / FAIL 0`，exit 0，幂等复跑一致；零容器场景 → 8 项 FAIL + 提示先跑 `up.sh` | `WARN 1`（前端假故障）需在前端容器重建后复跑**归零**；后端 `healthy → unhealthy` 的实际耗时未实测 |
+| 0.3.1 | `scripts/sh/check-env.sh`（375） | ✅ 2026-09-11 | ✅ `bash -n` 通过；实跑 `PASS 10 / WARN 0 / FAIL 0`，exit 0 | 负路径未逐项触发（设计文档 §7 的验证方式是「逐项触发 PASS/WARN/FAIL 各路径」，实跑只覆盖了全通过路径）；第 4 项双侧探测的实跑输出未留档（见 0.3.1 需实测确认） |
+| 0.3.2 | `scripts/sh/up.sh`（298） | ✅ 2026-09-11 | ⚠️ 仅 `bash -n` 通过，**未实跑** | **九步端到端实跑**（唯一能验它的场景 = 干净机器全流程，含首次约 5GB 模型下载耗时） |
+| 0.3.3 | `scripts/sh/check-health.sh`（585） | ✅ 2026-09-12 | ✅ `bash -n` 通过；实跑 `PASS 19 / WARN 1 / FAIL 0`，exit 0，幂等复跑一致；零容器场景 → 8 项 FAIL + 提示先跑 `up.sh` | `WARN 1`（前端假故障）需在前端容器重建后复跑**归零**；后端 `healthy → unhealthy` 的实际耗时未实测 |
 | 0.3.4 | `wsl.abc.md` | ✅ 2026-09-03（与 0.1 同批交付） | ✅ 四段式齐备（环境约定 / 四段式方法论 / 6 条实测记录 / 常见问题预案），已写明「AI 文档可能过期，以日志 + 官方文档交叉验证」 | **README 一键启动章节未做** —— 0.3 里唯一的真·未开工项；另有 1 条待追加记录（Windows 本地 Node v24 vs builder 容器 Node 20 的版本漂移，来源 `docs/agent-log/20260911-frontend骨架.md`） |
-| 0.3.5 | `scripts/lib/probe.sh`（641） | ✅ 2026-09-11，2026-09-12 扩展 | ✅ `bash -n` 通过；已被 0.3.2 / 0.3.3 `source`；静态复核：两个调用方的**判定逻辑**未内联探针命令、未出现宿主端口/模型名字面量（仅人读提示文案里出现容器内端口 8089 / 80，属说明性内容） | 无独立验收项（随调用方一起验收：`up.sh` 的轮询路径待端到端实跑） |
+| 0.3.5 | `scripts/sh/lib/probe.sh`（641） | ✅ 2026-09-11，2026-09-12 扩展 | ✅ `bash -n` 通过；已被 0.3.2 / 0.3.3 `source`；静态复核：两个调用方的**判定逻辑**未内联探针命令、未出现宿主端口/模型名字面量（仅人读提示文案里出现容器内端口 8089 / 80，属说明性内容） | 无独立验收项（随调用方一起验收：`up.sh` 的轮询路径待端到端实跑） |
 
 **本轮修复（2026-09-12，改动均在 `docker-compose/docker-compose.yml`）**：
 
@@ -83,10 +83,10 @@
 | 1 | `nexus-frontend` 恒 `unhealthy`（**假故障**：服务本身正常，宿主 `curl :8088` 与反代 `/api/health` 均 200） | healthcheck 探活地址 `wget -qO- localhost` → `wget -qO- 127.0.0.1`（根因：容器内 `localhost` 解析到 `::1`，而 nginx 监听的是 IPv4） | ⚠️ **尚未生效**：需 `docker compose up -d` 重建前端容器后才可见（重建后复跑 `check-health.sh`，`WARN 1` 应归零） |
 | 2 | `ollama-init` 幂等判断失效（`nomic-embed-text` 每次都被判缺失、重复 pull） | `awk '{print $1}'` → `awk 'NR>1 {sub(/:latest$/,"",$1); print $1}'`（`ollama list` 对未指定 tag 的模型显示 `name:latest`，与不带 tag 的 `model` 变量整行比**必然不等**） | ✅ 已用模拟 `ollama list` 输出跑对照**实证**（修复前判缺失、修复后正确跳过）；容器侧待下次 `up -d` 生效 |
 
-#### 0.3.1 `scripts/check-env.sh` —— 启动前置自检（在环境**起来之前**执行；FAIL 即中止 up.sh）
+#### 0.3.1 `scripts/sh/check-env.sh` —— 启动前置自检（在环境**起来之前**执行；FAIL 即中止 up.sh）
 
 - **输入**：设计文档 §4.2 八项清单
-- **输出**：`scripts/check-env.sh`，逐项输出 `[PASS]/[WARN]/[FAIL]`；存在 FAIL 时退出码非 0
+- **输出**：`scripts/sh/check-env.sh`，逐项输出 `[PASS]/[WARN]/[FAIL]`；存在 FAIL 时退出码非 0
 - **依赖**：0.1
 - **验收标准**（判据已逐条对照仓库订正）：
   1. Docker daemon：`docker version` 退出码 0；失败时给出 `sudo service docker start` 排查路径
@@ -101,10 +101,10 @@
   - 2026-09-12 部分核实：`powershell.exe` 在 WSL 内**可用**（`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/`），实跑第 4 项给出 PASS。
   - ⚠️ 但**未能据 PASS 判定「双侧都查过」**：脚本对「双侧已查且无冲突」与「仅 WSL 侧已查（`powershell.exe` 不可用）」给的是**两条不同的 PASS 文案**，WARN 0 无法区分二者 —— 需留档当次输出原文才能闭合本条。
 
-#### 0.3.2 `scripts/up.sh` —— 一键拉起（设计文档 §4.3 九步）
+#### 0.3.2 `scripts/sh/up.sh` —— 一键拉起（设计文档 §4.3 九步）
 
 - **输入**：0.3.1；0.3.5 的探针函数；0.1 的 compose；0.2 的迁移命令（条件可用）
-- **输出**：`scripts/up.sh`
+- **输出**：`scripts/sh/up.sh`
 - **依赖**：0.3.1、0.3.5、0.1
 - **验收标准**：
   - 九步流程按 §4.3 顺序落地；第 1 步调用 `check-env.sh`，任一 FAIL 即中止
@@ -121,17 +121,17 @@
   - `nexus-builder` **不纳入**运行期检查清单（`profiles` 隔离、运行期不常驻）
 - **需实测确认**：全流程在干净环境的耗时与各终态（首次约 5GB 模型下载）；`nexus-ollama-init` 退出码的读取方式
 
-#### 0.3.3 `scripts/check-health.sh` —— 运行期巡检（环境**起来之后**执行；失败**仅报告、不中止任何流程**）
+#### 0.3.3 `scripts/sh/check-health.sh` —— 运行期巡检（环境**起来之后**执行；失败**仅报告、不中止任何流程**）
 
 > **决策记录（2026-09-11 已定，选 (a)：新增独立脚本）**：草稿把「运行期容器巡检」写成了 `check-env.sh` 的一部分，而 `check-env.sh` 是**启动前置门禁**（FAIL 即中止 up.sh），运行期轮询属 §4.3 的 step 7~9。**两者语义相反** —— 混进一个脚本，会让「容器还没起」这个**完全正常的场景**被前置门禁判 FAIL（与草稿中「模型就绪判 FAIL」同源，已在 0.3.1 第 8 项订正为 WARN）。更硬的分离理由是**退出码契约不同**：一个是门禁（FAIL = 中止流程），一个是报告（FAIL = 仅打印）。故拆为独立脚本，不做 `--runtime` 模式。
 > 备查：(b) 方案「给 `check-env.sh` 加 `--runtime` 模式」被否决 —— 单脚本承担两种相反语义，参数分支使测试路径翻倍，且默认无参数时必须保持前置语义，否则 up.sh 第 1 步的调用会被污染。
 > 说明：决策同时新增 0.3.5（探针共享函数）。0.3 细化到 5 个原子任务不受「阶段内 ≤5 个子任务」限制 —— 那条约束作用于 `0.1`~`0.4` 这一层（本层仍是 4 个）。
 
 - **输入**：0.3.5 的探针函数（容器状态 / HTTP 探活 / 模型就绪）；`docker-compose/.env`（宿主端口唯一真源）；判据一律来自 `docs/api/README.md` §4（**不是** §2.x —— §2.x 描述接口本身，§4 才把判定规则逐条转成可执行判据）
-- **输出**：`scripts/check-health.sh`；逐项 `[PASS]/[WARN]/[FAIL]` 清单 + 末尾汇总 + 失败项的下一步指引
+- **输出**：`scripts/sh/check-health.sh`；逐项 `[PASS]/[WARN]/[FAIL]` 清单 + 末尾汇总 + 失败项的下一步指引
 - **依赖**：0.3.5、0.1（**不依赖 0.3.2**：任何时刻均可独立重跑。up.sh 第 7~8 步是「等到就绪」的轮询，本脚本是「此刻快照」的报告，两者判据同源、行为不同，因此不能合并）
 - **验收标准**：
-  1. **语义分野写进脚本头部注释与 `--help`**：本脚本是**运行期报告**，不是门禁。**禁止在 up.sh 中把它当门禁调用**；脚本必须能在「容器一个都没起」时正常跑完并输出报告（全 FAIL + 提示「若尚未启动，请先执行 `./scripts/up.sh`」），而不是报环境错误或直接退出
+  1. **语义分野写进脚本头部注释与 `--help`**：本脚本是**运行期报告**，不是门禁。**禁止在 up.sh 中把它当门禁调用**；脚本必须能在「容器一个都没起」时正常跑完并输出报告（全 FAIL + 提示「若尚未启动，请先执行 `./scripts/sh/up.sh`」），而不是报环境错误或直接退出
   2. **退出码契约（与 0.3.1 相反）**：全部通过（含 WARN）→ 0；存在 FAIL → 非 0。该退出码**只表达报告结论**，任何调用方都不得据此中止流程；`check-env.sh` 的「FAIL 即中止」语义**不得**出现在本脚本中
   3. **只读、幂等**：只做探测，不 start / stop / restart 任何容器、不写文件、不改 `.env`；连续两次运行结论一致（依赖抖动除外）
   4. **检查对象 = 5 个常驻容器 + 1 个一次性容器**：
@@ -157,18 +157,18 @@
 - **依赖**：无（可与 0.3.1 / 0.3.2 并行）
 - **验收标准**：
   - `wsl.abc.md` 四段式齐备：环境约定 / 排查方法论（每条固定「现象 → 日志证据 → 官方文档出处 → 结论」）/ 踩坑记录表 / 常见问题预案；明确「AI 文档可能过期，一律以日志 + 官方文档交叉验证，不照抄」
-  - README 含 Windows 侧一键触发命令（`wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/up.sh"`）与前后端启动命令（`mvn clean install -DskipTests && java -jar nexus-start/target/*.jar`、`npm install && npm run dev`）
+  - README 含 Windows 侧一键触发命令（`wsl -d nexus-agent-workbench -- bash -c "cd /mnt/c/wp/nexus-agent-workbench && ./scripts/sh/up.sh"`）与前后端启动命令（`mvn clean install -DskipTests && java -jar nexus-start/target/*.jar`、`npm install && npm run dev`）
 - **状态（2026-09-12 对账）**：**拆两半看** ——
   - `wsl.abc.md`：✅ **已交付**（2026-09-03，与 0.1 同批，见 `docs/agent-log/20260903-step10-wrapup.md`），四段式齐备、6 条实测踩坑记录、已写明「AI 文档可能过期，一律以日志 + 官方文档交叉验证」；
   - `README.md` 一键启动章节：❌ **未开工**（仓库根目录无 `README.md`）—— 这是 0.3 里唯一仍有未开工内容的子任务。
   - 另有 1 条待追加进 `wsl.abc.md` 的记录（闸门：`wsl.abc.md` 的验收要求是「随实践持续追加」）：Windows 本地 **Node v24** vs builder 容器 **Node 20** 的版本漂移（与设计文档 §5.2「两者同大版本」的意图相悖，来源 `docs/agent-log/20260911-frontend骨架.md`）。
 
-#### 0.3.5 `scripts/lib/probe.sh` —— 探针共享函数（0.3.2 与 0.3.3 的共同依赖）
+#### 0.3.5 `scripts/sh/lib/probe.sh` —— 探针共享函数（0.3.2 与 0.3.3 的共同依赖）
 
 - **定位**：把「容器状态 / HTTP 探活 / 模型就绪」三类探针与判据常量（期望模型名、单次超时、端口读取方式）收敛到**一处**，供 `up.sh`（轮询）与 `check-health.sh`（快照）共同 `source`。
   **Why**：两处各写一份判据必然漂移 —— 本项目已出过真实事故（`:latest` 归一化陷阱、`ollama list` 退出码恒 0 被误当模型判据，见 `docs/agent-log/20260911-ollama-init诊断.md`）。判据治一处，漏洞才不会以同一形态复发。
 - **输入**：`docs/api/README.md` §4（判据）、`docker-compose/.env`（端口真源）
-- **输出**：`scripts/lib/probe.sh`，固定函数清单（**只做探测、不做输出格式决策**，格式由调用方决定）。
+- **输出**：`scripts/sh/lib/probe.sh`，固定函数清单（**只做探测、不做输出格式决策**，格式由调用方决定）。
   **函数名以实现的 `nexus_*` 为准**（本节原规格名为 `probe_*`）—— **规格名 ↔ 实现名对照表写在 `probe.sh` 文件头注释里，评审以该对照表为准**（不留暗偏差）：
   - `nexus_container_status <容器名>` → 输出 `<State>|<Health>`（规格名 `probe_container_state`；容器级判据要 health，单给 state 不够）
   - `nexus_oneshot_state` → 读一次性容器 `nexus-ollama-init` 的 `<state>|<exitcode>`（规格名 `probe_ollama_init_exit`；必须区分「没跑过 / 正在跑 / 已退出」，**只给退出码分不出「还没跑」这个正常状态**）
@@ -180,7 +180,7 @@
 - **依赖**：0.1（服务名 / 容器名 / `.env` 端口真源）
 - **验收标准**：
   - 判据常量**只在真源出现一次**：期望模型名的**唯一真源是 `docker-compose/docker-compose.yml` 的 `ollama-init` 命令**
-    （`scripts/lib/probe.sh` 的 `nexus_expected_models()` 从那里取、三个消费者脚本再调它 —— 2026-09-22 实测"只改 compose 一行即全线跟上"）；
+    （`scripts/sh/lib/probe.sh` 的 `nexus_expected_models()` 从那里取、三个消费者脚本再调它 —— 2026-09-22 实测"只改 compose 一行即全线跟上"）；
     单次超时（10s / 5s）、端口读取方式同理只应有一处定义。
     ⚠️ **2026-09-22 订正**：本条原写"只在本文件出现一次：期望模型名（`qwen2.5:7b`、`nomic-embed-text`）"，
     既不再是唯一真源、模型名也变了（`nomic-embed-text` → `bge-m3`，1024 维，理由见 `docs/design/03-RAG知识库.md` §0.3）
@@ -222,12 +222,12 @@
   - `npm run dev` 可启动
 
 ## 🚩 阶段交付物
-`docker-compose.yml`、db-patch 工作流、`check-env.sh` / `up.sh` / `check-health.sh`（+ `scripts/lib/probe.sh`）、`wsl.abc.md`、前后端容器
+`docker-compose.yml`、db-patch 工作流、`check-env.sh` / `up.sh` / `check-health.sh`（+ `scripts/sh/lib/probe.sh`）、`wsl.abc.md`、前后端容器
 
 > 📎 **阶段外工程沉淀（不计入本任务验收）**：`devops-engineer` 的 agent 定义新增「🔍 排查环境问题」章节（三条铁律 + 6 步诊断阶梯 + 10 条已踩陷阱 + 「是否真的修好了」判定标准，见 `.claude/agents/devops-engineer/CLAUDE.md`）。它不在 0.3 的验收范围内，**故不进「完成状态」勾选清单**；在此记一笔是因为它与脚本头部警示同一个思路 —— 把已证伪的做法固化在**离现场最近的地方**，后续阶段排障会直接引用。
 
 ## ✅ 阶段验收标准
-拿到仓库后执行 `./scripts/up.sh` 即可拉起全部环境，后端健康检查、前端页面均可达
+拿到仓库后执行 `./scripts/sh/up.sh` 即可拉起全部环境，后端健康检查、前端页面均可达
 （可执行判据：`curl http://localhost:8089/api/health` 返回 UP；浏览器 `http://localhost:8088` 页面可达）
 
 ## ⚠️ 待确认事项
@@ -261,7 +261,7 @@
     - `wsl.abc.md`：四段式齐备，7 条实测记录（含 2026-09-12 追加的「Node 版本漂移」§3.7）
     - `README.md`：已建，含 Windows 侧一键触发命令、前后端本地启动命令、三脚本定位对照表、服务与端口表、常用验证命令
     - 两条验收标准（「`wsl.abc.md` 四段式齐备」「README 含一键触发与前后端启动命令」）均已逐项核对通过
-  - [ ] 0.3.5 `scripts/lib/probe.sh`（探针共享函数，0.3.2 / 0.3.3 共同依赖）—— 已实现；命名偏差已用对照表消解
+  - [ ] 0.3.5 `scripts/sh/lib/probe.sh`（探针共享函数，0.3.2 / 0.3.3 共同依赖）—— 已实现；命名偏差已用对照表消解
 - [ ] 0.4 前后端项目骨架 —— 🚧 **代码已交付（2026-09-11），待实机验收**
   - **已验证**（2026-09-12 实测补充）：
     1. ✅ `mvn clean install -DskipTests` 通过 —— 以 `nexus-backend:dev` 镜像构建成功为证（在 builder 容器内执行；首次因传输截断失败一次，重跑通过）

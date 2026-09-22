@@ -363,7 +363,7 @@ tc03_preflight_target() {
   if [ "$health_code" != '200' ]; then
     printf '错误：GET %s/api/health → HTTP %s（预期 200）。原始响应：\n' "$TC03_BASE_URL" "$health_code" >&2
     tc_show_body "$tc_work_dir/health.json" >&2
-    printf '\n      入口未就绪 —— 先跑 ./scripts/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
+    printf '\n      入口未就绪 —— 先跑 ./scripts/sh/check-health.sh 看哪一项 DOWN，再回来。\n' >&2
     exit 3
   fi
   printf '  入口：GET %s/api/health → HTTP 200（TC03_TARGET=%s）\n' "$TC03_BASE_URL" "$TC03_TARGET"
