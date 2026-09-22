@@ -737,7 +737,7 @@ if (status === 401) {
 
 | Header | 缺了会怎样 |
 | --- | --- |
-| `Content-Type: application/json` | 后端按契约声明了 `consumes` → **HTTP 415**，且响应体不是 `Result`，会把排查方向带偏 |
+| `Content-Type: application/json` | 后端按契约声明了 `consumes` → **HTTP 415 + `40002`**（⚠️ **2026-09-22 订正**：此处曾写"响应体不是 `Result`" —— 自 2026-09-20 起 415 也有专门出口、返回的是统一 `Result`，`msg` 正是"请求格式不支持，请使用 application/json"，对本接口是**准确**的诊断；见 §1.2） |
 | `Authorization: Bearer <token>` | HTTP 401 + `40100` |
 
 请求体：
@@ -958,9 +958,22 @@ curl -N -X POST "http://localhost:${BACKEND_PORT}/api/chat/stream" \
 三条前端必须遵守的约定（踩了就是 `40001` 或一次超时误判）：
 
 1. **字段名必须是 `file`**：写成 `upload` 之类 → 框架抛 `MissingServletRequestPartException` → **`40001`**。
-2. **不要手工设置 `Content-Type`**：axios 1.x 在 `data` 是 `FormData` 时会**主动删掉**该请求头、
-   让浏览器自己带 `boundary`；写死成 `multipart/form-data` 会**丢掉 boundary** → 后端 `MultipartException`
-   → `40001`。（用 `el-upload` 时另有一条：它的默认 XHR **不走 axios 拦截器**，必须用 `:http-request` 自定义，
+2. **上传必须让请求头是带 boundary 的 `multipart/form-data`** —— ⚠️ **2026-09-22 实测订正**：
+   本条曾写成"不要手工设置 `Content-Type`，axios 1.x 会主动删掉该请求头"，**那句不成立**
+   （走查时上传报 `HTTP 415 + 40002` 就是它导致的）。axios 1.20 的真实行为：`request.ts` 的**实例默认头**
+   `Content-Type: application/json` 会让 axios 把 `FormData` **转成 JSON 字符串**
+   （`lib/defaults/index.js`：`isFormData(data)` 为真时 `return hasJSONContentType ?
+   JSON.stringify(formDataToJSON(data)) : data` ⇒ body 变成 `{"file":{}}`，**文件字节根本不会发出**），
+   于是"`data` 是 `FormData` 就删掉该头"那段（`lib/helpers/resolveConfig.js`）**永远不会执行**
+   ⇒ 请求头留在 `application/json` ⇒ 后端按 `consumes` 在**映射阶段**拒收 ⇒ 用户读到
+   "请求格式不支持，请使用 **application/json**"，而正确动作其实是"让浏览器带上 boundary"。正确做法：
+   ① **上传请求显式声明 `headers: { 'Content-Type': 'multipart/form-data' }`** —— axios 的浏览器适配器
+   随后会把该头删掉、由浏览器补 `; boundary=…`（`xhr` 走 `resolveConfig.js`；`fetch` 见
+   `lib/adapters/fetch.js` 的 "delete it so fetch can set it correctly with the boundary"）；
+   ② 或在拦截器里对 `FormData` 请求摘掉该头。
+   **自己拼 `; boundary=…` 同样是错的**（那个值只有浏览器知道）；本版 axios 会连它一起摘掉，
+   所以"没炸"是 axios 兜底、不是写法正确 —— 绝不要这么写。
+   （用 `el-upload` 时另有一条：它的默认 XHR **不走 axios 拦截器**，必须用 `:http-request` 自定义，
    否则 401 不跳登录页、`Result` 不解包 —— 见设计 §5.1-1。）
 3. **超时 ≠ 失败**：上传在**请求线程**上同步完成（数十秒量级，取决于文件大小与 CPU），
    前端必须逐请求覆盖超时（**上传 300s**、问答 120s —— 实测验收夹具 587 块 ≈ 80~90 秒，120s 太贴边；
