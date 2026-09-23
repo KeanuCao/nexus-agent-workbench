@@ -2,9 +2,12 @@
 # =============================================================================
 # deploy.py —— nexus 一键部署（阶段交付后的标准动作）
 #
-# ⚠️⚠️ 2026-09-23 首次实跑暴露 3 处**自身缺陷**：会崩在第 3 步的 rebuild 判定（NameError），
-#      且另外两条判据（向量维度 / nginx 上限）会造假警报 —— **修复前不要把它当可用工具**。
-#      现象、根因与待定方案见 docs/agent-log/20260923-首次实跑deploy失败.md
+# 2026-09-23 首次实跑暴露 3 处**自身缺陷**（崩在第 3 步 rebuild 判定的 NameError + 向量维度 /
+#   nginx 上限两条判据造假警报），当日已修。⚠️ 但**尚未实跑验证** —— 在实跑跑通之前，
+#   别把它当可用工具（第 4–8 步至今一次都没执行过）。现象、根因与实测对照见
+#   docs/agent-log/20260923-首次实跑deploy失败.md。
+#   教训（留在头部防复发）：**凡断言必须实测** —— 本脚本交付时只 smoke 测过 `--help` 与几个解析
+#   函数，主路径一次没执行过，于是三条判据里两条是自造的假警报（被测对象其实都是好的）。
 #
 # 设计目标（2026-09-23 定）：**一次跑完、一张表、零提示**。
 #   一次部署 ≤ 1 分钟（缓存热时）、交互 ≤ 3 次、部署期间不派活、失败即停等人。
@@ -71,7 +74,10 @@ EXPECTED_HEALTHY = ["nexus-postgres", "nexus-redis", "nexus-ollama", "nexus-back
 # 注意不含 builder：它是手工启停的构建容器，其 Dockerfile 变更由 up.sh 第 2 步处理
 BAKED_FILES = {
     "nexus-frontend": ["docker-compose/frontend/Dockerfile", "docker-compose/frontend/nginx.conf"],
-    "nexus-backend": ["docker-compose/backend/Dockerfile"],
+    # ⚠️ 清单必须与该服务 Dockerfile 里的**每一个 COPY 源**对齐（镜像只由这些文件决定）：
+    #    2026-09-23 复核发现漏了 entrypoint.sh —— 它被 COPY 进镜像却不在清单里，
+    #    改它不触发 rebuild ⇒ 又一次"镜像静默过期"。以后加 COPY 就同步加这里。
+    "nexus-backend": ["docker-compose/backend/Dockerfile", "docker-compose/backend/entrypoint.sh"],
 }
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
@@ -115,10 +121,21 @@ def die(step: str, summary: str, detail: str = "") -> None:
 
 # ── 命令执行 ─────────────────────────────────────────────────────────────────
 def run(args: list[str], timeout: int = 120, cwd: Path | None = None) -> tuple[int, str]:
-    """跑一条命令，返回 (returncode, 合并后的输出)。永不抛异常。"""
+    """
+    跑一条命令，返回 (returncode, 合并后的输出)。永不抛异常。
+
+    两个**载荷性**细节（改这里之前先读 —— 下面多处 `splitlines()[0]` 依赖它们）：
+    ① 拼接顺序刻意是 **stdout 在前、stderr 在后**：`docker compose` 的告警（如 ollama-init 里
+       `$model` 未被展开的 "variable is not set"）全走 stderr，排在末尾才不会顶掉真正的取值行
+       —— 换成 stderr 在前，psql 的维度值 / t_db_patch 计数会被告警行顶掉，判据集体取空。
+    ② stdin 显式接 /dev/null：`docker compose exec` 会**吞掉调用方的 stdin**（2026-09-23 实测：
+       用 heredoc 喂脚本时，第一条 exec 就把后面剩下的内容全吃光了）⇒ 不接空，本脚本可能把上一层
+       的输入吃掉；`exec -T` 只关 TTY，这里再关掉 stdin 才算名副其实的"零交互"。
+    """
     try:
         p = subprocess.run(args, cwd=str(cwd or COMPOSE_DIR), capture_output=True,
-                           text=True, timeout=timeout, errors="replace")
+                           text=True, timeout=timeout, errors="replace",
+                           stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return 124, f"[deploy] 超时（{timeout}s）：{' '.join(args)}"
@@ -296,19 +313,34 @@ def step3_config(force_rebuild: bool) -> dict:
 
     # 3.3 nginx 请求体上限（>1MB 上传的必需项；缺失 ⇒ 413 而响应体不是 Result，极难猜）
     #     判据取【运行中容器内那份】而非宿主源码 —— 它才是真正生效的那份
-    if "client_max_body_size" in COMPOSE_DIR.joinpath("frontend/nginx.conf").read_text(encoding="utf-8"):
-        rc, out = compose("exec", "-T", "nexus-frontend", "grep", "-c", "client_max_body_size",
+    # ⚠️ 两侧判据都**锚定指令行首**（`^[[:space:]]*client_max_body_size`），不许退回子串或行数：
+    #    源文件第 47 行的**注释**里也写着这个指令名 ⇒ `grep -c` 数出 2，而首跑的判据是
+    #    `endswith("1")` ⇒ 假警报（根因 3）；反向的坑更坏 —— 子串匹配会把「被 # 注释掉的指令」
+    #    当成"有"，那是**漏报**：镜像里根本没生效，却给一个 PASS。
+    host_conf = COMPOSE_DIR.joinpath("frontend/nginx.conf").read_text(encoding="utf-8", errors="replace")
+    if re.search(r"^[ \t]*client_max_body_size", host_conf, re.M):
+        rc, out = compose("exec", "-T", "nexus-frontend", "grep", "-E",
+                          r"^[[:space:]]*client_max_body_size",
                           "/etc/nginx/conf.d/default.conf", timeout=60)
-        if rc == 0 and out.strip().endswith("1"):
-            R.add("3 配置一致性", "PASS", "nginx client_max_body_size 已生效（容器内那份）")
+        hits = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("client_max_body_size")]
+        if hits:
+            R.add("3 配置一致性", "PASS",
+                  f"容器内 nginx 已生效：{hits[0]}" + (f"（{len(hits)} 处）" if len(hits) > 1 else ""))
         else:
-            R.add("3 配置一致性", "WARN", "容器内 nginx.conf 未见 client_max_body_size",
-                  "宿主源码里有 ⇒ 镜像里的是旧的 ⇒ 本次将触发前端镜像 rebuild")
+            R.add("3 配置一致性", "WARN", "容器内 nginx.conf 未见 client_max_body_size 指令行",
+                  "宿主源码里有 ⇒ 镜像里的是旧的 ⇒ 本次将触发前端镜像 rebuild"
+                  "（前端容器本就没起时，这一行也是这个形态）\n"
+                  f"exec 原始输出：{out.strip()[-200:] or '（空）'}")
     else:
         R.add("3 配置一致性", "FAIL", "宿主 nginx.conf 缺 client_max_body_size（>1MB 上传会 413）")
 
-    # 3.4 向量维度三方对账：代码常量 vs DB 列（模型清单已在上面对过）
-    dim_code = None
+    # 3.4 向量维度对账：代码常量 vs DB 列的**声明维度**（模型清单已在上面对过）
+    # ⚠️ DB 侧判据 = `format_type()` 渲染出的类型串（形如 `vector(1024)`），**不是** atttypmod 算术：
+    #    `atttypmod-4` 是 **varchar 的 VARHDRSZ 惯例**，pgvector 的 atttypmod **直接存维度**
+    #    ⇒ 首跑读出 1020（真值 1024）= 假警报（根因 2）。2026-09-23 实机三种写法对照：
+    #      atttypmod=1024 ／ atttypmod-4=1020 ／ format_type=vector(1024)，代码 EXPECTED_DIMENSION=1024
+    #    取类型串另有个好处：类型本身被换掉（如 halfvec）时，打印出来的原文就能看出来。
+    dim_code = ""
     for p in (REPO / "backend").rglob("OllamaEmbeddingService.java"):
         m = re.search(r"EXPECTED_DIMENSION\s*=\s*(\d+)", p.read_text(encoding="utf-8", errors="replace"))
         if m:
@@ -316,28 +348,38 @@ def step3_config(force_rebuild: bool) -> dict:
             break
     rc, out = compose("exec", "-T", "postgres", "psql", "-U", cfg.get("PG_USER", "nexus"),
                       "-d", cfg.get("PG_DB", "nexus"), "-tAc",
-                      "SELECT atttypmod-4 FROM pg_attribute WHERE attrelid='t_kb_chunk'::regclass AND attname='embedding'",
+                      "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                      "WHERE attrelid='t_kb_chunk'::regclass AND attname='embedding'",
                       timeout=60)
-    dim_db = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+    db_raw = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+    m = re.search(r"\((\d+)\)", db_raw)
+    dim_db = m.group(1) if m else ""
     if dim_code and dim_db and dim_code != dim_db:
         R.add("3 配置一致性", "FAIL", f"向量维度不一致：代码={dim_code} / DB={dim_db}",
               "这是「换模型只改一处」的经典故障：两者必须同时改（另见 db-patch 里的维度补丁）")
     elif dim_code and dim_db:
-        R.add("3 配置一致性", "PASS", f"向量维度一致：代码={dim_code} / DB 列={dim_db}")
+        R.add("3 配置一致性", "PASS", f"向量维度一致：{db_raw} = 代码常量 {dim_code}")
     else:
-        R.add("3 配置一致性", "WARN", f"向量维度未对账（代码={dim_code or '?'} / DB={dim_db or '表未建'}）")
+        R.add("3 配置一致性", "WARN", f"向量维度未对账（代码={dim_code or '?'} / DB={db_raw or '取不到'}）",
+              "DB 侧取不到 ⇒ 表/列不存在（或 postgres 没起）；psql 原文："
+              + (out.strip()[-200:] or "（空）"))
 
     # 3.5 镜像 rebuild 判定（烘进镜像的文件内容变了才需要；dist 走卷挂载不需要）
+    # 状态形如 {"baked": {"nexus-frontend": {"<相对路径>": "<sha256>", ...}, ...}} —— **按服务分组**存，
+    # 比较也只发生在"同一服务的同一文件"之间（旧版把状态摊平成 文件→sha，跨服务会串味）。
+    # ⚠️ 首跑正是崩在这段：判定条件里引用了 `f`，而 `f` 只是字典推导式的迭代变量，
+    #    **推导式的名字不外泄**（外层只有 `for svc, files in ...`）⇒ NameError（根因 1）。
+    #    教训：跨行要用的值先落成变量（下面的 cur），别指望推导式把名字漏出来。
     state = load_state()
-    baked = state.get("baked", {})
+    baked = state.get("baked") or {}
     need: list[str] = []
     for svc, files in BAKED_FILES.items():
-        cur = {f: sha256(REPO / f) for f in files if (REPO / f).exists()}
-        if force_rebuild or (f in baked and baked.get(f) != cur.get(f)) or (baked and f not in baked):
+        cur = {f: sha256(REPO / f) for f in files if (REPO / f).is_file()}
+        was = baked.get(svc) or {}
+        # 键集不等 = 首次运行（无基线）/ 文件增删 / 清单改过 —— 与内容变化同等对待：一律保守重建
+        if force_rebuild or set(was) != set(cur) or any(was.get(f) != h for f, h in cur.items()):
             need.append(svc)
-        elif not baked:
-            need.append(svc)  # 首次运行：无基线，保守 rebuild 一次
-        state.setdefault("baked", {}).update(cur)
+        state.setdefault("baked", {})[svc] = cur
     R.add("3 镜像判定", "INFO",
           f"需要 rebuild：{' '.join(sorted(set(need))) or '无'}" + ("（--rebuild 强制）" if force_rebuild else ""))
     save_state(state)
@@ -472,9 +514,13 @@ def step7_health(timeout_s: int = 180) -> None:
 # ── 8 冒烟 ───────────────────────────────────────────────────────────────────
 def step8_smoke(env: dict) -> None:
     fp, bp = env["frontend_port"], env["backend_port"]
+    # 地址一律 127.0.0.1，不用 localhost —— 与 probe.sh 的 NEXUS_PROBE_HOST 同一条判据：
+    # WSL 内 localhost 可能先解析到 ::1，而 docker 发布的端口未必监听 IPv6（本机 2026-09-23 是
+    # 双栈发布、两种写法都通，但判据不该押在 daemon 的 ipv6 配置上）⇒ 固定 127.0.0.1 结果确定。
+    base = "http://127.0.0.1"
     # 8.1 业务健康（三项依赖）+ 反代链路
-    for label, url in (("经 nginx", f"http://localhost:{fp}/api/health"),
-                       ("直连后端", f"http://localhost:{bp}/api/health")):
+    for label, url in (("经 nginx", f"{base}:{fp}/api/health"),
+                       ("直连后端", f"{base}:{bp}/api/health")):
         code, body = http(url, timeout=20)
         if code == 200 and '"code":0' in body.replace(" ", ""):
             checks = re.search(r'"checks":\s*\{([^}]*)\}', body)
@@ -485,7 +531,7 @@ def step8_smoke(env: dict) -> None:
         R.add("8 冒烟 /api/health", "FAIL", "两个端口都没拿到 200 + code=0",
               "直连后端也失败 ⇒ 后端没起或依赖 DOWN：docker compose logs --tail 100 nexus-backend")
     # 8.2 登录接口
-    code, body = http(f"http://localhost:{fp}/api/auth/login", "POST",
+    code, body = http(f"{base}:{fp}/api/auth/login", "POST",
                       {"username": "admin", "password": "admin123"}, timeout=20)
     if code == 200 and '"code":0' in body.replace(" ", ""):
         tok = re.search(r'"token"\s*:\s*"([^"]{8,})"', body)
@@ -494,7 +540,7 @@ def step8_smoke(env: dict) -> None:
         R.add("8 冒烟 登录", "FAIL", f"登录返回 HTTP {code}",
               body.strip()[:300] + "\n（admin/admin123 是否被改？种子数据是否还在？）")
     # 8.3 前端首页 + 首页引用的资源（证明 nginx root 指向的是**新** dist）
-    code, html = http(f"http://localhost:{fp}/", timeout=20)
+    code, html = http(f"{base}:{fp}/", timeout=20)
     if code != 200:
         R.add("8 冒烟 前端", "FAIL", f"GET / 返回 HTTP {code}", "前端容器/nginx 未就绪")
         return
@@ -503,7 +549,7 @@ def step8_smoke(env: dict) -> None:
         R.add("8 冒烟 前端", "WARN", "首页 200，但没解析到 assets/*.js（构建形态变了？）")
         return
     asset = m.group(1)
-    code2, _ = http(f"http://localhost:{fp}{asset}", timeout=20)
+    code2, _ = http(f"{base}:{fp}{asset}", timeout=20)
     if code2 == 200:
         R.add("8 冒烟 前端", "PASS", f"首页 200，资源 {asset} 200（served 的是最新 dist）")
     else:
