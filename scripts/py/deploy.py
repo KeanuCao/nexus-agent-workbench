@@ -3,8 +3,9 @@
 # deploy.py —— nexus 一键部署（阶段交付后的标准动作）
 #
 # 2026-09-23 首次实跑暴露 3 处**自身缺陷**（崩在第 3 步 rebuild 判定的 NameError + 向量维度 /
-#   nginx 上限两条判据造假警报），当日已修。⚠️ 但**尚未实跑验证** —— 在实跑跑通之前，
-#   别把它当可用工具（第 4–8 步至今一次都没执行过）。现象、根因与实测对照见
+#   nginx 上限两条判据造假警报），当日已修；同日**实跑验证通过**（八步全绿、69s）。
+#   同一轮还从实跑输出里揪出 2 处"输出层"缺口（人工核对 SHA 的提醒被 PASS 行吞掉、产物大小
+#   按"大小紧挨文件名"解析），一并已修。现象、根因、实测对照与验证记录见
 #   docs/agent-log/20260923-首次实跑deploy失败.md。
 #   教训（留在头部防复发）：**凡断言必须实测** —— 本脚本交付时只 smoke 测过 `--help` 与几个解析
 #   函数，主路径一次没执行过，于是三条判据里两条是自造的假警报（被测对象其实都是好的）。
@@ -89,14 +90,20 @@ class Rows:
     """每步一行；status ∈ PASS / FAIL / WARN / INFO / SKIP"""
     rows: list[tuple[str, str, str, str]] = field(default_factory=list)  # (step, status, 摘要, 细节)
 
-    def add(self, step: str, status: str, summary: str, detail: str = "") -> None:
+    def add(self, step: str, status: str, summary: str, detail: str = "",
+            always_show_detail: bool = False) -> None:
+        """
+        detail 默认**只在 FAIL/WARN 时打印**（这两类要给人留线索）。所以挂在 PASS 行上的人办事项
+        必须显式传 `always_show_detail=True` —— 2026-09-23 首跑那条"人工核对 SHA"的提醒就是这么
+        静默消失的：写在源码里像模像样，实际一次都没被打印过（PASS 行把 detail 吞了）。
+        """
         self.rows.append((step, status, summary, detail))
         mark = {"PASS": f"{GREEN}[PASS]{RESET}", "FAIL": f"{RED}[FAIL]{RESET}",
                 "WARN": f"{YELLOW}[WARN]{RESET}", "INFO": f"{DIM}[INFO]{RESET}",
                 "SKIP": f"{DIM}[SKIP]{RESET}"}[status]
         line = f"{mark} {step:<22} {summary}"
         print(line, flush=True)
-        if detail and status in ("FAIL", "WARN"):
+        if detail and (always_show_detail or status in ("FAIL", "WARN")):
             for dl in detail.splitlines():
                 print(f"       {DIM}{dl}{RESET}", flush=True)
 
@@ -273,7 +280,7 @@ def step2_git_sync(expect_sha: str | None) -> dict:
         die("2 拉取最新代码", f"拉到 {sha}，与期望 {expect_sha} 不一致",
             "说明【要部署的提交还没 push/merge 到远端分支】——容器只能拿到已 push 的提交")
     R.add("2 拉取最新代码", "PASS", f"{sha}  {info['subject'][:38]}",
-          "⚠️ 请人工核对：这个 SHA 就是你刚 merge 的那个吗？")
+          "⚠️ 请人工核对：这个 SHA 就是你刚 merge 的那个吗？", always_show_detail=True)
     return info
 
 
@@ -451,13 +458,23 @@ def step5_build(skip: bool) -> None:
     if rc != 0:
         tail = "\n".join(out.strip().splitlines()[-12:])
         die("5 打包", "build-all 失败（后端 mvn 或前端 npm 出错）", tail)
-    jar = re.search(r"([\d.]+[KMG])\s+\S*app\.jar", out)
+    # 产物大小取自 build-all 末尾那行 `ls -lh .../app.jar`，形状是
+    #   `<权限> <链接数> <属主> <属组> <大小> <月> <日> <时:分> <路径>`
+    # —— 大小与路径**中间隔着一个时间戳**，所以"大小紧挨着文件名"的正则永不匹配：
+    #    首跑就是这么显示成 `app.jar ?` 的（根因同上：判据没对着真源实测）。
+    # 改判"在**以 app.jar 结尾的那一行**里找带 K/M/G 后缀的尺寸列"，对 ls 的列序不敏感。
+    jar_size = ""
+    for ln in out.splitlines():
+        if ln.rstrip().endswith("app.jar"):
+            m = re.search(r"([\d.]+[KMG])\b", ln)
+            jar_size = m.group(1) if m else ""
+            break
     files = re.search(r"frontend:\s*(\d+)\s*个文件", out)
     ok_be = "BUILD SUCCESS" in out or "产物已就绪" in out
     if not ok_be:
         die("5 打包", "后端未见成功标记（BUILD SUCCESS）", out.strip()[-500:])
     R.add("5 打包", "PASS",
-          f"后端 app.jar {jar.group(1) if jar else '?'} / 前端 {files.group(1) if files else '?'} 个文件")
+          f"后端 app.jar {jar_size or '?'} / 前端 {files.group(1) if files else '?'} 个文件")
 
 
 # ── 6 容器：按需 rebuild / 重启后端 / 拉起 ───────────────────────────────────
