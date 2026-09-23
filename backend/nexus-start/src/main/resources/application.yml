@@ -141,7 +141,9 @@ nexus:
     # modelType 缺省（null）时用哪个 provider（决策 D6）；取值即 ModelType 枚举名。
     # 注意：本键与下面几个 base-url / model 键**都不在** docker-compose 的 nexus-backend.environment 里
     # —— 在 .env 里改它们容器收不到，只能改本文件的默认值（= 重打包 + 重启后端）。
-    # 唯一例外是 DEEPSEEK_API_KEY，它走 compose 的 env_file（直接注入容器，不经过 compose 插值）。
+    # 例外有两个：DEEPSEEK_API_KEY 走 compose 的 env_file（直接注入容器，不经过 compose 插值）；
+    #   nexus.ai.rag.answer-model-type 带 ${...} 占位符，值也经 compose 的 env_file 注入
+    #   （2026-09-23 新增，理由见下面 rag 块）。两条通道同源，compose 文件**未改一行**。
     default-model: ${NEXUS_AI_DEFAULT_MODEL:OLLAMA}
     # emitter 硬超时（毫秒）：到点连接直接结束，**发不出任何帧**。
     # ChatService 构造 SseEmitter 时显式传它，与上面 spring.mvc.async.request-timeout 同源。
@@ -180,8 +182,17 @@ nexus:
       queue-capacity: 0   # 不排队：无界队列 + 长连接 = 内存慢性泄漏；满了直接拒绝并返回 503 + 20100
 
     # ── RAG 知识库（阶段3；绑定见 com.nexus.module.ai.rag.config.RagProperties）──
-    # ⚠️ 本块所有键**都不在** docker-compose 的 nexus-backend.environment 里（与上面 ai.* 同一类坑）：
-    #    在 .env 里改它们容器收不到，只能改本文件的默认值 = **重打包 + 重启后端**（配置打进 jar）。
+    # ⚠️ 本块**除 answer-model-type 外**都不在 docker-compose 的 nexus-backend.environment 里
+    #    （与上面 ai.* 同一类坑）：在 .env 里改它们容器收不到，只能改本文件的默认值
+    #    = **重打包 + 重启后端**（配置打进 jar）。
+    #    answer-model-type 是唯一例外（2026-09-23 起）：它带 ${...} 占位符 ⇒ 值可由**环境变量**给出，
+    #    而 compose 的 env_file 已把 gitignored 的 docker-compose/.env.local 注入容器
+    #    （与 DEEPSEEK_API_KEY 同一条通道，**compose 未改**）⇒ 此后切云端/本地只改 .env.local
+    #    + 重建容器，**不必再重打包**。
+    #    ⚠️ 占位符本身要进 jar，所以**本次仍需重打包一次**；只有"后续切值"是免费的。
+    #    ⚠️ 注意别与 compose 的 docker-compose/.env 搞混：那个文件不经 env_file、只喂 compose 插值，
+    #    写在那儿本键收不到（.env.local 才是通道）。
+    #    代价：yml 这行读到的是"默认值"，真值在 .env.local —— 查当前生效值看容器 env 或首条问答日志。
     rag:
       # 分块（task.4 3.3 验收点名"可配置"）：窗口 500 字、相邻块重叠 50 字 ⇒ 步长 = 500 - 50 = 450
       # ⚠️ 改这两个值之后**必须重传文档**才生效 —— 本轮不保存原始文件，无法对已入库的文档重新分块（决策 D8）。
@@ -200,9 +211,19 @@ nexus:
       # 初值 0.5 是**起点不是结论** —— 标定五步见设计文档 §3.9（问文档里有的问题记 S_hit、
       # 问一定没有的问题记 S_miss，取 (S_miss+S_hit)/2 附近），跑完把结果写进 TC-03 备注
       score-threshold: 0.5
-      # 问答生成用哪个模型（取值即 ModelType 枚举名）。默认云端：中文问答质量与速度都更好（约 4s vs CPU 上 30s+）
-      # 无 DEEPSEEK_API_KEY 时选 DEEPSEEK 会直接 20100（阶段2 既定行为）；离线演示可改成 OLLAMA
-      answer-model-type: DEEPSEEK
+      # 问答生成用哪个模型（取值即 ModelType 枚举名）。
+      # ⚠️ 这里是**默认值**，真值在 docker-compose/.env.local 的 NEXUS_AI_RAG_ANSWER_MODEL_TYPE
+      #    （env_file 注入，与 DEEPSEEK_API_KEY 同一通道；compose 文件本身不参与本键）。
+      #    改 .env.local 后执行 `docker compose up -d --force-recreate nexus-backend` 即生效 ——
+      #    `restart` **不重读 env**，那是"改了没生效"的常见形态。
+      # DEEPSEEK：中文问答质量与速度都更好（约 4s），但要 DEEPSEEK_API_KEY，缺密钥直接 20100。
+      # OLLAMA  ：本地 qwen2.5:7b（模型名见上面 nexus.ai.ollama.model —— 那是"Ollama 用哪个模型"，
+      #           与本键是两条不同的路径）。零成本、不依赖网络，代价是 CPU 上约 30s+，
+      #           且冷启动加载模型的首 token 可能撞上 nexus.ai.read-timeout-ms（60s）——
+      #           症状是"第一次问失败、第二次就好"（不是 bug；撞上就把 read-timeout-ms 提到 120000）。
+      # 取值写错**没有启动期校验**：到第一次提问才现形（未知取值 → 10200；空串 → 50000，
+      # 两条出口的差异见 TC-03 §4 备注）。
+      answer-model-type: ${NEXUS_AI_RAG_ANSWER_MODEL_TYPE:DEEPSEEK}
       # 问题长度上限（按**字符**计，不是字节）：与对话接口的 8KB 字节口径不同是**有意的**（契约 §7.4）——
       # 问题天然是短的，500 字符 ≈ 500 个汉字，口径简单可读即可；超出 → 40001
       max-question-length: 500
