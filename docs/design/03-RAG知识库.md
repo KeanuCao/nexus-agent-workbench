@@ -940,7 +940,7 @@ export async function askKb(req: KbAskRequest): Promise<KbAnswerVO>
 | 1 | `backend/pom.xml` | 改 | `<tika.version>` + dependencyManagement 两条（§6.4） |
 | 2 | `backend/nexus-module-ai/pom.xml` | 改 | +tika-core +tika-parser-pdf-module +mybatis-plus-spring-boot3-starter |
 | 3 | `backend/nexus-common/.../ResultCode.java` | 改 | +5 个码（§3.8） |
-| 4 | `backend/nexus-start/src/main/resources/application.yml` | 改 | +`nexus.ai.rag.*` +`nexus.ai.ollama.embed-path` +`spring.servlet.multipart.*` +rag mapper debug（§6.2） |
+| 4 | `backend/nexus-start/src/main/resources/application.yml` | 改 | +`nexus.ai.rag.*` +`nexus.ai.ollama.embed-path` +`spring.servlet.multipart.*` +rag mapper debug（§6.2）；★ **2026-09-23 追加**：`answer-model-type` 加 `${...}` 占位符（本块唯一可被环境变量覆盖的键；值走 `.env.local`，**compose 未改**） |
 | 5 | `backend/nexus-start/.../GlobalExceptionHandler.java` | 改 | +4 个出口（§4.10） |
 | 6 | `db-patch/202609221000_初始化知识库表.sql` | **新建** | 两张表 + 索引 + 注释（§6.3） |
 | 7 | `docs/api/README.md` + `docs/api/openapi.yaml` | 改 | +§7 契约（**先落这两份，再写代码**） |
@@ -968,9 +968,17 @@ nexus:
       # 相似度阈值（余弦）：低于它的检索结果一律丢弃；全部低于 → grounded=false（不调大模型）
       # 初值 0.5 是**起点不是结论** —— 标定步骤见设计文档 §3.9 探针 D
       score-threshold: 0.5
-      # 问答生成用哪个模型（取值即 ModelType 枚举名）。默认云端：中文问答质量与速度都更好（约 4s vs CPU 上 30s+）
-      # 无 DEEPSEEK_API_KEY 时选 DEEPSEEK 会直接 20100（阶段2 既定行为）；离线演示可改成 OLLAMA
-      answer-model-type: DEEPSEEK
+      # 问答生成用哪个模型（取值即 ModelType 枚举名）。
+      # ⚠️ 2026-09-23 起本键是 nexus.ai.* 里**唯一**可被环境变量覆盖的：带 ${...} 占位符，
+      #    真值放 gitignored 的 docker-compose/.env.local（env_file 注入，与 DEEPSEEK_API_KEY
+      #    同一通道；compose 文件未改）⇒ 此后切云端/本地只改 .env.local +
+      #    `up -d --force-recreate nexus-backend`（`restart` 不重读 env）。
+      #    占位符要进 jar，故**本次改动仍需重打包一次**；之后切值免费。
+      #    其余 rag.* / ai.* 键仍只认本文件默认值 = 重打包 + 重启。
+      # 默认 DEEPSEEK（云端，约 4s，需 DEEPSEEK_API_KEY，缺则 20100）；
+      # OLLAMA = 本地 qwen2.5:7b（约 30s+，冷启动首 token 可能撞 read-timeout-ms=60s
+      #    ⇒ 症状"第一次问失败、第二次就好"，不是 bug）。
+      answer-model-type: ${NEXUS_AI_RAG_ANSWER_MODEL_TYPE:DEEPSEEK}
       max-question-length: 500
       # embedding（检索侧任务前缀；**2026-09-22 晚已随模型更换置空**，见设计 §0.3）
       # ⚠️ 改这两个前缀之后**必须重灌全部文档**：存量向量与新查询向量会不在同一空间，
@@ -999,8 +1007,27 @@ logging:
     com.nexus.module.ai.rag.mapper: debug
 ```
 
-⚠️ **这些键都不在 compose 的 `nexus-backend.environment` 里**（与阶段2 §6.2 的同一类坑）：
-`OLLAMA_EMBED_MODEL`（若用环境变量写）等变量**改 `.env` 容器收不到**，只能改本 yml 的默认值 = **重打包 + 重启后端**。
+⚠️ **除 `answer-model-type` 外，这些键都不在 compose 的 `nexus-backend.environment` 里**
+（与阶段2 §6.2 的同一类坑）：`OLLAMA_EMBED_MODEL`（若用环境变量写）等变量**改 `.env` 容器收不到**，
+只能改本 yml 的默认值 = **重打包 + 重启后端**。
+
+**`answer-model-type` 是唯一例外（2026-09-23 起实施，起因：切一次模型要重打包太贵）**：
+它带 `${...}` 占位符 ⇒ 值可由环境变量给出，而 `.env.local` 已被 compose 的 `env_file` 接进容器
+（与 `DEEPSEEK_API_KEY` 同一条通道，**compose 未改一行**）⇒ 此后切云端/本地只需往 `.env.local`
+追加 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE=OLLAMA` + `docker compose up -d --force-recreate nexus-backend`。
+**为什么只放它一个**：它是演示时真会来回切的旋钮（云端↔本地）；其余键要么改了要重灌数据
+（embedding 前缀）、要么极少动。
+**⚠️ 两条必须说清的边界**：
+1. **占位符本身要进 jar** ⇒ 引入本改动的**这一次仍需重打包**，只有"之后切值"免费；
+2. **别与 `docker-compose/.env` 搞混**：那个文件不经 `env_file`、只喂 compose 插值，写在那儿的本键收不到
+   —— `.env.local` 才是通道（`.env` 仍是端口/凭据的真源，两者用途不同）。
+**为什么不走"零改动"的 relaxed binding 路线**（不加占位符、直接给 `NEXUS_AI_RAG_*` 设值）：那条路在本仓库
+**尚未实测**（TC-03 §3.3-1 的备注正挂着"机制待实测"），而占位符是**按名精确查找**、与 `DEEPSEEK_API_KEY`
+同一机制，不必赌规则。
+**代价（必须明说）**：yml 那行读到的是默认值、真值在 `.env.local`（gitignored）
+⇒ 查当前生效值要看容器 env（`docker compose exec nexus-backend printenv NEXUS_AI_RAG_ANSWER_MODEL_TYPE`）
+或首条问答日志（`[kb] 生成完成: provider=…`）。**取值写错没有启动期校验**，到第一次提问才现形
+（未知取值 → `10200`；空串 → `50000`，两条出口见 TC-03 §4 备注）。
 
 **`server.tomcat.max-swallow-size`（待实测确认）**：Tomcat 默认只"吞掉"约 2MB 的超限请求体，
 超出的部分会让容器**直接断连**而不是把异常交给应用 ⇒ 症状是"上传 11MB 文件时连接被重置"而不是 `40003`。
@@ -1253,7 +1280,7 @@ BACKEND_PORT=$(grep -E '^BACKEND_PORT=' docker-compose/.env | cut -d= -f2)
 | 7 | **multipart 默认上限 1MB** + Tomcat `max-swallow-size` | 大文件上传表现成"连接被重置"而不是 `40003` | §6.2 显式配 `max-file-size`；`max-swallow-size` 按实测决定是否加 |
 | 8 | **长事务占 Hikari 连接**（并发上传） | 池满 → 其它接口全部排队 | 池大小 10、演示规模无并发；日志里事务耗时可见；异步化记 §10.5 |
 | 9 | 前端超时 ≠ 后端失败（D7 同步口径的必然结果） | 用户重传 → 重复文档 | §5.1-4 的文案 + 逐请求超时（**上传 300s / 问答 120s** —— 实测夹具上传 **131.9 s**（2026-09-22 端到端），原定的 120s 太贴边）；重名不去重是**已知行为**（§10.6） |
-| 10 | 无 `DEEPSEEK_API_KEY` 时问答默认走云端会 20100 | 演示现场翻车 | 与阶段2 同款、同处置：`printenv \| wc -c` 先验；离线演示把 `answer-model-type` 改成 `OLLAMA`（改配置要重打包） |
+| 10 | 无 `DEEPSEEK_API_KEY` 时问答默认走云端会 20100 | 演示现场翻车 | 与阶段2 同款、同处置：`printenv \| wc -c` 先验；离线演示把 `answer-model-type` 切 `OLLAMA` —— **2026-09-23 起改 `docker-compose/.env.local` 的 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE` + `up -d --force-recreate nexus-backend` 即可，之后不必重打包**（引入占位符的那一次仍要重打包；§6.2） |
 | 11 | **答案幻觉 / 引用与答案不符** | 面试被追问时站不住 | 三道闸（D9）+ `sources` 原文可见（**可当场核对**）+ prompt 明确"只依据资料"；把"如何量化幻觉率"记 §10.9 |
 | 12 | 同名文档重复上传 | 列表里两份同名、检索被稀释 | 本轮**允许**（不去重）；`content_hash` 去重记 §10.6 |
 | **13** | **检索召回不足（中文语料）—— 已实测发生并处置** | ✅ 端到端验收时**真的踩到了**：问「去年利润是多少」，答案所在的块在 587 块里**排第 27 名**（top5 取不到），而 5 条无关块拿 0.71~0.75 分 ⇒ 答案被生成侧如实判为"未找到"（**我们的三道闸工作正常，是召回没把资料送上去**） | **处置**：换中文检索专长的 `bge-m3`（1024 维）+ 前缀置空 + 重建表 + 重灌（§0.3）。**仍未解决**：混合检索（关键词 + 向量）/ rerank / 分块粒度调参 —— 记 §10.3，**下一次复测若仍不进前 3，就按这个顺序上** |
@@ -1310,7 +1337,7 @@ embedding / 答案缓存（同一问题重复问会重复调用上游）、批�
 | 4 | 向量库接入 | **手写 SQL + 自定义 TypeHandler**，不引 `spring-ai-pgvector-store` / pgvector-java（D1/D2） | 依据 `RAG建议.md`，与阶段2 D2 同源 |
 | 5 | 入库时机 | **同步、单事务**（异步记 backlog，§10.5） | 依据"最小闭环"，代价见 D7 |
 | 6 | 原始文件 | **不保存**（D8） | 依据 task.4 交付物范围 |
-| 7 | 生成模型 | `answer-model-type` 可配，**默认 `DEEPSEEK`**（离线演示改 `OLLAMA`） | 建议即定案（配置化，可改） |
+| 7 | 生成模型 | `answer-model-type` 可配。**yml 默认 `DEEPSEEK`**；**2026-09-23 起本键带 `${...}` 占位符，实际取值由 `docker-compose/.env.local` 的 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE` 决定** —— 切云端/本地改一行 + 重建容器，不必再重打包 | 建议即定案（配置化，可改）；2026-09-23 追加"环境变量化" |
 | 8 | 相似度阈值初值 | `0.5`，**必须标定**（§3.9 探针 D） | **待实测**，标定结果回写 TC-03 |
 | 9 | embedding 前缀 | **机制保留、默认置空**（2026-09-22 晚随换模型订正：原为"默认开启"）—— `search_document:` / `search_query:` 是 nomic 模型卡的建议，当前模型 `bge-m3` 不需要；改它/换模型都必须重灌数据 | 建议即定案（有 A/B 步骤，可开可关；见 D14 与 §0.3） |
 | 10 | 分块参数 | 500 / 50（可配） | 依据 `RAG建议.md` |
