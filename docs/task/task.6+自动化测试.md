@@ -220,7 +220,7 @@ graph LR
 - **输入**：草稿 4/5/6/10/14；`docker-compose/docker-compose.yml` 与 `docker-compose/.env`（端口与凭据真源）；
   `scripts/py/deploy.py`；`docs/design/00-环境与部署.md` §2（拓扑与卷的既有约定）；M1 / M4 的交接物。
 - **输出**：
-  - 测试环境 compose（**落位待定**，见「待确认事项」第 1 条）+ 与之配套的 env 文件（端口段 12000~13000，
+  - 测试环境 compose（**落位已定**：`docker-compose/docker-compose.test.yml` + `.env.test` —— 2026-10-08 拍板，见设计文档 §5.2）+ 与之配套的 env 文件（端口段 12000~13000，
     项目名/卷名/网络名/容器名前缀与开发环境**不重名**）；
   - deploy 复用方案：**倾向扩展 `scripts/py/deploy.py`**（参数化点见下），把"怎么跑一次部署"收敛在同一个真源；
   - 设计文档 `docs/design/05-自动化测试.md` 的「测试环境拓扑」小节。
@@ -231,14 +231,14 @@ graph LR
   - 静态：两套环境的宿主端口**无交集** —— 现有端口为 `5432 / 6379 / 11434 / 8089 / 8088`（已核实，均不在 12000~13000 段内）。
   - 静态：与开发环境不重名的四件套逐项核对 —— 项目名（开发环境 `name: nexus`）、网络（`nexus-net`）、命名卷
     （`pg-data` / `redis-data` / `ollama-models` / `builder-src` / `builder-m2` / `builder-npm` / `build-artifacts`）、
-    容器名（`nexus-*`）。**判据**：两套同时起着时 `docker ps -a --format '{{.Names}}'` 无重名冲突（⚠️ 共用 daemon 时才是硬要求，见 M4-④）。
+    容器名（`nexus-*`）。**判据**：两套同时起着时 `docker ps -a --format '{{.Names}}'` 无重名冲突（⚠️ 2026-10-08 订正：M4-④ 已实测**独立引擎**，撞车结构性不可能 —— 命名仍照 `nexus-test-*` 办，理由是「一眼能分清」而非防撞）。
   - ⚠️ **需实测确认**：测试环境一条命令拉起 PG / Redis / 后端 / 前端后，`curl` 测试端口拿到的 `/api/health` 为 200
     且 `data.checks` 三项 UP（验证动作：`curl -s http://127.0.0.1:<测试后端端口>/api/health`）。
   - ⚠️ **需实测确认**：12000~13000 段与 Windows 侧既有服务不冲突（验证动作：Windows 侧
     `Get-NetTCPConnection -LocalPort <端口>`，逐个新端口查）。
   - **deploy 复用必须交代清楚的参数化点**（评审时逐条对照）：① 仓库根定位（`deploy.py` 已按标记上溯，✅ 不写死层级）；
     ② compose 目录与文件名（现写死 `docker-compose/docker-compose.yml`）；③ env 文件；④ compose 项目名；
-    ⑤ 期望健康的容器名清单（现写死 `nexus-*` 五个）；⑥ 烘进镜像的文件清单（相对 compose 目录的路径）；
+    ⑤ 期望健康的容器名清单（现写死 `nexus-*` 五个）；⑥ 烘进镜像的文件清单（**相对仓库根**的路径 —— 2026-10-08 经实现核对订正，此前写作「相对 compose 目录」）；
     ⑦ **拉什么 ref**（CI 要拉 PR 的 head，现有 `git-sync` 只认分支名 —— 这是最关键的一处）；
     ⑧ 冒烟里的登录账号（现写死 `admin/admin123`）；⑨ 测试环境可能不成立的判据（向量维度查 `t_kb_chunk`、
     nginx `client_max_body_size`）要有降级为 WARN 的路径。
@@ -388,6 +388,17 @@ graph LR
 | 5 | **PR 触发策略与 self-hosted runner 的安全面** | 草稿 2/3（runner 注册 + 能在 GitHub 看到）；草稿 17（PR 触发全链路）| **公开仓库 + self-hosted runner = 任何人开 PR 即可在你的机器上执行代码**；且 **fork PR 拿不到 repository secrets**（草稿 17 的邮件、云端 key 都会受影响）| (a) 仓库转私有（最干净，但要处理 builder 的拉码凭据 → M5-③）<br>(b) 保持公开 + 只允许**同仓分支**的 PR 触发（在 workflow 里判 `github.event.pull_request.head.repo.full_name == github.repository`）<br>(c) 保持公开 + 开启「外部贡献者需批准」<br>(d) 允许 fork PR：等于开放代码执行（**不推荐**）<br>⚠️ 无论哪条，**冒烟集合建议不依赖云端模型**（M4-③ 选 (b)），这样"fork 无 secret"不成为用例失败的原因 |
 | 6 | **邮件通知的落位** | 草稿 17：「最后邮件通知一下吧」 | 项目没有现成的通知脚本；`scripts/` 的定位是"生产链路（被 up.sh / 镜像构建 / db-patch 迁移消费）"，邮件步骤三者都不消费 | (a) 直接内联在 workflow 的 shell 步骤里（**推荐**，若 ≤ 20 行且只依赖 Python 标准库 `smtplib`）<br>(b) 落 `scripts/py/notify-mail.py`（与 `deploy.py` 同一个家；代价是要接受"`scripts/` 也会装 CI 用的脚本"这一口径扩展）<br>(c) 用 marketplace 的邮件 action（不推荐：多一个外部依赖，与"零 marketplace action"的建议相悖） |
 
+## ✅ 已拍板（2026-10-08，用户：三处均按推荐）
+
+| # | 事项 | 决议 | 出处 |
+|---|---|---|---|
+| 待确认 #1 | E2E 脚本目录落位 | **(a) 落 `qa/e2e/`**（草稿的「一级 `test/` 目录」关闭） | 与 D2 一并拍板 |
+| 待确认 #2 | `deploy.py` 复用形态 | **(b) 抽可参数化核心 + 薄包装**（硬规则：包装层只组装参数、不含判据） | 设计文档 §5.1 |
+| D2 | 测试 compose / env 落位 | **(a) `docker-compose/docker-compose.test.yml` + `.env.test`**（build.context 相对 compose 目录 ⇒ 三份 Dockerfile 零改动复用） | 设计文档 §5.2 |
+| D3 | 端口口径 | **B：只发布跨出 docker 边界必需的 5 个**（12002 / 12005 / 12006 / 12007 / 12008） | 设计文档 §2.4 |
+
+> 其余待确认（#3 定位属性名 / #4 结果表落位 / #5 PR 触发策略 / #6 邮件落位）**不阻塞 5.1**，分属 5.3 / 5.5 / 5.2。
+
 ## ⚠️ 需实测确认（高风险项清单，逐条配验证动作）
 
 > **未实测不得写成既成事实**。以下每条的"现状"栏都只是**推断或静态核实**，不是实测结论。
@@ -422,10 +433,10 @@ graph LR
 
 **AI 子任务**
 
-- [ ] 5.1 测试环境编排与部署链路复用 —— 压在 M1 / M4 之后
+- [ ] 5.1 测试环境编排与部署链路复用 —— ✅ 已解锁；**设计已确认（D1/D2/D3 已拍），待开工**
 - [ ] 5.2 CI 触发与通知链路 —— 压在 M2 / M3 / M5 / 5.1 之后
 - [ ] 5.3 前端定位契约（`data-tid` 收窄改造）—— **不被 M 阻塞，可先开工**
 - [ ] 5.4 pytest + Playwright 冒烟框架与用例 —— 骨架可先写，真跑压在 M1 / M4 之后
 - [ ] 5.5 报告与结果可视化链路 —— 压在 5.1 / 5.4 之后，验收含 M6
 
-> 📌 **解锁状态（2026-10-08）**：**5.1 / 5.3 / 5.4 已解锁**（M1、M4 完成）；5.2 待 M2/M3 的交接物（标签字符串、secret 键名）与 M5；5.5 待 5.1 / 5.4。
+> 📌 **解锁状态（2026-10-08）**：**5.1 设计已确认（D1/D2/D3 均按推荐）**；5.1 / 5.3 / 5.4 已解锁；5.2 待 M2/M3 的交接物（标签字符串、secret 键名）与 M5；5.5 待 5.1 / 5.4。
