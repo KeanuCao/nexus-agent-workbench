@@ -1,8 +1,8 @@
 # task.6 自动化测试（E2E 冒烟）（阶段5）
 
-> 任务级别：L1 阶段级（跨模块、影响架构） ｜ 状态：⏳ 待开始
-> ⚠️ **前置闸门**：本阶段的 **5.1 / 5.2 / 5.5 都压在用户手工任务上**（M1~M7，见下方独立章节）——
-> M 任务没做完之前，AI 子任务可以开工的只有 **5.3（前端定位属性）** 与 **5.4 的框架骨架**。
+> 任务级别：L1 阶段级（跨模块、影响架构） ｜ 状态：🚧 进行中（M1~M4 ✅ 2026-10-08；5.1 / 5.3 / 5.4 已解锁）
+> ⚠️ **前置闸门（已推进）**：M1~M4 已完成（2026-10-08）—— **5.1 / 5.3 / 5.4 已解锁**；
+> 5.2 仍压在 M2/M3 的交接物（标签字符串、secret 键名）与 M5 上，5.5 压在 5.1 / 5.4 上。
 > 设计文档：`docs/design/05-自动化测试.md` ｜ 测试案例：`docs/test-cases/TC-05.md`
 > 草稿来源：[`docs/drafts/自动化测试.md`](../drafts/自动化测试.md)（17 条，**存档区原文不动**）
 >
@@ -58,18 +58,23 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
   → **开工前先 `df -h /` 看余量**，数字填进 M4 的决策表。
 - **逐步操作**：
   1. 建发行版并**固定命名为 `nexus-agent-workbench-test`**（建法自选；名字必须与本文档、`wsl.abc.md` 的后续记录一致）。
-  2. 在该发行版内装 **docker + compose 插件**（方式自选，与现有发行版可比照即可）。
+  2. 在该发行版内装 **独立 docker engine + compose 插件**，并**关掉 Docker Desktop 对该发行版的 WSL 集成**
+     （Docker Desktop → Settings → Resources → WSL Integration；不关则发行版里的 `docker` CLI 仍指向 Desktop，两个入口打架）。
+     ⚠️ 2026-10-08 实测教训：集成未关时 `docker info` 的 Name = `docker-desktop`、`docker ps -a` 能看到开发环境的 `nexus-*` 与其它项目 —— 那等于没换引擎。
   3. **关掉自动挂载**：`/etc/wsl.conf` 写 `[automount]` + `enabled = false`，然后 Windows 侧 `wsl --shutdown` 使配置生效
      —— 这条是草稿 1「不挂载本地硬盘」的落地判据。
   4. 确认 docker 可用：`wsl -d nexus-agent-workbench-test -- bash -c "docker version && docker compose version"`。
   5. ⚠️ 顺手确认镜像加速**不依赖 daemon.json**（本项目规则）：在该发行版内跑
      `docker pull docker.m.daocloud.io/library/hello-world`，看是否秒级完成。
-- **交接物**（回传给 AI，逐条都要）：
-  - 发行版名（确认与 `nexus-agent-workbench-test` 一致）；
-  - `docker version` 的 **Server 段是否为本发行版内的独立引擎**（关键：决定与开发环境是否共用同一个 daemon，见 M4-④）；
-  - `/mnt` 下是否**没有** `c`（`ls /mnt` 的输出）；
-  - `df -h /` 的可用磁盘；
-  - sudo 是否可用、当前用户是否在 `docker` 组（决定 runner 能否免 sudo 跑 docker）。
+- **交接物（已回填，2026-10-08 实测）**：
+  - 发行版名 `nexus-agent-workbench-test` ✅（用户确认）；
+  - **独立引擎** ✅：`dockerd` 进程在发行版内（PID 309）、context 仅 `default`、`docker ps -a` 为空（看不到 `nexus-*` 与其它项目）—— ⚠️ 判据用「发行版内有 dockerd」与「容器列表为空」，**不要只看 `docker info` 的 Name**（那是主机名，两发行版可能同名）；
+  - `/mnt` 无 `c` ✅（M1 完成判据，用户已断言）；
+  - 磁盘：`/` 与 `/var/lib/docker` 同一文件系统，**可用 948G** ✅；
+  - 用户 `caotan` 在 `docker` 组 ✅、免 sudo 可用 ✅；`docker.service` **enabled + active** ✅（重启可自恢复）；
+  - 插件：Compose v5.6.0 / buildx v0.38.0 ✅；镜像加速实测通过（`docker.m.daocloud.io/library/hello-world` 秒级拉通）✅；
+  - ⚠️ **待做**：重启 runner 服务（加 `docker` 组晚于 runner 启动 ⇒ 进程仍带旧组，CI 会 `permission denied ... docker.sock`）；
+  - ⚠️ **缓做**：`wsl --shutdown` 后重进的自动恢复验证（会连带停掉开发环境，择机再做）。
 - **完成判据**：Windows 侧 `wsl -d nexus-agent-workbench-test -- bash -c "docker version"` 打印出版本号，
   且 `ls /mnt` 看不到 `c`。
 
@@ -128,14 +133,15 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
 
 | # | 结论 | 落地含义 |
 |---|---|---|
-| ① | **要** —— 测试环境自带第二套 Ollama + 模型 | 测试环境 compose 含 `ollama` + `ollama-init`；模型落测试环境自己的命名卷。成本 ≈8.45GB 镜像 + ≈6GB 模型（一次性）；⚠️ **前提是磁盘够**，余量待 M1 交接物回填 |
+| ① | **要** —— 测试环境自带 Ollama + 模型 | ④ 改独立引擎后账要重算：镜像**需重拉**（ollama ≈8.45GB + pgvector ≈621MB + redis ≈58MB，走加速 ≈5 分钟）、模型 ≈6GB 重下（≈4 分钟）；原「从开发卷拷模型省下载」**跨引擎不可行**，取消。磁盘实测 **948G 可用** ⇒ 前提满足 |
 | ② | **两个 PG 容器**（被测应用库一个、结果库一个） | 测试环境起 2 个 PG；Metabase 应用库的落位在设计文档定（默认跟结果库那个实例） |
 | ③ | **不允许依赖云端**（DeepSeek） | 冒烟只用本地 Ollama；workflow 不需要 DeepSeek secret |
-| ④ | **实施结论：全套独立命名**（项目名 / 网络 / 卷 / 容器一律 `nexus-test-*`） | 与 daemon 是否共用**无关**；⏳ M1 事实（`docker ps -a` 的列表）只决定它是「硬要求」还是「廉价保险」 |
+| ④ | **独立引擎 —— 已实测（2026-10-08）**：用户关闭 Docker Desktop 对该发行版的 WSL 集成，并在发行版内装了独立 docker engine。判据：**`dockerd` 进程在发行版内**（PID 309，决定性判据）、context 仅 `default`（无 `desktop-linux`）、**`docker ps -a` 为空**（看不到 `nexus-*` 与其它项目）⇒ **结构性隔离成立** | 命名（`nexus-test-*`）与端口（12000~13000）约定不变，但撞车已成**结构性不可能**。开发环境未改动（仍走 Docker Desktop）；**CI 不再依赖 Docker Desktop 常开**（早先那条约束随本次变更解除） |
 | ⑤ | **不允许** —— 不访问开发环境的任何服务 | 草稿 10 的「整套复用开发环境」**就此废弃**；「需实测确认」#4（跨发行版互通）随之**注销** |
 
-- ⚠️ **M4 暂不勾选**：还差两样回填 —— ① 的磁盘余量（`df -h /`，A 可行性的前提）与 ④ 的 M1 事实。
-- **交接物**：①~⑤ 的结论（已录于上方）＋ M1 的磁盘数字（待回填）＋ 跨发行版访问的答案（**⑤ 定为不允许 ⇒ 此题作废**）。
+- ✅ **M4 完成（2026-10-08）**：①~⑤ 全部落定；④ 经**两次**实测（先共用 Desktop → 改独立引擎）；磁盘 **948G 可用**。
+- 📌 **④ 的两次实测留痕**：早先 = Docker Desktop 单引擎共用（`nexus-*` 与 bazi 等可见 ⇒ 命名/端口升为硬约束）；随后用户拍板改独立引擎（结构性隔离 + 解除 CI 对 Docker Desktop 的依赖）。
+- **交接物**：①~⑤ 的结论（已录）＋ ④ 的实测事实（**已二次回填**）＋ 磁盘 **948G**（已回填）＋ 跨发行版访问（**⑤ 定为不允许 ⇒ 注销**）。
 - **完成判据**：AI 拿着这张填好的表，能不加猜测地写 5.1 的服务清单与 5.4 的用例范围。
 
 ### M5 凭据归集（DeepSeek / SMTP / git）
@@ -391,11 +397,11 @@ graph LR
 | 1 | Python 3.14.4 下 `playwright` / `pytest-playwright` / `allure-pytest` 的可用性 | 草稿 9 说本机是 3.14.4 + `.venv`；三个包在该版本下是否有轮子**未知** | `python3 -V`；`python3 -m venv .venv && .venv/bin/pip install -r qa/e2e/requirements.txt`，看是否有 build 失败/降级 |
 | 2 | Playwright 浏览器与系统依赖在该发行版内是否齐备 | 未实测 | `.venv/bin/python -m playwright install --with-deps chromium`（或 chrome channel），看是否有缺库报错 |
 | 3 | Allure HTML 是否需要 JVM；Nginx 如何暴露 | Allure CLI 传统上是 Java 程序（`allure-pytest` 只写原始 JSON，**不出 HTML**）—— 属已知知识但**本项目未实测** | 测试发行版内 `allure --version`；不通则试 builder 镜像内的 JDK 17（镜像已有） |
-| 4 | 两个 WSL 发行版之间能否互通（以及**是否需要**） | 未实测；且 M4-⑤ 的推荐是"不需要"（Test Harmlessness） | 在测试发行版内 `curl -s --max-time 5 http://<Windows 主机 IP>:8088/api/health`；无论通不通，都要在 M4 里给出"是否允许"的结论 |
+| 4 | ~~两个 WSL 发行版之间能否互通~~ **已注销（2026-10-08）**：④ 实测为共用 Docker Desktop 单引擎，「跨发行版」提法本身已不成立；⑤ 定为不允许访问开发环境 | 未实测；且 M4-⑤ 的推荐是"不需要"（Test Harmlessness） | 在测试发行版内 `curl -s --max-time 5 http://<Windows 主机 IP>:8088/api/health`；无论通不通，都要在 M4 里给出"是否允许"的结论 |
 | 5 | Element Plus 上定位属性的落层 | `el-input` 根是 `div.el-input`（内层才是原生 `input`）、`el-select` 根不是原生 `select`、`el-upload` 的真实文件框在内层且通常隐藏 —— 均**未在本项目实测** | 加属性后 DevTools 里 `document.querySelector('[data-tid=login-password]').outerHTML`，按实际落层定定位写法 |
 | 6 | `<input type="password">` 能否用 Role 定位 | 推断：密码框在可访问性树里通常**没有** textbox 角色 ⇒ 草稿 13「优先 Role」在这条上大概率不成立 | Playwright 里对密码框同时试 `get_by_role("textbox")` 与 `[data-tid=...] input`，记录哪个能过 |
 | 7 | 12000~13000 段是否与 Windows 侧既有服务冲突 | 与**本项目**现有端口（5432/6379/11434/8089/8088）无交集 —— 已静态核实；Windows 侧其他软件占用**未实测** | Windows 侧逐个 `Get-NetTCPConnection -LocalPort <端口>` |
-| 8 | 测试环境与开发环境的冲突面 | 若**共用同一个 docker daemon**：项目名（`nexus`）、容器名（`nexus-*`）、网络（`nexus-net`）、命名卷（`pg-data` 等）**全部同名 ⇒ 必然互相顶掉**；若各自独立 daemon：端口段不重叠即可共存 | M1 交接物里的 `docker version` Server 段 + 在该发行版内 `docker ps -a` 看是否能看到开发环境的容器 —— **看得到就是共用的** |
+| 8 | ~~测试环境与开发环境的冲突面~~ **已实测（2026-10-08）：独立引擎，结构性隔离成立** —— 详见 M4-④ | 若**共用同一个 docker daemon**：项目名（`nexus`）、容器名（`nexus-*`）、网络（`nexus-net`）、命名卷（`pg-data` 等）**全部同名 ⇒ 必然互相顶掉**；若各自独立 daemon：端口段不重叠即可共存 | M1 交接物里的 `docker version` Server 段 + 在该发行版内 `docker ps -a` 看是否能看到开发环境的容器 —— **看得到就是共用的** |
 | 9 | GitHub 平台与 runner 的网络可达性 | builder 容器内 `git-sync` 能拉到代码 ⇒ github.com 的 **git 通道**可用；但**测试发行版内**、以及 Actions 的 HTTPS/CDN 通道**未实测**；`docs.docker.com` / `github.com` 曾整段时间不可达（见 devops charter 铁律 2） | 测试发行版内 `git ls-remote <仓库URL> HEAD`；如需 marketplace action，再验 `curl -I https://github.com` |
 | 10 | Metabase 镜像可拉取性与资源占用 | 未实测；且它**不属于官方命名空间**（前缀写法与 `/library/` 规则不同） | `docker pull docker.m.daocloud.io/metabase/metabase:<tag>`；起容器看 `docker stats` |
 | 11 | SMTP 出网 | 未实测（端口 465/587 是否被网络放行未知） | 用 M5 给的凭据手工发一封测试邮件（由用户执行） |
@@ -406,10 +412,10 @@ graph LR
 
 **用户手工任务（M）**
 
-- [ ] M1 建测试用 WSL 发行版 `nexus-agent-workbench-test`（不挂本地盘）
-- [ ] M2 注册 GitHub Actions self-hosted runner（标签 / 可见性 / 能拉码）
-- [ ] M3 GitHub 仓库侧配置（Actions 权限 / secrets / 谁能触发）
-- [ ] M4 测试环境资源与复用决策（含"是否复用开发环境"的拍板）
+- [x] M1 建测试用 WSL 发行版 `nexus-agent-workbench-test`（不挂本地盘）—— ✅ 判据与交接物已回填（独立引擎实测）
+- [x] M2 注册 GitHub Actions self-hosted runner（标签 / 可见性 / 能拉码）—— 用户确认完成；⚠️ **交接物（`runs-on` 标签精确字符串 / 可见性）待回传**（5.2 要用）
+- [x] M3 GitHub 仓库侧配置（Actions 权限 / secrets / 谁能触发）—— 用户确认完成；⚠️ **交接物（secret 键名清单 / 触发策略 / 真源）待回传**
+- [x] M4 测试环境资源与复用决策（含"是否复用开发环境"的拍板）
 - [ ] M5 凭据归集（SMTP / DeepSeek / git）
 - [ ] M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 - [ ] M7 首次链路验证（开 PR → 看 Actions → 收邮件 → 看报告）
@@ -421,3 +427,5 @@ graph LR
 - [ ] 5.3 前端定位契约（`data-tid` 收窄改造）—— **不被 M 阻塞，可先开工**
 - [ ] 5.4 pytest + Playwright 冒烟框架与用例 —— 骨架可先写，真跑压在 M1 / M4 之后
 - [ ] 5.5 报告与结果可视化链路 —— 压在 5.1 / 5.4 之后，验收含 M6
+
+> 📌 **解锁状态（2026-10-08）**：**5.1 / 5.3 / 5.4 已解锁**（M1、M4 完成）；5.2 待 M2/M3 的交接物（标签字符串、secret 键名）与 M5；5.5 待 5.1 / 5.4。
