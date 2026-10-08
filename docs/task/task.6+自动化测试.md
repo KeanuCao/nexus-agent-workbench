@@ -9,6 +9,11 @@
 > ⚠️ **编号为推定项，待用户拍板**：既有 `task.1`~`task.5` 对应阶段0~4（阶段4 未开工），故本阶段推定为
 > **「第五阶段」→ `task.6` → 测试案例 `TC-05`**（stage 4 的 `TC-04` 按编号约定仍归它）。
 > 若用户改为其他编号，只需改本文件与 `docs/核心任务.md` 的两处链接，草稿不受影响。
+>
+> 🏷️ **环境术语（2026-10-08 用户澄清，全文已按此订正）**：`nexus-agent-workbench` = **开发环境**（dev）；
+> `nexus-agent-workbench-test` = **测试环境**（test）；将来可能的 `nexus-agent-workbench-prod` = **生产环境**（prod）。
+> ⚠️ 一处**不**随订正改：`CLAUDE.md` 里的「**生产链路**」是对 `scripts/` 的定义（会被 up.sh / 镜像构建 / db-patch 迁移消费），
+> 与「生产环境」不是一回事，本文档沿用原措辞。
 
 ## 任务目标
 
@@ -61,7 +66,7 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
      `docker pull docker.m.daocloud.io/library/hello-world`，看是否秒级完成。
 - **交接物**（回传给 AI，逐条都要）：
   - 发行版名（确认与 `nexus-agent-workbench-test` 一致）；
-  - `docker version` 的 **Server 段是否为本发行版内的独立引擎**（关键：决定与生产环境是否共用同一个 daemon，见 M4-④）；
+  - `docker version` 的 **Server 段是否为本发行版内的独立引擎**（关键：决定与开发环境是否共用同一个 daemon，见 M4-④）；
   - `/mnt` 下是否**没有** `c`（`ls /mnt` 的输出）；
   - `df -h /` 的可用磁盘；
   - sudo 是否可用、当前用户是否在 `docker` 组（决定 runner 能否免 sudo 跑 docker）。
@@ -104,9 +109,9 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
 - **完成判据**：`Settings → Actions → Runners` 能看到 runner；做一次最小 workflow 触发（或等 M7 时一并验证），
   该运行出现在仓库 Actions 列表里。
 
-### M4 测试环境资源与复用决策（第二套 Ollama/模型是否重下；与生产环境的关系）
+### M4 测试环境资源与复用决策（第二套 Ollama/模型是否重下；与开发环境的关系）
 
-- **为什么必须手工**：磁盘/内存是物理资源、时间成本是你的；而"要不要复用生产环境"直接影响
+- **为什么必须手工**：磁盘/内存是物理资源、时间成本是你的；而"要不要复用开发环境"直接影响
   `qa-engineer` charter 的《Test Harmlessness》红线（**测试不得碰业务状态**）—— 没有 AI 能替你拍这个板。
 - **前置条件**：M1 的磁盘数字；草稿 10 与《Test Harmlessness》都摆在桌上。
 - **逐步操作**：对着下表逐行给结论（AI 会把结论记录进设计文档，不放行任何与之矛盾的实现）。
@@ -116,9 +121,9 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
 | ① | 测试环境要不要**第二套 Ollama + 重下模型** | (a) 要（会话/知识库冒烟可真跑）<br>(b) 不要（冒烟只覆盖登录/页面/导航） | (a) 8.45GB 镜像 + 约 5GB 模型 + 每次推理吃 CPU；<br>(b) 省磁盘省时间，但对话/知识库两条链路的冒烟就落不了地 |
 | ② | 测试环境与结果库**是否共用一个 PG 容器**（不同 database） | (a) 共用<br>(b) 两个 PG 容器 | (a) 省一个容器；需明确"结果库"与"被测应用库"的库名<br>(b) 隔离更干净，多一个容器与一份数据卷 |
 | ③ | 冒烟是否**允许依赖云端模型**（DeepSeek） | (a) 允许<br>(b) 不允许（只用本地 Ollama） | (a) 依赖密钥；且 **fork PR 拿不到 secret**（见「待确认事项」第 5 条）；<br>(b) 少一个不确定源，推荐 |
-| ④ | 测试环境与生产环境**是否共用同一个 docker daemon** | 由 M1 的实测结论决定 | 共用 ⇒ 容器名/网络名/卷名/项目名**全同**，必然互相顶掉（见下方"冲突面"）；独立 ⇒ 端口段不重叠即可 |
-| ⑤ | 是否允许测试环境**访问生产环境的服务**（草稿 10 的兜底） | (a) 允许<br>(b) 不允许 | (a) **与《Test Harmlessness》直接冲突** —— 部署与测试会写生产环境的容器、业务库与 Redis；<br>(b) 推荐 |
-- **交接物**：①~⑤ 的结论 + M1 的磁盘数字 + 「测试环境是否需要跨发行版访问生产服务」的答案。
+| ④ | 测试环境与开发环境**是否共用同一个 docker daemon** | 由 M1 的实测结论决定 | 共用 ⇒ 容器名/网络名/卷名/项目名**全同**，必然互相顶掉（见下方"冲突面"）；独立 ⇒ 端口段不重叠即可 |
+| ⑤ | 是否允许测试环境**访问开发环境的服务**（草稿 10 的兜底） | (a) 允许<br>(b) 不允许 | (a) **与《Test Harmlessness》直接冲突** —— 部署与测试会写开发环境的容器、业务库与 Redis；<br>(b) 推荐 |
+- **交接物**：①~⑤ 的结论 + M1 的磁盘数字 + 「测试环境是否需要跨发行版访问开发环境服务」的答案。
 - **完成判据**：AI 拿着这张填好的表，能不加猜测地写 5.1 的服务清单与 5.4 的用例范围。
 
 ### M5 凭据归集（DeepSeek / SMTP / git）
@@ -198,7 +203,7 @@ graph LR
   `scripts/py/deploy.py`；`docs/design/00-环境与部署.md` §2（拓扑与卷的既有约定）；M1 / M4 的交接物。
 - **输出**：
   - 测试环境 compose（**落位待定**，见「待确认事项」第 1 条）+ 与之配套的 env 文件（端口段 12000~13000，
-    项目名/卷名/网络名/容器名前缀与生产**不重名**）；
+    项目名/卷名/网络名/容器名前缀与开发环境**不重名**）；
   - deploy 复用方案：**倾向扩展 `scripts/py/deploy.py`**（参数化点见下），把"怎么跑一次部署"收敛在同一个真源；
   - 设计文档 `docs/design/05-自动化测试.md` 的「测试环境拓扑」小节。
 - **依赖**：M1、M4（可与 5.3 并行）
@@ -206,7 +211,7 @@ graph LR
   - 静态：`docker compose -f <测试 compose> config --quiet` 通过；所有 `image:` / `FROM` 带 `docker.m.daocloud.io` 前缀
     （官方镜像含 `/library/`）；**新增端口全部落在 12000~13000**。
   - 静态：两套环境的宿主端口**无交集** —— 现有端口为 `5432 / 6379 / 11434 / 8089 / 8088`（已核实，均不在 12000~13000 段内）。
-  - 静态：与生产不重名的四件套逐项核对 —— 项目名（生产 `name: nexus`）、网络（`nexus-net`）、命名卷
+  - 静态：与开发环境不重名的四件套逐项核对 —— 项目名（开发环境 `name: nexus`）、网络（`nexus-net`）、命名卷
     （`pg-data` / `redis-data` / `ollama-models` / `builder-src` / `builder-m2` / `builder-npm` / `build-artifacts`）、
     容器名（`nexus-*`）。**判据**：两套同时起着时 `docker ps -a --format '{{.Names}}'` 无重名冲突（⚠️ 共用 daemon 时才是硬要求，见 M4-④）。
   - ⚠️ **需实测确认**：测试环境一条命令拉起 PG / Redis / 后端 / 前端后，`curl` 测试端口拿到的 `/api/health` 为 200
@@ -330,7 +335,7 @@ graph LR
 
 ## 🚩 阶段交付物
 
-- 测试环境 compose 编排 + 与生产不重名的项目/卷/网络/容器命名（端口全部 12000~13000）
+- 测试环境 compose 编排 + 与开发环境不重名的项目/卷/网络/容器命名（端口全部 12000~13000）
 - `.github/workflows/e2e-smoke.yml`（PR → self-hosted runner → 部署 → 冒烟 → 通知）
 - `qa/e2e/` pytest + Playwright 冒烟工程与 `docs/test-cases/TC-05.md`
 - 前端定位属性（收窄到 5.3 表格里的元素）+ 定位约定表
@@ -348,9 +353,9 @@ graph LR
 4. **报告侧**：Windows 浏览器可直接打开本次 Allure 报告首页（端口在 12000~13000 段内）。
 5. **结果侧**：结果表能查到本次运行的用例数与结论；Metabase 看板能看到通过率一类的统计。
 6. **通知侧**：收件箱收到一封带运行链接与结论的邮件。
-7. ★ **无害性（Test Harmlessness 口径）**：跑完之后**生产环境零变化**。
+7. ★ **无害性（Test Harmlessness 口径）**：跑完之后**开发环境零变化**。
    可执行判据：跑前跑后各取一次 —— ① `docker compose -f docker-compose/docker-compose.yml ps` 的容器状态清单；
-   ② 生产库的 `SELECT count(*) FROM t_db_patch`；③ `git status --porcelain`。三次取值必须一致。
+   ② 开发库的 `SELECT count(*) FROM t_db_patch`；③ `git status --porcelain`。三次取值必须一致。
 
 ## ⚠️ 待确认事项（**未拍板，此处不代定**）
 
@@ -359,9 +364,9 @@ graph LR
 | # | 事项 | 原始出处 | 冲突点 | 选项 —— **未拍板** |
 |---|------|---------|--------|-------------------|
 | 1 | **E2E 目录落哪** | 草稿 7：「目录应该在第一级建一个 test 目录，……应该有一个 ui 或者 e2e 目录用来保存测试脚本」<br>`CLAUDE.md` 目录约定：「E2E 待解禁后落 `/qa/e2e`，不放在本目录、也不与组件单测混放」<br>`qa/README.md` 目录表：`e2e/` 行的状态是"待 `docs/design/01-多租户与认证.md` §D8 解禁后再落"；`qa/e2e/.gitkeep` 已存在 | 草稿要新建**一级 `test/`**；宪法与 `qa/README.md` 把 E2E 指到 **`qa/e2e/`**（且 `qa/` 的定义是"不属于生产链路"的测试资产） | (a) **落 `qa/e2e/`（推荐）**：与宪法、`qa/README.md` 现有约定一致，零新增顶层目录、零新增目录约定；`qa/e2e/.gitkeep` 就是在等它<br>(b) 新建一级 `test/`：忠实草稿，但要同时改 `CLAUDE.md` 目录结构、`qa/README.md`，并把已有 `qa/e2e/` 占位删掉 —— 三处文档与一次迁移<br>⚠️ **本文件按 (a) 写**（更忠实于宪法），草稿的"第一级 test 目录"作为待拍板项保留 |
-| 2 | **`deploy.py` 复用方式** | 草稿 10：「如果 [`deploy.py`](../../scripts/py/deploy.py) 可以复用就好了」「测试环境也在 `nexus-agent-workbench-test` 里面搭一套吧，不知道会不会和 `nexus-agent-workbench` 里面的冲突，如果冲突，就复用 `nexus-agent-workbench` 里面的测试环境」 | 部署真源是 `scripts/py/deploy.py`（八步、零提示、失败即停等人）；但它的 compose 目录/文件名、容器名清单、登录账号、烘镜像文件清单都是**写死生产**的，且 CI 里"等人"这个前提不存在 | **结论：复用，且是"扩展"不是"另起炉灶"**（详见 5.1 的九个参数化点）。实现形态二选一：<br>(a) 给 `deploy.py` 加参数（`--compose-file` / `--project-name` / `--ref` / `--ci`…）—— 单一真源，但改动面压在生产链路上；<br>(b) **抽可参数化核心 + 加一个薄包装**（推荐）：生产调用路径零改动、风险最小，代价是两层入口；<br>(c) 另写 CI 专用脚本 —— **不推荐**：八步判据会有两份，必然漂移（本项目已出过"判据只写一份"的教训） |
+| 2 | **`deploy.py` 复用方式** | 草稿 10：「如果 [`deploy.py`](../../scripts/py/deploy.py) 可以复用就好了」「测试环境也在 `nexus-agent-workbench-test` 里面搭一套吧，不知道会不会和 `nexus-agent-workbench` 里面的冲突，如果冲突，就复用 `nexus-agent-workbench` 里面的测试环境」 | 部署真源是 `scripts/py/deploy.py`（八步、零提示、失败即停等人）；但它的 compose 目录/文件名、容器名清单、登录账号、烘镜像文件清单都是**写死开发环境**的，且 CI 里"等人"这个前提不存在 | **结论：复用，且是"扩展"不是"另起炉灶"**（详见 5.1 的九个参数化点）。实现形态二选一：<br>(a) 给 `deploy.py` 加参数（`--compose-file` / `--project-name` / `--ref` / `--ci`…）—— 单一真源，但改动面压在现有部署链路上；<br>(b) **抽可参数化核心 + 加一个薄包装**（推荐）：现有调用路径零改动、风险最小，代价是两层入口；<br>(c) 另写 CI 专用脚本 —— **不推荐**：八步判据会有两份，必然漂移（本项目已出过"判据只写一份"的教训） |
 | 3 | **定位属性名：`tid` 还是 `data-tid`** | 草稿 12 的示例写 `tid="password"`；同条又要求"pytest 脚本优先使用 Role 结合 tid 定位" | 草稿用 `tid`；但 `tid` 不是标准自定义属性前缀，且**未来可能撞上某个组件的同名 prop**（届时静默变成 prop、DOM 上什么都没有）| (a) **`data-tid`（推荐）**：HTML 规范内建的自定义数据属性，不会被任何组件当 prop 吃掉，`[data-tid=x]` 选择器稳定；代价是与草稿字面不一致（需在文档里记一句）<br>(b) 保留 `tid`：忠实草稿；代价是需自己保证不撞 prop，且语义上"这是个自定义属性"对外不自明<br>⚠️ **选定后只能在** 5.3 的约定表 + `TC-05` **各写一处**，禁止两种混用 |
-| 4 | **结果表与 SQL 视图的落位** | 草稿 5：「它应该有一个 postgrep 容器，用来保存测试结果作为查询使用」；草稿 15（Metabase 看统计）；`qa/README.md`：「`fixtures/sql/` 放种子/清理/取指纹的 SQL 片段，**不放表结构变更**（那些走 `db-patch`）」 | 结果表是**表结构**：放 `qa/fixtures/sql/` 违反 `qa/README.md`；放正式 `db-patch/` 则会被**生产库**一并建出来（测试基础设施表进生产库）| (a) 走正式 `db-patch/`：单真源、复用现成迁移链路；代价是生产库多一张测试表<br>(b) 归**测试环境自己的初始化目录**（落位随「待确认 1」的目录决定）：生产库保持干净；代价是多一条独立迁移路径，要自己保证幂等<br>(c) 由 Metabase/初始化脚本建：**不推荐**（schema 变更散在工具里）<br>⚠️ 本文件按"(b) 的落位待定、实现细节交设计文档"写 |
+| 4 | **结果表与 SQL 视图的落位** | 草稿 5：「它应该有一个 postgrep 容器，用来保存测试结果作为查询使用」；草稿 15（Metabase 看统计）；`qa/README.md`：「`fixtures/sql/` 放种子/清理/取指纹的 SQL 片段，**不放表结构变更**（那些走 `db-patch`）」 | 结果表是**表结构**：放 `qa/fixtures/sql/` 违反 `qa/README.md`；放正式 `db-patch/` 则会被**开发库**一并建出来（测试基础设施表进开发库；将来有了生产库，同一条迁移链也会把它带过去）| (a) 走正式 `db-patch/`：单真源、复用现成迁移链路；代价是开发库多一张测试表（将来生产库同样会有）<br>(b) 归**测试环境自己的初始化目录**（落位随「待确认 1」的目录决定）：开发库保持干净；代价是多一条独立迁移路径，要自己保证幂等<br>(c) 由 Metabase/初始化脚本建：**不推荐**（schema 变更散在工具里）<br>⚠️ 本文件按"(b) 的落位待定、实现细节交设计文档"写 |
 | 5 | **PR 触发策略与 self-hosted runner 的安全面** | 草稿 2/3（runner 注册 + 能在 GitHub 看到）；草稿 17（PR 触发全链路）| **公开仓库 + self-hosted runner = 任何人开 PR 即可在你的机器上执行代码**；且 **fork PR 拿不到 repository secrets**（草稿 17 的邮件、云端 key 都会受影响）| (a) 仓库转私有（最干净，但要处理 builder 的拉码凭据 → M5-③）<br>(b) 保持公开 + 只允许**同仓分支**的 PR 触发（在 workflow 里判 `github.event.pull_request.head.repo.full_name == github.repository`）<br>(c) 保持公开 + 开启「外部贡献者需批准」<br>(d) 允许 fork PR：等于开放代码执行（**不推荐**）<br>⚠️ 无论哪条，**冒烟集合建议不依赖云端模型**（M4-③ 选 (b)），这样"fork 无 secret"不成为用例失败的原因 |
 | 6 | **邮件通知的落位** | 草稿 17：「最后邮件通知一下吧」 | 项目没有现成的通知脚本；`scripts/` 的定位是"生产链路（被 up.sh / 镜像构建 / db-patch 迁移消费）"，邮件步骤三者都不消费 | (a) 直接内联在 workflow 的 shell 步骤里（**推荐**，若 ≤ 20 行且只依赖 Python 标准库 `smtplib`）<br>(b) 落 `scripts/py/notify-mail.py`（与 `deploy.py` 同一个家；代价是要接受"`scripts/` 也会装 CI 用的脚本"这一口径扩展）<br>(c) 用 marketplace 的邮件 action（不推荐：多一个外部依赖，与"零 marketplace action"的建议相悖） |
 
@@ -378,7 +383,7 @@ graph LR
 | 5 | Element Plus 上定位属性的落层 | `el-input` 根是 `div.el-input`（内层才是原生 `input`）、`el-select` 根不是原生 `select`、`el-upload` 的真实文件框在内层且通常隐藏 —— 均**未在本项目实测** | 加属性后 DevTools 里 `document.querySelector('[data-tid=login-password]').outerHTML`，按实际落层定定位写法 |
 | 6 | `<input type="password">` 能否用 Role 定位 | 推断：密码框在可访问性树里通常**没有** textbox 角色 ⇒ 草稿 13「优先 Role」在这条上大概率不成立 | Playwright 里对密码框同时试 `get_by_role("textbox")` 与 `[data-tid=...] input`，记录哪个能过 |
 | 7 | 12000~13000 段是否与 Windows 侧既有服务冲突 | 与**本项目**现有端口（5432/6379/11434/8089/8088）无交集 —— 已静态核实；Windows 侧其他软件占用**未实测** | Windows 侧逐个 `Get-NetTCPConnection -LocalPort <端口>` |
-| 8 | 测试环境与生产环境的冲突面 | 若**共用同一个 docker daemon**：项目名（`nexus`）、容器名（`nexus-*`）、网络（`nexus-net`）、命名卷（`pg-data` 等）**全部同名 ⇒ 必然互相顶掉**；若各自独立 daemon：端口段不重叠即可共存 | M1 交接物里的 `docker version` Server 段 + 在该发行版内 `docker ps -a` 看是否能看到生产容器 —— **看得到就是共用的** |
+| 8 | 测试环境与开发环境的冲突面 | 若**共用同一个 docker daemon**：项目名（`nexus`）、容器名（`nexus-*`）、网络（`nexus-net`）、命名卷（`pg-data` 等）**全部同名 ⇒ 必然互相顶掉**；若各自独立 daemon：端口段不重叠即可共存 | M1 交接物里的 `docker version` Server 段 + 在该发行版内 `docker ps -a` 看是否能看到开发环境的容器 —— **看得到就是共用的** |
 | 9 | GitHub 平台与 runner 的网络可达性 | builder 容器内 `git-sync` 能拉到代码 ⇒ github.com 的 **git 通道**可用；但**测试发行版内**、以及 Actions 的 HTTPS/CDN 通道**未实测**；`docs.docker.com` / `github.com` 曾整段时间不可达（见 devops charter 铁律 2） | 测试发行版内 `git ls-remote <仓库URL> HEAD`；如需 marketplace action，再验 `curl -I https://github.com` |
 | 10 | Metabase 镜像可拉取性与资源占用 | 未实测；且它**不属于官方命名空间**（前缀写法与 `/library/` 规则不同） | `docker pull docker.m.daocloud.io/metabase/metabase:<tag>`；起容器看 `docker stats` |
 | 11 | SMTP 出网 | 未实测（端口 465/587 是否被网络放行未知） | 用 M5 给的凭据手工发一封测试邮件（由用户执行） |
@@ -392,7 +397,7 @@ graph LR
 - [ ] M1 建测试用 WSL 发行版 `nexus-agent-workbench-test`（不挂本地盘）
 - [ ] M2 注册 GitHub Actions self-hosted runner（标签 / 可见性 / 能拉码）
 - [ ] M3 GitHub 仓库侧配置（Actions 权限 / secrets / 谁能触发）
-- [ ] M4 测试环境资源与复用决策（含"是否复用生产环境"的拍板）
+- [ ] M4 测试环境资源与复用决策（含"是否复用开发环境"的拍板）
 - [ ] M5 凭据归集（SMTP / DeepSeek / git）
 - [ ] M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 - [ ] M7 首次链路验证（开 PR → 看 Actions → 收邮件 → 看报告）
