@@ -2,7 +2,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 📌 项目核心定位
-这是一个用于求职面试的Java全栈展示项目，目标是复刻"AI 数字员工平台"的核心能力。我的背景是 Python 转 Java，此项目用于展示我从架构设计到编码交付的完整工程能力。
+这是一个用于求职面试的Java全栈展示项目，目标是复刻"AI 数字员工平台"的核心能力。当前背景是深入实践 Claude Code，此项目用于展示我从架构设计到编码交付的完整工程能力。
 
 🎯 核心目标
 技术栈精准命中：严格使用 Java 17 + Spring Boot 3.x + Vue 3 (setup) + Element Plus。
@@ -106,7 +106,7 @@ AI 集成：Spring AI 或 OkHttp + 策略模式 (对接 Ollama/DeepSeek)
 Git 提交：请按功能点分批提交，commit message 使用 `feat: 添加统一AI网关` 格式。
 版本号单一真源：后端版本号唯一真源 = `backend/pom.xml` 的 `<revision>`（**发版只改这一行**）；5 个子模块的 `<parent><version>` 一律写 `${revision}`，**禁止写死具体版本号**（写死会触发"父 POM 与子模块 GAV 不等 → Maven 静默回落本地仓库旧版本 → 改了版本号产物却没变"的故障）。理由、历史故障与判据见 `docs/design/00-环境与部署.md` §5.1。
 
-### 针对"Python转Java"的特别限制（避免露怯）
+### 针对"Python转Java"的特别限制
 不要出现 Python 语法：严禁在 Java 代码中使用 `_` 作为变量名，严禁滥用 `var`（只在类型明确且不可变时使用，如 `var list = new ArrayList<String>()`，否则必须显式声明类型）。
 不要使用 `*` 导入：Java 代码必须明确写出导入的类名（如 `import java.util.List;`，严禁 `import java.util.*;`）。
 Controller 层注解规范（Spring Boot 3.x 现代风格）：
@@ -115,7 +115,7 @@ Controller 层注解规范（Spring Boot 3.x 现代风格）：
 异常处理要细：不要所有异常都 `catch Exception`，至少要分 `BusinessException`（业务异常，前端可展示）和 `SystemException`（系统异常，记录日志并返回通用错误）。
 
 🐳 环境与部署约定
-演示环境：Windows + WSL。整理并维护 `wsl.abc.md` 作为 WSL 参考文档；注意 AI 时代的文档可能不正确，遇到问题时要自己排查解决（用日志、官方文档交叉验证），不要照抄。
+演示环境：Windows + WSL。`wsl.abc.md` 里面记的是一些wsl相关命令，属于手工维护范畴。
 容器化：前端、后端、PostgreSQL、Redis、Ollama 各自独立容器部署，全部容器化。
 国内镜像加速：镜像一律通过 Dockerfile `FROM` / compose `image:` 前缀走 `docker.m.daocloud.io` 加速（官方镜像走 `/library/` 路径），禁止修改 `/etc/docker/daemon.json`；这是第一步要生成的交付物。
 构建容器（builder）：docker compose 中配置专门的打包容器 `nexus-builder`（git + mvn + npm + postgresql-client），负责前后端打包与 db-patch 迁移执行；builder容器不需要挂载源代码，直接使用git pull源码改动；仓库repo可以配置；buidler容器可以手工启动和手工退出; 当需要打包时，启动起来，手工在里面执行打包，打db patch的命令；包拷贝到一个共享目录，前后端容器重启时直接从共享目录获取最新的包。
