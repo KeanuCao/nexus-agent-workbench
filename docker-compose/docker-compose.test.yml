@@ -1,0 +1,306 @@
+# =============================================================================
+# nexus 测试环境编排（task.6 / 5.1 交付物；设计文档 docs/design/05-自动化测试.md §2）
+#
+# 定位：跑在测试发行版 `nexus-agent-workbench-test` 内的**独立 dockerd** 上（2026-10-08 实测），
+#       与开发环境（Docker Desktop + docker-compose.yml）**结构性隔离**、互不可见。
+#
+# 关键约定（与设计文档 §2 严格一致）：
+#   1. 项目名 / 容器名 / 网络名 / 命名卷一律 `nexus-test-*` 前缀；
+#      **服务名保持与开发环境一致**（postgres / redis / ollama / builder / nexus-backend /
+#      nexus-frontend）—— nginx.conf 的 `proxy_pass http://nexus-backend:8089`、后端的
+#      `POSTGRES_HOST: postgres`、builder 的 `NEXUS_PG_HOST: postgres` 全按服务名写，
+#      服务名不变 ⇒ 三份 Dockerfile 与 nginx.conf **零改动复用**（设计 §3.1）。
+#   2. 端口口径 **B**（2026-10-08 拍板）：只发布"跨出 docker 边界"所必需的 5 个端口，
+#      全部落 12000~13000 —— 12002 结果库 / 12005 后端 / 12006 前端 / 12007 Metabase /
+#      12008 报告 Nginx。**不发布**：应用库（12001 预留）/ redis（12003）/ ollama（12004）
+#      —— 它们只被容器内消费者按服务名访问，未发布 ⇒ 结构性不可能与宿主冲突。
+#   3. `.env.test` 与 `docker-compose.test.yml` **必须成对使用**（deploy.py 的档位常量负责，
+#      不开放单独覆盖开关）：`docker compose -f docker-compose.test.yml --env-file .env.test …`
+#      ⚠️ 只给 `--env-file` 不给 `-f` 会拿测试 env 去插值**开发** compose —— deploy.py 有防呆断言。
+#   4. 测试档**不挂** `.env.local`（M4-③：不依赖云端模型，workflow 不需要 DeepSeek secret）。
+#   5. 镜像加速：image / Dockerfile FROM 一律 `docker.m.daocloud.io` 前缀（官方镜像走
+#      `/library/`；**Metabase 非官方命名空间，前缀后不加 `/library/`**）；禁止改 daemon.json。
+#   6. 结果库实例（postgres-results）用 `postgres-results-init/` 的 initdb 脚本预建**两个空库**
+#      （结果库 + Metabase 应用库）；**表结构留给 5.5**，本编排不建任何业务表。
+#
+# 用法（仅在测试发行版内执行；本文件不在默认发现名里，开发环境不受影响）：
+#   docker compose -f docker-compose.test.yml --env-file .env.test up -d
+#   docker compose -f docker-compose.test.yml --env-file .env.test exec builder git-sync --ref refs/pull/N/head
+# =============================================================================
+name: nexus-test
+
+services:
+  # ─────────────────────────── 基础设施 ───────────────────────────
+  postgres:
+    image: docker.m.daocloud.io/pgvector/pgvector:pg16
+    container_name: nexus-test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-nexus}
+      POSTGRES_USER: ${PG_USER:-nexus}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nexus123}
+    # 口径 B：不发布宿主端口（builder / backend 在 nexus-test-net 内按服务名直连）
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-nexus} -d ${PG_DB:-nexus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - nexus-test-net
+
+  # 结果库实例：结果库（pytest 写入）+ Metabase 应用库（M4-② 拍板：跟结果库同一个实例）
+  # 两个空库由 initdb 脚本预建（见同目录 postgres-results-init/）；表结构由 5.5 落。
+  postgres-results:
+    image: docker.m.daocloud.io/pgvector/pgvector:pg16
+    container_name: nexus-test-postgres-results
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${RESULTS_PG_DB:-nexus_test_results}
+      POSTGRES_USER: ${RESULTS_PG_USER:-nexus}
+      POSTGRES_PASSWORD: ${RESULTS_PG_PASSWORD:-nexus123}
+      # 供 initdb 脚本读取（脚本内不硬编码库名）
+      RESULTS_PG_DB: ${RESULTS_PG_DB:-nexus_test_results}
+      METABASE_APP_DB: ${METABASE_APP_DB:-metabase_app}
+    ports:
+      - "${RESULTS_PG_PORT:-12002}:5432"   # 宿主上的 pytest 写结果用（口径 B 必需）
+    volumes:
+      - pg-results-data:/var/lib/postgresql/data
+      - ./postgres-results-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RESULTS_PG_USER:-nexus} -d ${RESULTS_PG_DB:-nexus_test_results}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - nexus-test-net
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    container_name: nexus-test-redis
+    restart: unless-stopped
+    # 口径 B：不发布（仅容器内网消费）
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - nexus-test-net
+
+  ollama:
+    image: docker.m.daocloud.io/ollama/ollama:${OLLAMA_TAG:-0.33.2}
+    container_name: nexus-test-ollama
+    restart: unless-stopped
+    # 口径 B：不发布（仅容器内网消费；人工排查走 docker compose exec ollama ollama list）
+    volumes:
+      - ollama-models:/root/.ollama
+    # CPU 推理（同开发环境；GPU 直通预留不复制，测试环境不需要）
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - nexus-test-net
+
+  # 一次性模型拉取（同开发环境逻辑：先 ollama list 判存在则跳过，重复 up -d 幂等）。
+  # ⚠️ 模型清单是 probe/deploy 对账的**唯一真源**（deploy.py 的 parse_expected_models 按档位
+  #    读本文件）—— 改模型只改这一行，且两份 compose 要同步改。
+  ollama-init:
+    image: docker.m.daocloud.io/ollama/ollama:${OLLAMA_TAG:-0.33.2}
+    container_name: nexus-test-ollama-init
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        # 幂等判断：ollama list 对未指定 tag 的模型显示 `name:latest`，列表侧剥离 :latest 再比；
+        # NR>1 跳过表头。qwen2.5:7b 自带 tag，sub 有则剥、无则不动，两种格式都能命中。
+        for model in qwen2.5:7b bge-m3; do
+          if ollama list | awk 'NR>1 {sub(/:latest$$/, "", $$1); print $$1}' | grep -qx "$${model}"; then
+            echo "[ollama-init] 模型 $${model} 已存在，跳过"
+          else
+            echo "[ollama-init] 开始拉取模型 $${model} ..."
+            ollama pull "$${model}"
+          fi
+        done
+        echo "[ollama-init] 模型就绪：qwen2.5:7b / bge-m3"
+    networks:
+      - nexus-test-net
+
+  # ─────────────────────────── 打包容器（手工启停；CI 里由 deploy.py 拉起） ───────────────────────────
+  # 与开发环境同构：不挂宿主源码、容器内 git pull、产物落共享卷 build-artifacts、
+  # 手工在容器里执行 git-sync / build-* / db-patch-migrate。
+  # ⚠️ CI 拉 PR 的 head 走 `git-sync --ref <refspec>`（exec 层传参，不重建容器）—— 见 5.1 §4.1-⑦。
+  builder:
+    image: nexus-test-builder:dev
+    profiles: ["build"]
+    build:
+      context: ./builder
+      dockerfile: Dockerfile
+    container_name: nexus-test-builder
+    restart: "no"
+    command: ["sleep", "infinity"]
+    environment:
+      NEXUS_REPO_URL: ${NEXUS_REPO_URL:-https://github.com/KeanuCao/nexus-agent-workbench.git}
+      NEXUS_REPO_BRANCH: ${NEXUS_REPO_BRANCH:-main}
+      NEXUS_REPO_DIR: /workspace/repo
+      NEXUS_ARTIFACT_DIR: /artifacts
+      # ⚠️ 容器内端口 5432（不是宿主端口；本服务没有宿主端口）
+      NEXUS_PG_HOST: postgres
+      NEXUS_PG_PORT: "5432"
+      NEXUS_PG_DB: ${PG_DB:-nexus}
+      NEXUS_PG_USER: ${PG_USER:-nexus}
+      NEXUS_PG_PASSWORD: ${PG_PASSWORD:-nexus123}
+    volumes:
+      - builder-src:/workspace
+      # ⚠️ 挂载点必须是 /root/.m2/repository：挂 /root/.m2 会遮蔽镜像层里的 settings.xml（阿里云源）
+      - builder-m2:/root/.m2/repository
+      - builder-npm:/root/.npm
+      - build-artifacts:/artifacts
+    networks:
+      - nexus-test-net
+
+  # ─────────────────────────── 应用容器 ───────────────────────────
+  nexus-backend:
+    image: nexus-test-backend:dev
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus-test-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-12005}:8089"      # 口径 B 必需（宿主上的冒烟直连判据）
+    environment:
+      SERVER_PORT: "8089"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${PG_DB:-nexus}
+      POSTGRES_USER: ${PG_USER:-nexus}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nexus123}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    # ★ 测试档刻意**不挂** .env.local（M4-③：不依赖云端模型；workflow 无 DeepSeek secret）
+    volumes:
+      - build-artifacts:/artifacts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- localhost:8089/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks:
+      - nexus-test-net
+
+  nexus-frontend:
+    image: nexus-test-frontend:dev
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nexus-test-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-12006}:80"       # Playwright / 人工看页面用（口径 B 必需）
+    volumes:
+      - build-artifacts:/artifacts:ro
+    depends_on:
+      nexus-backend:
+        condition: service_healthy
+    healthcheck:
+      # ⚠️ 必须写 127.0.0.1，不能写 localhost（容器内 localhost 先解析到 ::1，而 nginx 只听 IPv4
+      #    ⇒ 恒 unhealthy 的已知假故障；与开发环境同款写法）
+      test: ["CMD-SHELL", "wget -qO- 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - nexus-test-net
+
+  # ─────────────────────────── 统计与报告（5.5 的容器，归本拓扑） ───────────────────────────
+  metabase:
+    # ⚠️ 非官方命名空间：前缀后**不加** /library/；tag 待实测选定（设计 §6-2），选定后固定
+    image: docker.m.daocloud.io/metabase/metabase:${METABASE_TAG:-latest}
+    container_name: nexus-test-metabase
+    restart: unless-stopped
+    ports:
+      - "${METABASE_PORT:-12007}:3000"     # Windows 浏览器（M6 / M7）
+    environment:
+      # 应用库 = 结果库实例上的独立空库（M4-②；库由 postgres-results-init 预建）
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres-results
+      MB_DB_PORT: "5432"
+      MB_DB_DBNAME: ${METABASE_APP_DB:-metabase_app}
+      MB_DB_USER: ${RESULTS_PG_USER:-nexus}
+      MB_DB_PASS: ${RESULTS_PG_PASSWORD:-nexus123}
+    depends_on:
+      postgres-results:
+        condition: service_healthy
+    # ⚠️ 健康检查待实测（镜像内是否有 curl/wget 未验，设计 §2.1）——暂不写：
+    #   若写了一条跑不通的探针，会让"起得慢"伪装成"起不来"，误导排查。
+    networks:
+      - nexus-test-net
+
+  report-nginx:
+    image: docker.m.daocloud.io/library/nginx:1.27-alpine
+    container_name: nexus-test-report-nginx
+    restart: unless-stopped
+    ports:
+      - "${REPORT_PORT:-12008}:80"         # Windows 浏览器看 Allure 报告
+    volumes:
+      # 只读挂报告卷（写方 = 发行版宿主上的测试框架）；站点布局由 5.5 定，本阶段先复用镜像默认站点
+      - report:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - nexus-test-net
+
+# ─────────────────────────── 网络与命名卷（name 显式固定，与开发环境逐项不重名） ───────────────────────────
+networks:
+  nexus-test-net:
+    name: nexus-test-net
+    driver: bridge
+
+volumes:
+  # 卷键名不带前缀（服务内引用短、可读），`name:` 固定为 nexus-test-*（跨环境可见标识）
+  pg-data:
+    name: nexus-test-pg-data
+  pg-results-data:
+    name: nexus-test-pg-results-data
+  redis-data:
+    name: nexus-test-redis-data
+  ollama-models:
+    name: nexus-test-ollama-models
+  builder-src:
+    name: nexus-test-builder-src
+  builder-m2:
+    name: nexus-test-builder-m2
+  builder-npm:
+    name: nexus-test-builder-npm
+  build-artifacts:
+    name: nexus-test-build-artifacts
+  report:
+    name: nexus-test-report
+

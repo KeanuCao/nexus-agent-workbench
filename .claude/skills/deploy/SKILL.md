@@ -24,6 +24,7 @@ trigger: |
 | ★ 部署期间**禁止派活** | 不派任何子代理、不提交代码、不改文档。**跑完再说话。** |
 | 失败即停 | **不自动重试、不自动修**。把脚本输出给用户 → **人工定方案** → 再干活 |
 | devops-engineer 的定位 | 收窄为**按需调查环境问题**（跑特殊脚本），日常部署不再经它 |
+| CI 档（2026-10-09 新增） | 在**测试发行版**内跑 `scripts/py/deploy_test.py`：失败即非 0 退出 + `--summary-json` 机器可读摘要；"失败即停等人"里"**等人**"由 workflow 的失败态承担（见下方「CI 档」小节） |
 
 ## 调用时机
 
@@ -46,6 +47,33 @@ MSYS_NO_PATHCONV=1 wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent
 | `--expect-sha <前缀>` | 断言 git-sync 拉到的提交前缀。**防"没 push/没 merge 就部署"**——这是本项目最常见的自伤 |
 | `--no-build` | 跳过打包，只用上次产物做部署与验证（改配置/改 nginx 时用） |
 | `--rebuild` | 强制 rebuild 运行镜像（脚本平时自己按"烘进镜像的文件是否变过"判定） |
+| `--profile dev\|test` | 档位（默认 dev，行为与以前一致）；test = 切到 `docker-compose.test.yml` + `.env.test`（**成对**，见「CI 档」） |
+| `--ref <refspec>` | git-sync 的 refspec（CI 拉 PR head：`refs/pull/<N>/head`）；省略 = 分支模式，行为不变 |
+| `--login-user` / `--login-password` | 冒烟登录账号（默认 admin/admin123；输出不打口令明文） |
+| `--summary-json <path>` | 把机器可读摘要（每步状态 + 拉到的 SHA + 结论）写到该路径（CI 档） |
+| `--ci` | CI 档：关颜色（"失败即非 0 退出"本就成立） |
+
+## CI 档（测试环境 / 自动化，2026-10-09 新增）
+
+> 依据：`docs/design/05-自动化测试.md` §4.2（"CI 里没有'人'"）。**本小节是 CI 档的口径真源。**
+
+- **入口**：`python3 scripts/py/deploy_test.py <参数…>` —— 薄包装，等价于 `deploy.py --profile test`。
+  包装层**只组装参数、不含任何判据**（判据只在 `deploy.py` 里写一份，见设计 §5.1-(b) 的硬规则）。
+- **执行位置**：**测试发行版 `nexus-agent-workbench-test` 内**（独立 dockerd + `nexus-test-*` 一整套）。
+  ⚠️ **不要**在开发发行版里跑 test 档 —— 引擎是隔离的，跑错地方会在开发引擎上建出一套 `nexus-test-*`。
+- **"停"的承担者变了**：人工档是"失败即停、**等人**定方案"；CI 档**没有人**，由两件东西承担：
+  1. **失败即非 0 退出**（脚本本就如此）；
+  2. **`--summary-json <path>`**：失败路径也会写出机器可读摘要（每步 step/status/summary + 拉到的
+     SHA + 结论），workflow 的邮件正文 / Actions 摘要从这里读"红在哪一步"。
+  ⚠️ "**不自动重试、不自动修**"在 CI 档**同样成立** —— 红了就是红了，人工看摘要定方案。
+- **拉 PR head 的固定组合**：`--ref refs/pull/<N>/head` + `--expect-sha <PR head SHA 前缀>`，两个一起用才闭环
+  （只拉不断言 = 无法发现"拉错 ref"；只断言不拉 = 拿不到 PR 代码）。
+- **判据档**：test 档是 lenient —— "前置物不存在 ⇒ WARN；存在但不一致 ⇒ 仍 FAIL"（设计 §4.1-⑨）。
+- **测试档的步骤差异**（开发档完全不变）：第 1 步先把基础设施拉起（postgres / postgres-results / redis / ollama / ollama-init，
+  模型拉取与后续构建并行）；第 6 步是全栈 `up -d`，并判"**冷启动 / 热环境**"决定要不要 `restart` 后端
+  （热环境不 restart 就会拿旧 jar 跑 —— 这正是本项目反复踩过的"静默旧产物"类）；第 3 / 4 步把"前置物不存在"
+  的判据降级为 WARN（如全新库还没有 `t_db_patch`）。
+- **耗时**：CI **首跑缓存全冷**（镜像要拉、builder 缓存空、模型 ≈6GB 重下）⇒ 远超 1 分钟目标，属预期。
 
 ## 脚本做的八步（与用户给的清单一一对应）
 
