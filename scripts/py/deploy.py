@@ -14,7 +14,14 @@
 #   一次部署 ≤ 1 分钟（缓存热时）、交互 ≤ 3 次、部署期间不派活、失败即停等人。
 #
 # 执行位置：**WSL 发行版内**（docker 在其中；脚本直接调 docker，不经双层 shell）
-#   wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/scripts/py/deploy.py
+#   dev ：wsl -d nexus-agent-workbench -- python3 /mnt/c/wp/nexus-agent-workbench/scripts/py/deploy.py
+#   test：测试发行版内直接跑（CI 走薄包装 scripts/py/deploy_test.py；见 design 05 §4）
+#
+# 档位（2026-10-09 新增，设计 05 §4.1-②）：compose 文件 + env 文件**成对**由档位常量提供，
+#   `-f` 与 `--env-file` 原子地加在每条 compose 命令前；**不开放单独覆盖的 CLI 开关**
+#   （只给 --env-file 不给 -f 会拿测试 env 去插值开发 compose —— 防呆断言会拦它）。
+# CI 档（2026-10-09 新增，设计 05 §4.2）：--ci 关颜色；--summary-json <path> 落机器可读摘要
+#   （每步状态 + 拉到的 SHA）。"失败即停等人"是人工档的流程约定；CI 里由"非 0 退出 + 摘要"承担。
 #
 # 八步（对应用户给的清单）：
 #   1 前置（docker/compose/builder 可用）
@@ -43,7 +50,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # ── 路径（按仓库标记上溯定位，不写死层级）─────────────────────────────────────
@@ -63,25 +70,107 @@ def _find_repo_root(start: Path) -> Path:
 
 
 REPO = _find_repo_root(Path(__file__).resolve().parent)
-COMPOSE_DIR = REPO / "docker-compose"
-ENV_FILE = COMPOSE_DIR / ".env"
-ENV_LOCAL = COMPOSE_DIR / ".env.local"
-COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yml"
+COMPOSE_DIR = REPO / "docker-compose"      # 两档的 compose/env 都住这里（共用**目录**，不是共用文件）
+ENV_LOCAL = COMPOSE_DIR / ".env.local"     # 仅 dev 档消费；test 档不挂（M4-③）
 PATCH_DIR = REPO / "db-patch"
-STATE_FILE = REPO / ".tmp" / "deploy-state.json"
 
-EXPECTED_HEALTHY = ["nexus-postgres", "nexus-redis", "nexus-ollama", "nexus-backend", "nexus-frontend"]
-# 烘进镜像的文件：内容一变 ⇒ 必须 rebuild 镜像（dist 走卷挂载，不在其中）
-# 注意不含 builder：它是手工启停的构建容器，其 Dockerfile 变更由 up.sh 第 2 步处理
-BAKED_FILES = {
-    "nexus-frontend": ["docker-compose/frontend/Dockerfile", "docker-compose/frontend/nginx.conf"],
-    # ⚠️ 清单必须与该服务 Dockerfile 里的**每一个 COPY 源**对齐（镜像只由这些文件决定）：
-    #    2026-09-23 复核发现漏了 entrypoint.sh —— 它被 COPY 进镜像却不在清单里，
-    #    改它不触发 rebuild ⇒ 又一次"镜像静默过期"。以后加 COPY 就同步加这里。
-    "nexus-backend": ["docker-compose/backend/Dockerfile", "docker-compose/backend/entrypoint.sh"],
+
+# ── 档位（设计 05 §4.1 ②③④⑤⑥）：compose 文件 / env 文件 / 期望健康清单 / 烘镜像清单 / 状态文件 ──
+@dataclass(frozen=True)
+class Profile:
+    """一档 = 一组**成对**的环境参数。路径只从档位出，不开放单独覆盖的 CLI 开关（防呆 ⓐ）。"""
+    name: str
+    compose_file: Path
+    env_file: Path
+    project_name: str                  # 防呆 ⓑ：compose 顶层 `name:` 必须等于它
+    expected_healthy: list[str]        # 阻断判定：running+healthy 必须全满足
+    nonblocking_healthy: list[str]     # 非阻断：不满足只 WARN（报告链路归 5.5，起得慢不该让部署红）
+    baked_files: dict[str, list[str]]  # 烘进镜像的文件（**仓库根相对路径**；键 = **服务名**）
+    state_file: Path                   # rebuild 基线**按档分开**，否则两档互相污染
+    lenient: bool                      # 判据档：True = "前置物不存在 ⇒ WARN；存在但不一致 ⇒ 仍 FAIL"
+    warn_missing_env_local: bool       # 仅 dev 档对 .env.local 缺失发 WARN（test 档不需要 DeepSeek）
+    cold_start: bool                   # True = 本脚本负责从冷启动拉起环境（CI）；False = 栈由 up.sh 常驻
+    port_range: tuple[int, int] | None # 防呆 ⓒ：非 None 时断言已发布端口全部落该段
+    backend_container: str             # 后端容器名（step6 判"冷启动 vs 热环境"用）
+    login_user: str
+    login_password: str
+
+    @property
+    def compose_dir(self) -> Path:
+        return self.compose_file.parent
+
+
+PROFILES: dict[str, Profile] = {
+    "dev": Profile(
+        name="dev",
+        compose_file=COMPOSE_DIR / "docker-compose.yml",
+        env_file=COMPOSE_DIR / ".env",
+        project_name="nexus",
+        expected_healthy=["nexus-postgres", "nexus-redis", "nexus-ollama",
+                          "nexus-backend", "nexus-frontend"],
+        nonblocking_healthy=[],
+        # 烘进镜像的文件：内容一变 ⇒ 必须 rebuild 镜像（dist 走卷挂载，不在其中）。
+        # ⚠️ 清单必须与该服务 Dockerfile 里的**每一个 COPY 源**对齐（镜像只由这些文件决定）：
+        #    2026-09-23 复核发现漏了 entrypoint.sh —— 它被 COPY 进镜像却不在清单里，
+        #    改它不触发 rebuild ⇒ 又一次"镜像静默过期"。以后加 COPY 就同步加这里。
+        # 刻意不含 builder：它是手工启停的构建容器，其 Dockerfile 变更由 up.sh 第 2 步处理。
+        baked_files={
+            "nexus-frontend": ["docker-compose/frontend/Dockerfile", "docker-compose/frontend/nginx.conf"],
+            "nexus-backend": ["docker-compose/backend/Dockerfile", "docker-compose/backend/entrypoint.sh"],
+        },
+        state_file=REPO / ".tmp" / "deploy-state.json",
+        lenient=False,
+        warn_missing_env_local=True,
+        cold_start=False,
+        port_range=None,
+        backend_container="nexus-backend",
+        login_user="admin",
+        login_password="admin123",
+    ),
+    "test": Profile(
+        name="test",
+        compose_file=COMPOSE_DIR / "docker-compose.test.yml",
+        env_file=COMPOSE_DIR / ".env.test",
+        project_name="nexus-test",
+        # 阻断清单 = 5 个应用容器 + **结果库 PG**（pytest 写结果的前置，设计 05 §4.1-⑤）
+        expected_healthy=["nexus-test-postgres", "nexus-test-redis", "nexus-test-ollama",
+                          "nexus-test-backend", "nexus-test-frontend", "nexus-test-postgres-results"],
+        nonblocking_healthy=["nexus-test-metabase", "nexus-test-report-nginx"],
+        baked_files={
+            "nexus-frontend": ["docker-compose/frontend/Dockerfile", "docker-compose/frontend/nginx.conf"],
+            "nexus-backend": ["docker-compose/backend/Dockerfile", "docker-compose/backend/entrypoint.sh"],
+            # ⚠️ 测试档**必须**把 builder 纳入 rebuild 判定：CI 里没有 up.sh 第 2 步，
+            #    不纳入 ⇒ 改了 git-sync / builder Dockerfile 会静默用旧镜像（"镜像静默过期"类）。
+            "builder": ["docker-compose/builder/Dockerfile", "docker-compose/builder/settings.xml",
+                        "docker-compose/builder/git-sync", "docker-compose/builder/build-backend",
+                        "docker-compose/builder/build-frontend", "docker-compose/builder/build-all",
+                        "docker-compose/builder/db-patch-migrate"],
+        },
+        state_file=REPO / ".tmp" / "deploy-state.test.json",
+        lenient=True,
+        warn_missing_env_local=False,
+        cold_start=True,
+        port_range=(12000, 13000),
+        backend_container="nexus-test-backend",
+        login_user="admin",
+        login_password="admin123",
+    ),
 }
 
+PROFILE: Profile = PROFILES["dev"]   # 由 main() 按 --profile 选定；模块级默认 dev（被 import 时安全）
+
+# ⚠️ 服务名两档**一致**（设计 05 §3.1：nginx.conf / env 全按服务名写）。
+#    compose 的 restart / exec / build / up 一律用**服务名**；容器名（nexus-test-*）只出现在
+#    `ps --format json` 的 Name 字段里 —— 两者在测试档不同名，写混会得到 "no such service"。
+BACKEND_SERVICE = "nexus-backend"
+
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+
+
+def disable_colors() -> None:
+    """--ci / --no-color：把颜色常量置空（Rows.add 在调用时查这些全局名，改完即刻生效）。"""
+    global GREEN, RED, YELLOW, DIM, RESET
+    GREEN = RED = YELLOW = DIM = RESET = ""
 
 
 # ── 结果收集 ─────────────────────────────────────────────────────────────────
@@ -123,6 +212,7 @@ def die(step: str, summary: str, detail: str = "") -> None:
     """致命失败：报告后立即收尾退出（不自动修、不派活）。"""
     R.add(step, "FAIL", summary, detail)
     summary_print()
+    write_summary_json()      # CI 档：失败路径**也要**落摘要（人不在，红的原因只能从这里读）
     sys.exit(1)
 
 
@@ -140,7 +230,7 @@ def run(args: list[str], timeout: int = 120, cwd: Path | None = None) -> tuple[i
        的输入吃掉；`exec -T` 只关 TTY，这里再关掉 stdin 才算名副其实的"零交互"。
     """
     try:
-        p = subprocess.run(args, cwd=str(cwd or COMPOSE_DIR), capture_output=True,
+        p = subprocess.run(args, cwd=str(cwd or PROFILE.compose_dir), capture_output=True,
                            text=True, timeout=timeout, errors="replace",
                            stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
@@ -153,11 +243,20 @@ def run(args: list[str], timeout: int = 120, cwd: Path | None = None) -> tuple[i
 
 
 def compose(*args: str, timeout: int = 120) -> tuple[int, str]:
-    return run(["docker", "compose", *args], timeout=timeout)
+    """
+    每条 compose 命令都**原子地**带上档位的 `-f` 与 `--env-file`（设计 05 §4.1-②）：
+    路径只从 PROFILE 出 —— 不允许"只给 env 不给 -f"这类半套组合（防呆 ⓐ）。
+    用绝对路径，避免相对 cwd 解析的二次解释。
+    """
+    return run(["docker", "compose",
+                "-f", str(PROFILE.compose_file),
+                "--env-file", str(PROFILE.env_file),
+                *args], timeout=timeout)
 
 
-def builder(script: str, timeout: int = 300) -> tuple[int, str]:
-    return compose("exec", "-T", "builder", script, timeout=timeout)
+def builder(*args: str, timeout: int = 300) -> tuple[int, str]:
+    """在 builder 容器里执行入口命令；支持附加参数（如 git-sync --ref <refspec>）。"""
+    return compose("exec", "-T", "builder", *args, timeout=timeout)
 
 
 def http(url: str, method: str = "GET", body: dict | None = None, timeout: int = 10) -> tuple[int, str]:
@@ -201,20 +300,41 @@ def describe(rec: tuple[str, str] | None) -> str:
     return f"{state}/{health}" if health else (state or "unknown")
 
 
+def compose_ps_status() -> dict[str, tuple[str, str]]:
+    """`compose ps --format json` → {容器名: (State, Health)}；容器不在册则为空 dict。"""
+    rc, out = compose("ps", "--format", "json")
+    status: dict[str, tuple[str, str]] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                rec = json.loads(line)
+                status[rec.get("Name", "")] = (rec.get("State", ""), rec.get("Health", ""))
+            except json.JSONDecodeError:
+                pass
+    return status
+
+
 def load_state() -> dict:
+    # ⚠️ 状态文件**按档位分开**（设计 05 §4.1-⑥）：共用一个文件会让两档互相污染重建基线
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return json.loads(PROFILE.state_file.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    PROFILE.state_file.parent.mkdir(parents=True, exist_ok=True)
+    PROFILE.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
 T0 = time.time()
+
+# CI 档运行期状态（由 main() / step2 回填）；dev 档保持 None / 空，行为不变
+SUMMARY_JSON: Path | None = None       # --summary-json 的目标文件
+GIT_INFO: dict = {}                    # step2 拉到的提交信息（sha / branch / subject / ref）
+REF_ARG: str | None = None             # --ref（CI 拉 PR head 用；回填进摘要）
 
 
 def summary_print() -> None:
@@ -232,13 +352,76 @@ def summary_print() -> None:
     print("=" * 78)
 
 
+def write_summary_json() -> None:
+    """
+    CI 档的机器可读摘要（设计 05 §4.2）：每步 (step, status, summary) + 拉到的 SHA + 结论。
+    给 workflow 读（邮件正文 / Actions 摘要用）—— 人不在 CI 里，红的原因只能从这里读。
+    刻意**不因写失败而崩**：摘要缺失只报一行，不影响部署本身的退出码语义。
+    """
+    if SUMMARY_JSON is None:
+        return
+    doc = {
+        "tool": "nexus-deploy",
+        "profile": PROFILE.name,
+        "compose_file": str(PROFILE.compose_file),
+        "env_file": str(PROFILE.env_file),
+        "repo": str(REPO),
+        "ref": REF_ARG or "",
+        "git": GIT_INFO,
+        "conclusion": "failed" if R.failed else ("warn" if R.warned else "success"),
+        "failed": R.failed,
+        "warned": R.warned,
+        "elapsed_s": round(time.time() - T0, 1),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "steps": [{"step": s, "status": st, "summary": sm, "detail": dt}
+                  for s, st, sm, dt in R.rows],
+    }
+    try:
+        SUMMARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        SUMMARY_JSON.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  摘要 JSON 已写入：{SUMMARY_JSON}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ 摘要 JSON 写入失败（不影响部署结论）：{exc!r}")
+
+
+# ── 0 档位防呆（设计 05 §4.1-②：ⓐ 结构性在 Profile/argparse，ⓑⓒ 在这里） ──────────
+def guard_profile() -> None:
+    """
+    防呆 ⓑ：读被选中 compose 的顶层 `name:`，与档位期望比对；
+    防呆 ⓒ：`compose config` 抽查已发布宿主端口落档位段（仅定义了 port_range 的档位，即 test）。
+
+    ⓑ/ⓒ 拦的是同一类事故：**半套组合** —— 拿测试 env 去插值开发 compose（或反之），
+    端口/项目名静默串档、直到有人在生产机上看出不对。
+    """
+    text = PROFILE.compose_file.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"^name:\s*(\S+)\s*$", text, re.M)
+    actual = m.group(1) if m else "(未找到 top-level name:)"
+    if actual != PROFILE.project_name:
+        die("0 档位", f"compose 顶层 name 不符：{PROFILE.compose_file.name}={actual} / 档位期望 {PROFILE.project_name}",
+            "半套组合（-f 与 --env-file 不配对）会让端口/项目名静默串档；先把档位常量改对再跑")
+    R.add("0 档位", "PASS",
+          f"profile={PROFILE.name} / {PROFILE.compose_file.name} + {PROFILE.env_file.name}（成对）")
+    if PROFILE.port_range is not None:
+        lo, hi = PROFILE.port_range
+        rc, out = compose("config", timeout=60)
+        if rc != 0:
+            die("0 档位", "docker compose config 失败（compose / env 组合有问题）", out.strip()[-400:])
+        ports = sorted({int(p) for p in re.findall(r"published:\s*\"?(\d+)\"?", out)})
+        bad = [p for p in ports if not (lo <= p <= hi)]
+        if not ports or bad:
+            die("0 档位", f"已发布端口未全落 {lo}~{hi}：{ports or '(解析为空)'}",
+                "测试档端口必须落 12000~13000；出现段外端口 ⇒ env 文件串档或端口表被改坏。\n"
+                "若 published: 的解析格式变了，把 `compose config` 原文贴出来核对")
+        R.add("0 档位", "PASS", f"已发布端口全部落 {lo}~{hi}：{ports}")
+
+
 # ── 1 前置 ───────────────────────────────────────────────────────────────────
 def step1_preflight() -> None:
     rc, out = run(["docker", "version", "--format", "{{.Server.Version}}"], cwd=REPO)
     if rc != 0:
         die("1 前置", "docker 不可用（WSL 里 docker 起了吗）", out.strip()[:400])
-    if not COMPOSE_FILE.exists():
-        die("1 前置", f"compose 文件不存在：{COMPOSE_FILE}")
+    if not PROFILE.compose_file.exists():
+        die("1 前置", f"compose 文件不存在：{PROFILE.compose_file}")
     # builder 是手工启停的常驻容器；不在就拉起来（它是打包/迁移的唯一执行者）
     rc, out = compose("ps", "-a", "--format", "json")
     services = {}
@@ -254,18 +437,33 @@ def step1_preflight() -> None:
     if b is None or b.get("State") != "running":
         rc, out = compose("up", "-d", "builder", timeout=180)
         if rc != 0:
-            die("1 前置", "nexus-builder 未运行且拉起失败", out.strip()[-500:])
-        R.add("1 前置", "PASS", "nexus-builder 已拉起（它是打包/迁移的执行者）")
+            die("1 前置", "builder 未运行且拉起失败（首次会连带构建镜像，失败请看构建输出）", out.strip()[-500:])
+        R.add("1 前置", "PASS", "builder 已拉起（它是打包/迁移的执行者）")
     else:
         R.add("1 前置", "PASS", f"docker OK / builder running / {len(services)} 个容器在册")
+    if PROFILE.cold_start:
+        # 测试档（CI）：栈可能是从零冷的 —— step3 / step4 立刻要用 PG / redis / ollama，
+        # 先把基础设施拉起来；ollama-init 一并放跑（模型 ≈6GB 与 step5 的构建**并行**，缩短首跑时长）。
+        # 开发档不走这里（栈由 up.sh 常驻）。
+        rc, out = compose("up", "-d", "postgres", "postgres-results",
+                          "redis", "ollama", "ollama-init", timeout=600)
+        if rc != 0:
+            die("1 前置", "测试档基础设施 up -d 失败（postgres / postgres-results / redis / ollama）",
+                out.strip()[-500:])
+        R.add("1 前置", "PASS", "测试档：基础设施已拉起（含 ollama-init，模型拉取与后续步骤并行）")
 
 
 # ── 2 拉取最新代码 ───────────────────────────────────────────────────────────
-def step2_git_sync(expect_sha: str | None) -> dict:
-    rc, out = builder("git-sync", timeout=180)
+def step2_git_sync(expect_sha: str | None, ref: str | None) -> dict:
+    # ref 走 **exec 层**参数（--ref），不改容器 env（env 只在容器创建时注入，改它必须重建容器；
+    # 见设计 05 §4.1-⑦）。省略 --ref ⇒ git-sync 维持分支模式，dev 行为不变。
+    cmd = ["git-sync"] + (["--ref", ref] if ref else [])
+    rc, out = builder(*cmd, timeout=180)
     if rc != 0:
-        die("2 拉取最新代码", "git-sync 失败（容器内拉不到远端？分支名对不对？）", out.strip()[-600:])
-    sha = branch = ""
+        die("2 拉取最新代码",
+            f"git-sync 失败（容器内拉不到远端？分支/ref 对不对？实际执行：git-sync {' '.join(cmd[1:])}）",
+            out.strip()[-600:])
+    sha = branch = subject = ""
     for line in out.splitlines():
         m = re.match(r"\s+([0-9a-f]{7,})\s+\d{4}-\d{2}-\d{2}\s+(.*)$", line)
         if m and not sha:
@@ -273,32 +471,38 @@ def step2_git_sync(expect_sha: str | None) -> dict:
         m2 = re.search(r"\[git-sync\] 分支\s*:\s*(\S+)", line)
         if m2:
             branch = m2.group(1)
-    info = {"sha": sha, "branch": branch, "subject": subject if sha else ""}
+    info = {"sha": sha, "branch": branch, "ref": ref or "", "subject": subject}
     if not sha:
         die("2 拉取最新代码", "git-sync 成功但没解析到提交（输出格式变了？）", out.strip()[-500:])
     if expect_sha and not (sha.startswith(expect_sha) or expect_sha.startswith(sha)):
         die("2 拉取最新代码", f"拉到 {sha}，与期望 {expect_sha} 不一致",
-            "说明【要部署的提交还没 push/merge 到远端分支】——容器只能拿到已 push 的提交")
-    R.add("2 拉取最新代码", "PASS", f"{sha}  {info['subject'][:38]}",
-          "⚠️ 请人工核对：这个 SHA 就是你刚 merge 的那个吗？", always_show_detail=True)
+            "说明【要部署的提交还没 push/merge 到远端分支（或 --ref 拉错了）】——容器只能拿到远端已有的提交")
+    label = f"ref={ref} " if ref else ""
+    R.add("2 拉取最新代码", "PASS", f"{label}{sha}  {subject[:38]}",
+          "⚠️ 请人工核对：这个 SHA 就是你刚 merge 的（或该 PR 的 head）吗？", always_show_detail=True)
+    GIT_INFO.update(info)
     return info
 
 
 # ── 3 配置快照与一致性（含"是否需要 rebuild 镜像"）────────────────────────────
-def step3_config(force_rebuild: bool) -> dict:
-    cfg = read_env(ENV_FILE)
+def step3_config(force_rebuild: bool, ref: str | None) -> dict:
+    cfg = read_env(PROFILE.env_file)
     backend_port = cfg.get("BACKEND_PORT", "8089")
     frontend_port = cfg.get("FRONTEND_PORT", "8088")
 
-    # 3.1 分支真源链：容器 env vs .env（**容器 env 才是构建真源**：改 .env 后要 up -d builder 才生效）
-    rc, out = compose("exec", "-T", "builder", "printenv", "NEXUS_REPO_BRANCH", timeout=60)
-    container_branch = out.strip().splitlines()[0] if rc == 0 and out.strip() else "(未知)"
-    if container_branch != cfg.get("NEXUS_REPO_BRANCH", "main"):
-        R.add("3 配置一致性", "FAIL",
-              f"分支不一致：容器={container_branch} / .env={cfg.get('NEXUS_REPO_BRANCH')}",
-              "容器 env 才是构建真源；改 .env 后要 up -d builder 重建容器才生效")
+    # 3.1 分支真源链：容器 env vs env 文件（**容器 env 才是构建真源**：改 env 后要 up -d builder 才生效）
+    # ⚠️ --ref 非空时（CI 拉 PR head），分支 env 不是真源 —— 本次实际拉的是 ref ⇒ 改为 INFO（设计 05 §4.1-⑦）。
+    if ref:
+        R.add("3 配置一致性", "INFO", f"NEXUS_REPO_BRANCH 检查跳过：本次由 --ref 指定（{ref}）")
     else:
-        R.add("3 配置一致性", "PASS", f"NEXUS_REPO_BRANCH={container_branch}（容器 env 与 .env 一致）")
+        rc, out = compose("exec", "-T", "builder", "printenv", "NEXUS_REPO_BRANCH", timeout=60)
+        container_branch = out.strip().splitlines()[0] if rc == 0 and out.strip() else "(未知)"
+        if container_branch != cfg.get("NEXUS_REPO_BRANCH", "main"):
+            R.add("3 配置一致性", "FAIL",
+                  f"分支不一致：容器={container_branch} / env 文件={cfg.get('NEXUS_REPO_BRANCH')}",
+                  "容器 env 才是构建真源；改 env 后要 up -d builder 重建容器才生效")
+        else:
+            R.add("3 配置一致性", "PASS", f"NEXUS_REPO_BRANCH={container_branch}（容器 env 与 env 文件一致）")
 
     # 3.2 模型清单：真源 = compose 的 ollama-init 清单（probe.sh 的 nexus_expected_models 读的就是它）
     expected = parse_expected_models()
@@ -312,6 +516,12 @@ def step3_config(force_rebuild: bool) -> dict:
     missing = [m for m in expected if m not in found]
     if not expected or rc != 0:
         R.add("3 配置一致性", "WARN", "模型清单未能对账（ollama 未响应或清单解析失败）")
+    elif missing and PROFILE.lenient:
+        # 测试档：模型暂缺 = "前置物不存在"（设计 05 §4.1-⑨ 判据档口径）。
+        # 首次 CI 运行时 ollama-init 往往仍在拉取（≈6GB），这里红会挡住整条链路；
+        # 真问题（清单写错 / 拉取失败）会在 5.4 的用例与 M7 的人工核对里暴露。
+        R.add("3 配置一致性", "WARN", f"模型暂缺：{' '.join(missing)}",
+              "测试档（lenient）：首次运行 ollama-init 可能仍在拉取（≈6GB）；E2E 用例前需就绪")
     elif missing:
         R.add("3 配置一致性", "FAIL", f"模型缺失：{' '.join(missing)}",
               "补拉：for m in <名单>; do docker compose exec -T ollama ollama pull $m; done")
@@ -324,7 +534,8 @@ def step3_config(force_rebuild: bool) -> dict:
     #    源文件第 47 行的**注释**里也写着这个指令名 ⇒ `grep -c` 数出 2，而首跑的判据是
     #    `endswith("1")` ⇒ 假警报（根因 3）；反向的坑更坏 —— 子串匹配会把「被 # 注释掉的指令」
     #    当成"有"，那是**漏报**：镜像里根本没生效，却给一个 PASS。
-    host_conf = COMPOSE_DIR.joinpath("frontend/nginx.conf").read_text(encoding="utf-8", errors="replace")
+    # ⚠️ frontend/nginx.conf 是**共用资产**（测试档零改动复用同一份）⇒ 路径跟档位目录走即可
+    host_conf = PROFILE.compose_dir.joinpath("frontend/nginx.conf").read_text(encoding="utf-8", errors="replace")
     if re.search(r"^[ \t]*client_max_body_size", host_conf, re.M):
         rc, out = compose("exec", "-T", "nexus-frontend", "grep", "-E",
                           r"^[[:space:]]*client_max_body_size",
@@ -338,6 +549,11 @@ def step3_config(force_rebuild: bool) -> dict:
                   "宿主源码里有 ⇒ 镜像里的是旧的 ⇒ 本次将触发前端镜像 rebuild"
                   "（前端容器本就没起时，这一行也是这个形态）\n"
                   f"exec 原始输出：{out.strip()[-200:] or '（空）'}")
+    elif PROFILE.lenient:
+        # 测试档：宿主 nginx.conf 缺该指令 = "前置物不存在" ⇒ WARN（设计 05 §4.1-⑨）；
+        # "存在但不一致"（容器内旧版）仍是上面那条 WARN 的既有口径。
+        R.add("3 配置一致性", "WARN", "宿主 nginx.conf 缺 client_max_body_size（>1MB 上传会 413）",
+              "测试档（lenient）：降级为 WARN；开发档同项是 FAIL")
     else:
         R.add("3 配置一致性", "FAIL", "宿主 nginx.conf 缺 client_max_body_size（>1MB 上传会 413）")
 
@@ -380,7 +596,7 @@ def step3_config(force_rebuild: bool) -> dict:
     state = load_state()
     baked = state.get("baked") or {}
     need: list[str] = []
-    for svc, files in BAKED_FILES.items():
+    for svc, files in PROFILE.baked_files.items():
         cur = {f: sha256(REPO / f) for f in files if (REPO / f).is_file()}
         was = baked.get(svc) or {}
         # 键集不等 = 首次运行（无基线）/ 文件增删 / 清单改过 —— 与内容变化同等对待：一律保守重建
@@ -395,12 +611,14 @@ def step3_config(force_rebuild: bool) -> dict:
 
 def parse_expected_models() -> list[str]:
     """
-    真源：docker-compose.yml 的 ollama-init 服务里的模型清单（probe.sh 的 nexus_expected_models 读的就是它）。
+    真源：**档位对应的** compose 文件里 ollama-init 服务的模型清单（probe.sh 的 nexus_expected_models 读的是开发那份）。
 
     ⚠️ 当前形态是 shell 内联循环 `for model in qwen2.5:7b bge-m3; do`，**不是 YAML 列表项** ——
     按 YAML 列表去解析会一个都找不到、然后误报"模型清单未能对账"。两种形态都兜住。
     """
-    text = COMPOSE_FILE.read_text(encoding="utf-8", errors="replace")
+    # ⚠️ 真源 = **档位对应的** compose 文件（设计 05 §4.1-②-ⓑ 的 4 处直接读者之一）：
+    #    不随档位切换 ⇒ 拿开发 compose 的模型清单给测试环境对账（两份今天恰好相同 ⇒ 静默不报）。
+    text = PROFILE.compose_file.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"\n  ollama-init:\n(.*?)(?=\n  [a-z-]+:\n)", text, re.S)
     if not m:
         return []
@@ -426,10 +644,17 @@ def step4_db_patch(env: dict) -> None:
     rc, out = compose("exec", "-T", "postgres", "psql", "-U", env.get("PG_USER", "nexus"),
                       "-d", env.get("PG_DB", "nexus"), "-tAc", "SELECT count(*) FROM t_db_patch", timeout=60)
     applied_n = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+    fresh_db = False
     if not applied_n.isdigit():
-        R.add("4 db-patch 校验", "FAIL", "查不到 t_db_patch（迁移表未建？）", out.strip()[-300:])
-        return
-    if int(applied_n) == len(host):
+        if PROFILE.lenient:
+            # 测试档：全新库还没有 t_db_patch（迁移表由第一次迁移自举）⇒ 不是失败，直接去迁移。
+            # 不降级的话，CI 的**首次运行**会被这条判据自己挡住（开发档不会遇到：库早就迁移过）。
+            fresh_db = True
+            R.add("4 db-patch 校验", "INFO", "t_db_patch 尚不存在（全新库）⇒ 直接执行迁移")
+        else:
+            R.add("4 db-patch 校验", "FAIL", "查不到 t_db_patch（迁移表未建？）", out.strip()[-300:])
+            return
+    if not fresh_db and int(applied_n) == len(host):
         R.add("4 db-patch 校验", "PASS", f"宿主 {len(host)} 个 = 已应用 {applied_n} 个（无新补丁，跳过迁移）")
         return
     # 有差额 ⇒ 真的需要迁移（迁移本身会做 checksum/乱序/篡改校验，失败即中止）
@@ -492,40 +717,65 @@ def step6_containers(cfg: dict, skip_build: bool) -> None:
     else:
         R.add("6 容器", "PASS", "无需 rebuild（烘进镜像的文件未变；dist 走卷挂载，重启即可生效）")
 
-    # 应用容器：up -d 应用配置变更（不变则是 no-op），restart 让后端加载新 jar
-    rc, out = compose("up", "-d", "nexus-backend", "nexus-frontend", timeout=300)
-    if rc != 0:
-        die("6 容器", "docker compose up -d 应用容器失败", out.strip()[-500:])
-    rc, out = compose("restart", "nexus-backend", timeout=180)
-    if rc != 0:
-        die("6 容器", "重启 nexus-backend 失败", out.strip()[-400:])
-    R.add("6 容器", "PASS", "nexus-backend 已重启（加载新 jar）；nexus-frontend 不需要重启")
+    if PROFILE.cold_start:
+        # 测试档（CI）：栈每次可能是冷的 / 半冷的 —— 本步把**全栈**拉起来（基础设施 + Metabase +
+        # 报告 Nginx + 应用）。builder 带 profiles: ["build"]，裸 up 不会把它算进来（它已在 step1 起好）。
+        # —— 5.1 的缺口补齐：开发档里栈由 up.sh 常驻，测试档没人管，必须由本脚本负责。
+        was_running = compose_ps_status().get(PROFILE.backend_container, ("", ""))[0] == "running"
+        rc, out = compose("up", "-d", timeout=600)
+        if rc != 0:
+            die("6 容器", "测试档 docker compose up -d（全栈）失败", out.strip()[-500:])
+        R.add("6 容器", "PASS", "测试档全栈已 up -d（基础设施 / Metabase / 报告 Nginx / 应用一并纳入）")
+        if was_running:
+            # ⚠️ 热环境：容器已在跑，up -d 对它是 no-op ⇒ 必须 restart 才吃到本次新 jar。
+            #    restart 用**服务名**（BACKEND_SERVICE），不是容器名（nexus-test-backend）——
+            #    两者在测试档不同名，写混会得到 "no such service"。
+            rc, out = compose("restart", BACKEND_SERVICE, timeout=180)
+            if rc != 0:
+                die("6 容器", "重启后端失败（热环境：加载本次新 jar）", out.strip()[-400:])
+            R.add("6 容器", "PASS", "后端已重启（热环境：加载本次新 jar）")
+        else:
+            R.add("6 容器", "PASS", "冷启动：后端由 up -d 直接以本次新 jar 启动，无需 restart")
+    else:
+        # 应用容器：up -d 应用配置变更（不变则是 no-op），restart 让后端加载新 jar
+        rc, out = compose("up", "-d", "nexus-backend", "nexus-frontend", timeout=300)
+        if rc != 0:
+            die("6 容器", "docker compose up -d 应用容器失败", out.strip()[-500:])
+        rc, out = compose("restart", "nexus-backend", timeout=180)
+        if rc != 0:
+            die("6 容器", "重启 nexus-backend 失败", out.strip()[-400:])
+        R.add("6 容器", "PASS", "nexus-backend 已重启（加载新 jar）；nexus-frontend 不需要重启")
 
 
 # ── 7 容器 health ────────────────────────────────────────────────────────────
 def step7_health(timeout_s: int = 180) -> None:
+    exp = PROFILE.expected_healthy
     start = time.time()
     last = ""
     while time.time() - start < timeout_s:
-        rc, out = compose("ps", "--format", "json")
-        status = {}
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    rec = json.loads(line)
-                    status[rec.get("Name", "")] = (rec.get("State", ""), rec.get("Health", ""))
-                except json.JSONDecodeError:
-                    pass
-        bad = [c for c in EXPECTED_HEALTHY if c not in status or status[c][0] != "running"
+        status = compose_ps_status()
+        bad = [c for c in exp if c not in status or status[c][0] != "running"
                or status[c][1] not in ("", "healthy")]
-        last = " / ".join(f"{c}={describe(status.get(c))}" for c in EXPECTED_HEALTHY)
+        last = " / ".join(f"{c}={describe(status.get(c))}" for c in exp)
         if not bad:
-            R.add("7 容器 health", "PASS", f"{len(EXPECTED_HEALTHY)}/{len(EXPECTED_HEALTHY)} running+healthy")
-            return
+            R.add("7 容器 health", "PASS", f"{len(exp)}/{len(exp)} running+healthy")
+            break
         time.sleep(3)
-    R.add("7 容器 health", "FAIL", f"未在 {timeout_s}s 内全部 healthy", last +
-          "\n证据：docker compose ps -a；日志：docker compose logs --tail 50 <容器>")
+    else:
+        R.add("7 容器 health", "FAIL", f"未在 {timeout_s}s 内全部 healthy", last +
+              "\n证据：docker compose -f <档位 compose> --env-file <档位 env> ps -a；"
+              "日志：同上加 logs --tail 50 <容器>")
+        return
+    if PROFILE.nonblocking_healthy:
+        # 非阻断项（测试档：Metabase / 报告 Nginx）—— 报告链路归 5.5，起得慢不该让部署红（设计 05 §4.1-⑤）
+        status = compose_ps_status()
+        bad2 = [c for c in PROFILE.nonblocking_healthy
+                if c not in status or status[c][0] != "running" or status[c][1] not in ("", "healthy")]
+        detail = " / ".join(f"{c}={describe(status.get(c))}" for c in PROFILE.nonblocking_healthy)
+        if bad2:
+            R.add("7 容器 health", "WARN", f"非阻断容器未就绪：{' '.join(bad2)}", detail)
+        else:
+            R.add("7 容器 health", "PASS", f"非阻断容器也已就绪：{' '.join(PROFILE.nonblocking_healthy)}")
 
 
 # ── 8 冒烟 ───────────────────────────────────────────────────────────────────
@@ -546,16 +796,18 @@ def step8_smoke(env: dict) -> None:
             break
     else:
         R.add("8 冒烟 /api/health", "FAIL", "两个端口都没拿到 200 + code=0",
-              "直连后端也失败 ⇒ 后端没起或依赖 DOWN：docker compose logs --tail 100 nexus-backend")
-    # 8.2 登录接口
+              "直连后端也失败 ⇒ 后端没起或依赖 DOWN："
+              "docker compose -f <档位 compose> --env-file <档位 env> logs --tail 100 nexus-backend")
+    # 8.2 登录接口（账号来自档位 / --login-user / --login-password；默认 admin/admin123 不变）
     code, body = http(f"{base}:{fp}/api/auth/login", "POST",
-                      {"username": "admin", "password": "admin123"}, timeout=20)
+                      {"username": PROFILE.login_user, "password": PROFILE.login_password}, timeout=20)
     if code == 200 and '"code":0' in body.replace(" ", ""):
         tok = re.search(r'"token"\s*:\s*"([^"]{8,})"', body)
-        R.add("8 冒烟 登录", "PASS", f"POST /api/auth/login 200 code=0（token 已获取，长度 {len(tok.group(1)) if tok else '?'}）")
+        R.add("8 冒烟 登录", "PASS",
+              f"POST /api/auth/login 200 code=0（用户 {PROFILE.login_user}；token 已获取，长度 {len(tok.group(1)) if tok else '?'}）")
     else:
         R.add("8 冒烟 登录", "FAIL", f"登录返回 HTTP {code}",
-              body.strip()[:300] + "\n（admin/admin123 是否被改？种子数据是否还在？）")
+              body.strip()[:300] + f"\n（{PROFILE.login_user} 的口令是否被改？种子数据是否还在？）")
     # 8.3 前端首页 + 首页引用的资源（证明 nginx root 指向的是**新** dist）
     code, html = http(f"{base}:{fp}/", timeout=20)
     if code != 200:
@@ -575,29 +827,54 @@ def step8_smoke(env: dict) -> None:
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    global PROFILE, SUMMARY_JSON, REF_ARG
     ap = argparse.ArgumentParser(description="nexus 一键部署（一次跑完、一张表、零提示）")
+    ap.add_argument("--profile", choices=sorted(PROFILES), default="dev",
+                    help="档位：dev=开发环境（默认，行为与此前一致）/ test=测试环境（设计 05 §4）")
     ap.add_argument("--no-build", action="store_true", help="跳过打包（沿用上次产物）")
     ap.add_argument("--rebuild", action="store_true", help="强制 rebuild 运行镜像")
     ap.add_argument("--expect-sha", default=None, help="断言 git-sync 拉到的提交前缀（防'没 push 就部署'）")
-    args = ap.parse_args()
+    ap.add_argument("--ref", default=None,
+                    help="git-sync 的 refspec（CI 拉 PR head 用：refs/pull/<N>/head；省略=分支模式）")
+    ap.add_argument("--login-user", default=None, help="冒烟登录用户（默认取档位值 admin）")
+    ap.add_argument("--login-password", default=None, help="冒烟登录口令（默认取档位值；日志不打明文）")
+    ap.add_argument("--summary-json", default=None, help="把机器可读摘要写到该路径（CI 档读它）")
+    ap.add_argument("--ci", action="store_true", help="CI 档：关颜色（失败即非 0 退出本就成立，见 SKILL.md）")
+    ap.add_argument("--no-color", action="store_true", help="关闭 ANSI 颜色（日志重定向时更干净）")
+    args = ap.parse_args(argv)
+
+    PROFILE = PROFILES[args.profile]
+    if args.login_user or args.login_password:
+        PROFILE = replace(PROFILE,
+                          login_user=args.login_user or PROFILE.login_user,
+                          login_password=args.login_password or PROFILE.login_password)
+    REF_ARG = args.ref
+    if args.summary_json:
+        SUMMARY_JSON = Path(args.summary_json).expanduser()
+    if args.ci or args.no_color:
+        disable_colors()
 
     print("=" * 78)
-    print(f" nexus 部署  {time.strftime('%Y-%m-%d %H:%M:%S')}   仓库 {REPO}")
+    print(f" nexus 部署（{PROFILE.name} 档）  {time.strftime('%Y-%m-%d %H:%M:%S')}   仓库 {REPO}")
+    print(f" compose={PROFILE.compose_file.name} + env={PROFILE.env_file.name}"
+          + (f"   ref={REF_ARG}" if REF_ARG else ""))
     print("=" * 78)
-    if not ENV_LOCAL.exists():
+    if PROFILE.warn_missing_env_local and not ENV_LOCAL.exists():
         R.add("0 环境", "WARN", ".env.local 缺失 ⇒ DEEPSEEK_API_KEY 未注入（云端模型那一半不可用）")
 
+    guard_profile()
     step1_preflight()
-    step2_git_sync(args.expect_sha)
-    cfg = step3_config(args.rebuild)
-    step4_db_patch(read_env(ENV_FILE))
+    step2_git_sync(args.expect_sha, args.ref)
+    cfg = step3_config(args.rebuild, args.ref)
+    step4_db_patch(read_env(PROFILE.env_file))
     step5_build(args.no_build)
     step6_containers(cfg, args.no_build)
     step7_health()
     step8_smoke(cfg)
 
     summary_print()
+    write_summary_json()
     return 1 if R.failed else 0
 
 

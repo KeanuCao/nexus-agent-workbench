@@ -37,3 +37,16 @@ REMOTE
 2. **SQL 走文件，别内联**：`wsl -- bash -c "... psql -c \"...\$\$...\""` 里 `$$`（SQL 里的美元引用/`$$`）会被 WSL 与宿主两层 shell 吃掉，实测报 `trailing junk after numeric literal at or near "3579nexus_patch_probe3579"`。可靠写法：SQL 落成 `.tmp/main/*.sql`，再 `docker exec -i nexus-postgres psql -U nexus -d nexus -f - < /mnt/c/.../x.sql`。
 3. **含 `docker exec -i` 的脚本必须落盘执行，不能用 `bash -s <`**：脚本与 `docker exec -i` 会争同一个 stdin，`-i` 把脚本正文吃光后命令就会静默空转（阶段3 验收任务书里专门点名了这条）。今天所有探针都落成 `.tmp/main/*.sh` / `*.py` + `MSYS_NO_PATHCONV=1 wsl -d ... -- bash <绝对路径>` 执行，零故障。
 4. **`api.deepseek.com` 是通的**（订正"整机无外网"的粗判）：`docker inspect nexus-backend` 显示容器**只注入了 `DEEPSEEK_API_KEY`、没注入 `DEEPSEEK_BASE_URL`** ⇒ base-url 取 `application.yml` 默认的 `https://api.deepseek.com`，而知识库问答实测 **595ms 返回 completion** ⇒ 容器确有到该域名的出网。**"无外网"只对 `docs.docker.com`/`github.com` 这类站点成立**（取文档这条路），别据此推断"云端模型不可用"。
+
+---
+
+**2026-10-09 补充（Windows 侧检查工具的两条实况）：**
+
+1. **行尾（LF/CRLF）检查别用 `grep -c $'\r'`**：在本工作区的 Bash 工具路径下，`$'\r'`（ANSI-C 引号）**不按预期展开**，
+   模式退化成空串 ⇒ 匹配**每一行**。实测：一份确认是 LF 的既有文件被报成 `CR=302`（恰好等于行数）。
+   **可靠判据**：`tr -dc '\r' < 文件 | wc -c` ⇒ 输出 `0` 即纯 LF。差点据此对 7 个文件批量 `sed`"修"一个不存在的问题 —— 先复核再动手。
+2. **开发发行版取不到 docker 时，可用 Windows 侧 Desktop 的 CLI 做纯客户端 `compose config`**：
+   `docker` 在 `/c/Program Files/Docker/Docker/resources/bin/docker`（2026-10-09 实测 v29.5.3 可跑
+   `docker compose -f … --env-file … config`，不连 daemon）。⚠️ 同日 `wsl -d nexus-agent-workbench -- docker version`
+   报 "docker could not be found in this WSL 2 distro"（Desktop 集成当时不可用）—— 属**可变的运行态**，别当永久结论；
+   该 CLI 的 compose 版本与测试发行版（v5.6.0）**不同**，用它出的结论要标注版本差异。

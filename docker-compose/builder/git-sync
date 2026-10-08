@@ -9,9 +9,15 @@
 #     宿主工作区里未 commit / 已 commit 未 push 的改动，容器**永远看不到**。
 #     所以「改完想构建」的正确顺序是：commit → push → builder 里 git-sync → 打包。
 #
+# 两种同步目标（2026-10-09 新增 --ref，供 CI 拉 PR 的 head）：
+#   默认（无参数）：分支模式 —— checkout origin/${NEXUS_REPO_BRANCH}（人工部署沿用，行为不变）。
+#   --ref <refspec>：ref 模式 —— git fetch origin <refspec> + checkout FETCH_HEAD。
+#     CI 用 `git-sync --ref refs/pull/<N>/head`；参数走 exec 层（不重建容器），原因见
+#     docs/design/05-自动化测试.md §4.1-⑦：NEXUS_REPO_* 只在容器创建时注入，改 env 必须重建容器。
+#
 # 为什么用 detached HEAD 而不是分支：
-#     这是**构建工作区**，永远不应该在这里提交。detached 到 origin/<branch>
-#     使每次同步的结果唯一确定（恰好等于远端），也免掉了本地分支的簿记。
+#     这是**构建工作区**，永远不应该在这里提交。detached 到 origin/<branch>（或 FETCH_HEAD）
+#     使每次同步的结果唯一确定（恰好等于远端对应 ref），也免掉了本地分支的簿记。
 #
 # 为什么 clean 只带 -fd、不带 -x：
 #     -x 会连 .gitignore 忽略的文件一起删 —— 那正是 target/ 与 node_modules/，
@@ -23,14 +29,46 @@ REPO_URL="${NEXUS_REPO_URL:?环境变量 NEXUS_REPO_URL 未设置（配置见 do
 REPO_BRANCH="${NEXUS_REPO_BRANCH:-main}"
 REPO_DIR="${NEXUS_REPO_DIR:-/workspace/repo}"
 
+# ── 可选参数：--ref <refspec>（省略 ⇒ 分支模式，行为与此前完全一致）──
+REF=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --ref)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "[git-sync] 失败：--ref 需要一个 refspec 值" >&2
+                exit 2
+            fi
+            REF="$2"
+            shift 2
+            ;;
+        *)
+            echo "[git-sync] 失败：未知参数 '$1'（本脚本只支持：--ref <refspec>）" >&2
+            exit 2
+            ;;
+    esac
+done
+
 echo "[git-sync] 仓库   : ${REPO_URL}"
-echo "[git-sync] 分支   : ${REPO_BRANCH}"
+if [ -n "${REF}" ]; then
+    echo "[git-sync] REF    : ${REF}"
+else
+    echo "[git-sync] 分支   : ${REPO_BRANCH}"
+fi
 echo "[git-sync] 工作区 : ${REPO_DIR}"
 
 if [ -d "${REPO_DIR}/.git" ]; then
     echo "[git-sync] 已存在工作区 → 增量同步"
     git -C "${REPO_DIR}" fetch --prune origin
-    git -C "${REPO_DIR}" checkout --force --detach "origin/${REPO_BRANCH}"
+    if [ -n "${REF}" ]; then
+        # PR ref 不在常规 fetch 的 refspec 内（refs/pull/* 是隐藏 ref），显式再取一次。
+        # 刻意**不加 --prune**：prune 是分支模式的清理动作，与显式 refspec 的语义不同，
+        # 两类行为别混在一条命令里。
+        echo "[git-sync] ref 模式：拉取 ${REF}"
+        git -C "${REPO_DIR}" fetch origin "${REF}"
+        git -C "${REPO_DIR}" checkout --force --detach FETCH_HEAD
+    else
+        git -C "${REPO_DIR}" checkout --force --detach "origin/${REPO_BRANCH}"
+    fi
     # 清掉上游已删除的未跟踪文件；保留 .gitignore 忽略的构建产物（见文件头）
     git -C "${REPO_DIR}" clean -fd
 else
@@ -40,6 +78,12 @@ else
     echo "[git-sync] 首次克隆"
     mkdir -p "$(dirname "${REPO_DIR}")"
     git clone --branch "${REPO_BRANCH}" "${REPO_URL}" "${REPO_DIR}"
+    if [ -n "${REF}" ]; then
+        echo "[git-sync] ref 模式：拉取 ${REF}"
+        git -C "${REPO_DIR}" fetch origin "${REF}"
+        git -C "${REPO_DIR}" checkout --force --detach FETCH_HEAD
+        git -C "${REPO_DIR}" clean -fd
+    fi
 fi
 
 echo "[git-sync] 同步完成，当前提交："
