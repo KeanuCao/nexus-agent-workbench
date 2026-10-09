@@ -324,6 +324,7 @@ onMounted(() => {
         401 不跳登录页、Result 不解包、失败文案不统一。
       -->
       <el-upload
+        data-tid="kb-upload"
         ref="uploadRef"
         drag
         show-file-list
@@ -406,6 +407,7 @@ onMounted(() => {
       </template>
 
       <el-input
+        data-tid="kb-question"
         v-model="question"
         type="textarea"
         :rows="3"
@@ -419,7 +421,7 @@ onMounted(() => {
 
       <div class="kb-actions">
         <!-- 文档为空时**不禁用**：会得到 grounded=false，那是正确行为（设计 §5.2 空态行） -->
-        <el-button type="primary" :loading="asking" @click="onAsk">
+        <el-button data-tid="kb-ask" type="primary" :loading="asking" @click="onAsk">
           {{ asking ? '检索并生成中…' : '提问' }}
         </el-button>
         <span class="kb-hint">答案只依据检索到的片段生成，引用见下方</span>
@@ -430,7 +432,7 @@ onMounted(() => {
         它们都是用户上传的外部文本经模型生成/原文回显，PDF/TXT 里出现 `<script>` 或
         `<img onerror=...>` 在 v-html 下就是一次 XSS。
       -->
-      <div v-if="lastAnswer && lastAnswer.grounded" class="kb-answer">
+      <div v-if="lastAnswer && lastAnswer.grounded" data-tid="kb-answer" class="kb-answer">
         <div class="kb-answer-label">答案</div>
         <!-- 模型输出里的换行是结构信息：CSS 默认会压成一行，看起来像"输出坏了" -->
         <div class="kb-answer-text">{{ lastAnswer.answer }}</div>

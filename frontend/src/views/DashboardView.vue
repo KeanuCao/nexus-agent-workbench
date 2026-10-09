@@ -4,7 +4,7 @@ import HealthCheckPanel from '@/components/HealthCheckPanel.vue'
 
 <template>
   <div class="page">
-    <h2 class="page-title">控制台</h2>
+    <h2 data-tid="dashboard-title" class="page-title">控制台</h2>
 
     <!-- 阶段0 验收项：页面加载时经 dev 代理调用后端真实接口 GET /api/health -->
     <HealthCheckPanel />

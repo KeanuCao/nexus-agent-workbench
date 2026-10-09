@@ -73,7 +73,7 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
   - 磁盘：`/` 与 `/var/lib/docker` 同一文件系统，**可用 948G** ✅；
   - 用户 `caotan` 在 `docker` 组 ✅、免 sudo 可用 ✅；`docker.service` **enabled + active** ✅（重启可自恢复）；
   - 插件：Compose v5.6.0 / buildx v0.38.0 ✅；镜像加速实测通过（`docker.m.daocloud.io/library/hello-world` 秒级拉通）✅；
-  - ⚠️ **待做**：重启 runner 服务（加 `docker` 组晚于 runner 启动 ⇒ 进程仍带旧组，CI 会 `permission denied ... docker.sock`）；
+  - ✅ **runner 服务已重启（2026-10-09 08:07，用户操作）**：`actions.runner.KeanuCao-nexus-agent-workbench.nexus-tester.service` = loaded active running；**runner 进程 Groups 含 docker GID 1003**（`/proc/831/status` 实证）⇒「旧组 ⇒ CI 里 permission denied」的风险已闭环；
   - ⚠️ **缓做**：`wsl --shutdown` 后重进的自动恢复验证（会连带停掉开发环境，择机再做）。
 - **完成判据**：Windows 侧 `wsl -d nexus-agent-workbench-test -- bash -c "docker version"` 打印出版本号，
   且 `ls /mnt` 看不到 `c`。
@@ -383,7 +383,7 @@ graph LR
 |---|------|---------|--------|-------------------|
 | 1 | **E2E 目录落哪** | 草稿 7：「目录应该在第一级建一个 test 目录，……应该有一个 ui 或者 e2e 目录用来保存测试脚本」<br>`CLAUDE.md` 目录约定：「E2E 待解禁后落 `/qa/e2e`，不放在本目录、也不与组件单测混放」<br>`qa/README.md` 目录表：`e2e/` 行的状态是"待 `docs/design/01-多租户与认证.md` §D8 解禁后再落"；`qa/e2e/.gitkeep` 已存在 | 草稿要新建**一级 `test/`**；宪法与 `qa/README.md` 把 E2E 指到 **`qa/e2e/`**（且 `qa/` 的定义是"不属于生产链路"的测试资产） | (a) **落 `qa/e2e/`（推荐）**：与宪法、`qa/README.md` 现有约定一致，零新增顶层目录、零新增目录约定；`qa/e2e/.gitkeep` 就是在等它<br>(b) 新建一级 `test/`：忠实草稿，但要同时改 `CLAUDE.md` 目录结构、`qa/README.md`，并把已有 `qa/e2e/` 占位删掉 —— 三处文档与一次迁移<br>⚠️ **本文件按 (a) 写**（更忠实于宪法），草稿的"第一级 test 目录"作为待拍板项保留 |
 | 2 | **`deploy.py` 复用方式** | 草稿 10：「如果 [`deploy.py`](../../scripts/py/deploy.py) 可以复用就好了」「测试环境也在 `nexus-agent-workbench-test` 里面搭一套吧，不知道会不会和 `nexus-agent-workbench` 里面的冲突，如果冲突，就复用 `nexus-agent-workbench` 里面的测试环境」 | 部署真源是 `scripts/py/deploy.py`（八步、零提示、失败即停等人）；但它的 compose 目录/文件名、容器名清单、登录账号、烘镜像文件清单都是**写死开发环境**的，且 CI 里"等人"这个前提不存在 | **结论：复用，且是"扩展"不是"另起炉灶"**（详见 5.1 的九个参数化点）。实现形态二选一：<br>(a) 给 `deploy.py` 加参数（`--compose-file` / `--project-name` / `--ref` / `--ci`…）—— 单一真源，但改动面压在现有部署链路上；<br>(b) **抽可参数化核心 + 加一个薄包装**（推荐）：现有调用路径零改动、风险最小，代价是两层入口；<br>(c) 另写 CI 专用脚本 —— **不推荐**：八步判据会有两份，必然漂移（本项目已出过"判据只写一份"的教训） |
-| 3 | **定位属性名：`tid` 还是 `data-tid`** | 草稿 12 的示例写 `tid="password"`；同条又要求"pytest 脚本优先使用 Role 结合 tid 定位" | 草稿用 `tid`；但 `tid` 不是标准自定义属性前缀，且**未来可能撞上某个组件的同名 prop**（届时静默变成 prop、DOM 上什么都没有）| (a) **`data-tid`（推荐）**：HTML 规范内建的自定义数据属性，不会被任何组件当 prop 吃掉，`[data-tid=x]` 选择器稳定；代价是与草稿字面不一致（需在文档里记一句）<br>(b) 保留 `tid`：忠实草稿；代价是需自己保证不撞 prop，且语义上"这是个自定义属性"对外不自明<br>⚠️ **选定后只能在** 5.3 的约定表 + `TC-05` **各写一处**，禁止两种混用 |
+| 3 | **定位属性名：`tid` 还是 `data-tid`** | 草稿 12 的示例写 `tid="password"`；同条又要求"pytest 脚本优先使用 Role 结合 tid 定位" | 草稿用 `tid`；但 `tid` 不是标准自定义属性前缀，且**未来可能撞上某个组件的同名 prop**（届时静默变成 prop、DOM 上什么都没有）| (a) **`data-tid`（推荐）**：HTML 规范内建的自定义数据属性，不会被任何组件当 prop 吃掉，`[data-tid=x]` 选择器稳定；代价是与草稿字面不一致（需在文档里记一句）<br>(b) 保留 `tid`：忠实草稿；代价是需自己保证不撞 prop，且语义上"这是个自定义属性"对外不自明<br>⚠️ **选定后只能在** 5.3 的约定表 + `TC-05` **各写一处**，禁止两种混用。✅ **已拍板（2026-10-09，用户）：(a) `data-tid`** |
 | 4 | **结果表与 SQL 视图的落位** | 草稿 5：「它应该有一个 postgrep 容器，用来保存测试结果作为查询使用」；草稿 15（Metabase 看统计）；`qa/README.md`：「`fixtures/sql/` 放种子/清理/取指纹的 SQL 片段，**不放表结构变更**（那些走 `db-patch`）」 | 结果表是**表结构**：放 `qa/fixtures/sql/` 违反 `qa/README.md`；放正式 `db-patch/` 则会被**开发库**一并建出来（测试基础设施表进开发库；将来有了生产库，同一条迁移链也会把它带过去）| (a) 走正式 `db-patch/`：单真源、复用现成迁移链路；代价是开发库多一张测试表（将来生产库同样会有）<br>(b) 归**测试环境自己的初始化目录**（落位随「待确认 1」的目录决定）：开发库保持干净；代价是多一条独立迁移路径，要自己保证幂等<br>(c) 由 Metabase/初始化脚本建：**不推荐**（schema 变更散在工具里）<br>⚠️ 本文件按"(b) 的落位待定、实现细节交设计文档"写 |
 | 5 | **PR 触发策略与 self-hosted runner 的安全面** | 草稿 2/3（runner 注册 + 能在 GitHub 看到）；草稿 17（PR 触发全链路）| **公开仓库 + self-hosted runner = 任何人开 PR 即可在你的机器上执行代码**；且 **fork PR 拿不到 repository secrets**（草稿 17 的邮件、云端 key 都会受影响）| (a) 仓库转私有（最干净，但要处理 builder 的拉码凭据 → M5-③）<br>(b) 保持公开 + 只允许**同仓分支**的 PR 触发（在 workflow 里判 `github.event.pull_request.head.repo.full_name == github.repository`）<br>(c) 保持公开 + 开启「外部贡献者需批准」<br>(d) 允许 fork PR：等于开放代码执行（**不推荐**）<br>⚠️ 无论哪条，**冒烟集合建议不依赖云端模型**（M4-③ 选 (b)），这样"fork 无 secret"不成为用例失败的原因 |
 | 6 | **邮件通知的落位** | 草稿 17：「最后邮件通知一下吧」 | 项目没有现成的通知脚本；`scripts/` 的定位是"生产链路（被 up.sh / 镜像构建 / db-patch 迁移消费）"，邮件步骤三者都不消费 | (a) 直接内联在 workflow 的 shell 步骤里（**推荐**，若 ≤ 20 行且只依赖 Python 标准库 `smtplib`）<br>(b) 落 `scripts/py/notify-mail.py`（与 `deploy.py` 同一个家；代价是要接受"`scripts/` 也会装 CI 用的脚本"这一口径扩展）<br>(c) 用 marketplace 的邮件 action（不推荐：多一个外部依赖，与"零 marketplace action"的建议相悖） |
@@ -396,8 +396,9 @@ graph LR
 | 待确认 #2 | `deploy.py` 复用形态 | **(b) 抽可参数化核心 + 薄包装**（硬规则：包装层只组装参数、不含判据） | 设计文档 §5.1 |
 | D2 | 测试 compose / env 落位 | **(a) `docker-compose/docker-compose.test.yml` + `.env.test`**（build.context 相对 compose 目录 ⇒ 三份 Dockerfile 零改动复用） | 设计文档 §5.2 |
 | D3 | 端口口径 | **B：只发布跨出 docker 边界必需的 5 个**（12002 / 12005 / 12006 / 12007 / 12008） | 设计文档 §2.4 |
+| 待确认 #3 | 定位属性名 | **(a) `data-tid`**（禁止与 `tid` 混用；约定表与 TC-05 各写一处） | 设计文档 §7.2 |
 
-> 其余待确认（#3 定位属性名 / #4 结果表落位 / #5 PR 触发策略 / #6 邮件落位）**不阻塞 5.1**，分属 5.3 / 5.5 / 5.2。
+> 其余待确认（#4 结果表落位 / #5 PR 触发策略 / #6 邮件落位）**不阻塞 5.1**，分属 5.5 / 5.2。
 
 ## ⚠️ 需实测确认（高风险项清单，逐条配验证动作）
 
@@ -435,7 +436,7 @@ graph LR
 
 - [ ] 5.1 测试环境编排与部署链路复用 —— ✅ 已解锁；**设计已确认（D1/D2/D3 已拍），待开工**
 - [ ] 5.2 CI 触发与通知链路 —— 压在 M2 / M3 / M5 / 5.1 之后
-- [ ] 5.3 前端定位契约（`data-tid` 收窄改造）—— **不被 M 阻塞，可先开工**
+- [x] 5.3 前端定位契约（`data-tid` 收窄改造）—— ✅ 交付（2026-10-09）：16 值 / 5 文件 + 设计文档 §7.2（唯一真源）；静态判据全过（值唯一、无混用、type-check 0）；**浏览器实测 5 条归 5.4 / M7**
 - [ ] 5.4 pytest + Playwright 冒烟框架与用例 —— 骨架可先写，真跑压在 M1 / M4 之后
 - [ ] 5.5 报告与结果可视化链路 —— 压在 5.1 / 5.4 之后，验收含 M6
 
