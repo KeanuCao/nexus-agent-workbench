@@ -1,6 +1,6 @@
 # task.6 自动化测试（E2E 冒烟）（阶段5）
 
-> 任务级别：L1 阶段级（跨模块、影响架构） ｜ 状态：🚧 进行中（M1~M4 ✅；**5.1 ✅ 交付 + dev 回归 27s 全绿；5.3 ✅ 已合并 PR #19 并部署**；5.4 待开工）
+> 任务级别：L1 阶段级（跨模块、影响架构） ｜ 状态：🚧 进行中（M1~M5 ✅；**5.1~5.4 ✅ 全部交付**；5.5 待开工；首跑 + M5.5 + M6 / M7 待做）
 > ⚠️ **前置闸门（已推进）**：M1~M4 已完成（2026-10-08）—— **5.1 / 5.3 / 5.4 已解锁**；
 > 5.2 仍压在 M2/M3 的交接物（标签字符串、secret 键名）与 M5 上，5.5 压在 5.1 / 5.4 上。
 > 设计文档：`docs/design/05-自动化测试.md` ｜ 测试案例：`docs/test-cases/TC-05.md`
@@ -157,6 +157,29 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
   "值在哪个文件的哪个键"这句话能指着说清。
 - **完成判据**：AI 只要键名就能把 workflow / 邮件步骤写出来；跑起来时值能从真源取到（M7 一并验证）。
 
+### M5.5 准备 runner 侧运行环境（持久 venv + Chromium，一次性）
+
+- **为什么必须手工**：`playwright install --with-deps` 需要 **root/sudo**（装系统库），而 CI 非交互（输不了密码）；
+  要么人工装一次，要么给 runner 配免密 sudo（等于再让一份代码拥有 root，不做）。⇒ 这是**隐性人工前置**：
+  不写清"谁装、判据是什么"，CI 会在第一次 PR 上以"步骤 2 红"现形。
+- **前置条件**：M1（发行版）✅；发行版内 `python3` 可用；PyPI 与 Playwright CDN 可达（⚠️ 需实测）；sudo 可用。
+- **逐步操作**（在测试发行版内、任意一份 checkout 里跑；与设计 §7.1.8-② 的命令一字对齐）：
+
+  ```bash
+  python3 -m venv "$HOME/nexus-e2e-venv"
+  "$HOME/nexus-e2e-venv/bin/pip" install -r <checkout>/qa/e2e/requirements.txt
+  "$HOME/nexus-e2e-venv/bin/python" -m playwright install --with-deps chromium   # 要 sudo 装系统库
+  sha256sum <checkout>/qa/e2e/requirements.txt | cut -d' ' -f1 > "$HOME/nexus-e2e-venv/.requirements.sha256"
+  ```
+
+  ⚠️ **指纹行最后写**，且用**与 CI 同一份内容**的 `requirements.txt`（checkout 先 pull 到最新）——
+  指纹不一致时 workflow 会红，那正是"有人改了依赖、venv 该重装"的正确信号。
+- **交接物**：venv 路径 ｜ 发行版 `python3 -V` ｜ `playwright --version` 与 chromium 版本 ｜ 指纹文件已写入 ｜
+  PyPI / Playwright CDN 可达性 ｜ sudo 是免密还是需密码。
+- **完成判据**（不依赖 CI，发行版内直接验）：workflow 步骤 2 的等价三条全过 ——
+  ① `test -x "$HOME/nexus-e2e-venv/bin/python"`；② 指纹与 `qa/e2e/requirements.txt` 一致；
+  ③ `"$HOME/nexus-e2e-venv/bin/python" -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); print('chromium OK:', b.version); b.close(); p.stop()"` 打印版本号。
+
 ### M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 
 - **为什么必须手工**：浏览器操作 + 管理员账号口令，且"要看什么统计"是你的判断（草稿 15）。
@@ -210,6 +233,7 @@ graph LR
 
 - **不被任何 M 阻塞的只有 5.3**（前端加定位属性）—— 它是本阶段唯一可以在 M1 之前就开工的活。
 - 5.4 的**框架骨架**可先写，但**能不能真跑**取决于 M1/M4。
+- **M5.5**（runner 环境准备，2026-10-10 新增）—— 5.2 工作流步骤 2 与冒烟实跑的前置，已并入首跑清单。
 
 ---
 
@@ -440,6 +464,7 @@ graph LR
   ④ **密钥真源 = GitHub Repository secrets**（2026-10-09 拍板；理由：日志自动打码 + 值不落发行版磁盘）；**6 个键已建**：`SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `MAIL_FROM` / `MAIL_TO`（值由用户填，AI 不看）
 - [x] M4 测试环境资源与复用决策（含"是否复用开发环境"的拍板）
 - [x] M5 凭据归集 —— ✅ **闭环（2026-10-09）**：**SMTP** 6 键已入 GitHub secrets（真源唯一，见 M3-④）；**DeepSeek key 不需要**（M4-③ 不依赖云端）；**git 拉码凭据不需要**（公开仓库、匿名 clone）
+- [ ] M5.5 准备 runner 侧运行环境（持久 venv + Chromium）—— 一次性手工（2026-10-10 新增）；判据 = workflow 步骤 2 的等价三条全过
 - [ ] M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 - [ ] M7 首次链路验证（开 PR → 看 Actions → 收邮件 → 看报告）
 
@@ -451,5 +476,5 @@ graph LR
 - [x] 5.4 pytest + Playwright 冒烟框架与用例 —— ✅ 交付（2026-10-09）：`qa/e2e/` 工程 + S1~S5 + `TC-05.md`；`--collect-only` 5 条收齐（主会话独立复跑）；**真跑待 18:00 后首跑**（那时才可标「已验证」）
 - [ ] 5.5 报告与结果可视化链路 —— 压在 5.1 / 5.4 之后，验收含 M6
 
-> 📌 **解锁状态（2026-10-09）**：**5.1 ✅（dev 回归 27s 全绿）/ 5.3 ✅（PR #19 已合并并部署）**；**5.4 进行中**（qa-engineer 起草）；**5.2 输入已全齐**（M2/M3/M5 ✅）⇒ 待 5.4 验收后按串行节奏派活；5.5 待 5.4。
-> ⏳ **测试环境首跑待做**（18:00 后；镜像与模型预拉均已完成 ✓；`-f`+`--env-file` 语义已由路线 A 实测关闭）——它是 5.1 的运行期验收（含「需实测」清单数条）。
+> 📌 **解锁状态（2026-10-10）**：**5.1~5.4 ✅ 全部交付**（5.1 含 dev 回归、5.2 含 (b) 重构与 CI 档、5.3 已部署、5.4 框架已复核）；**只剩 5.5**（报告链路，待首跑验过 5.1 / 5.4 后开工）。
+> ⏳ **待做**：**测试环境首跑**（5.1 的运行期验收 + 5.4 的「已验证」）/ **M5.5**（runner 环境一次性准备）/ M6 / M7。
