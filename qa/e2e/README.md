@@ -35,14 +35,22 @@
 | --- | --- | --- |
 | 发行版/系统 | `nexus-agent-workbench-test`（不挂 `/mnt/c`） | Windows 11 |
 | Python | 系统 `python3`（⚠️ **版本未核**，需实测） | **3.14.4**（已实测：四个包都有轮子） |
-| 建 venv | `python3 -m venv .venv` | `py -3.14 -m venv .venv` |
-| 装依赖 | `.venv/bin/pip install -r requirements.txt` | `.venv\Scripts\python -m pip install -r requirements.txt` |
-| 装浏览器 | `.venv/bin/python -m playwright install --with-deps chromium` ⚠️ 需实测（`--with-deps` 要 sudo 装系统库） | `.venv\Scripts\python -m playwright install chromium` ⚠️ 需实测 |
-| 跑 | `.venv/bin/python -m pytest` | `.venv\Scripts\python -m pytest` |
+| 建 venv | `python3 -m venv "$HOME/nexus-e2e-venv"`（**不放在 checkout 里**，见下方「为什么是两条路」） | `py -3.14 -m venv .venv` |
+| 装依赖 | `"$HOME/nexus-e2e-venv/bin/pip" install -r requirements.txt` | `.venv\Scripts\python -m pip install -r requirements.txt` |
+| 装浏览器 | `"$HOME/nexus-e2e-venv/bin/python" -m playwright install --with-deps chromium` ⚠️ 需实测（`--with-deps` 要 sudo 装系统库） | `.venv\Scripts\python -m playwright install chromium` ⚠️ 需实测 |
+| 跑 | `"$HOME/nexus-e2e-venv/bin/python" -m pytest` | `.venv\Scripts\python -m pytest` |
 | 到被测环境的链路 | 同宿主，`127.0.0.1:12006` 直达 | 走 WSL2 的 `localhost` 转发 ⚠️ **需实测**（设计 05 §6-9） |
 
 > ⚠️ 浏览器**不进依赖**：`playwright install` 会把 Chromium 下到用户缓存目录（约 150MB+），
 > 首跑之前装一次即可（本工程交付时**刻意没装**）。离线/受限网络下这条会失败，属环境问题、不是用例问题。
+
+> **为什么是两条路（2026-10-10 补）**：CI 的 workflow（`.github/workflows/e2e-smoke.yml`）第 1 步是手写 checkout，
+> 它做 `git clean -fdq` 把工作区还原成"恰好这份 PR 树" ⇒ **checkout 里的 `.venv` 每次都会被清掉**。
+> 所以 A 面（CI / 测试发行版）的 venv 放 `$HOME/nexus-e2e-venv`，与 checkout 解耦；
+> B 面（Windows 本地调试）不受那条 `git clean` 影响，沿用 `<checkout>/qa/e2e/.venv` 即可。
+> A 面的**一次性准备命令、三条校验**（venv 在 / `requirements.txt` 指纹一致 / chromium 真启动）与取舍理由
+> 见 `docs/design/05-自动化测试.md` §7.1.8-②（**不复述**）；workflow 的自检步在缺 venv / 指纹不符时，
+> 会把那条一次性命令**原样打在日志里**。
 
 ### 常用命令
 
@@ -62,6 +70,8 @@ cd <CHECKOUT>/qa/e2e && .venv/bin/python -m pytest --headed --tracing=on --scree
 
 `<CHECKOUT>` = 仓库根。在测试发行版里它是 runner 的工作区（首次运行由 M7 确定实际路径）；
 在 Windows 本地是 `C:\wp\nexus-agent-workbench`。
+⚠️ 上面那几条命令里的 `.venv` 是 **B 面（Windows 本地）** 的写法；在 **A 面（测试发行版 / CI）** 请换成
+`$HOME/nexus-e2e-venv`（即 `"$HOME/nexus-e2e-venv/bin/python" -m pytest`，理由见上表下方的「为什么是两条路」）。
 
 ## 可配项（环境变量）
 
