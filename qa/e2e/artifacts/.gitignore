@@ -1,0 +1,11 @@
+# 运行产物 —— 每一次跑都会重写这里，**不入库**：
+#   allure-results/      allure-pytest 写的原始 JSON（5.5 用它生成 HTML 报告）
+#   playwright/          Playwright 的失败留痕（trace.zip + test-failed-1.png）
+#   runs/                每次运行的结构化结果副本（<run_id>.json）
+#   run-results.json     最近一次运行的结构化结果
+#   .pytest_cache/       pytest 自己的缓存（pytest.ini 把它指到了这里）
+#
+# 为什么必须忽略：阶段验收有一条「跑前跑后 git status --porcelain 一致」的无害性判据，
+# 运行产物若出现在 git status 里，这条判据会被噪音淹没。
+*
+!.gitignore
