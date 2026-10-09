@@ -110,6 +110,7 @@ async function onSubmit(): Promise<void> {
       >
         <el-form-item label="用户名" prop="username">
           <el-input
+            data-tid="login-username"
             v-model="form.username"
             placeholder="请输入用户名"
             autocomplete="username"
@@ -120,6 +121,7 @@ async function onSubmit(): Promise<void> {
         <el-form-item label="密码" prop="password">
           <!-- show-password 只影响显示；native-type=submit 让回车与点击走同一条提交路径 -->
           <el-input
+            data-tid="login-password"
             v-model="form.password"
             type="password"
             placeholder="请输入密码"
@@ -130,6 +132,7 @@ async function onSubmit(): Promise<void> {
 
         <!-- 失败提示常驻页面（全局 ElMessage 会自动消失，页面内这条便于对照排查） -->
         <el-alert
+          data-tid="login-error"
           v-if="errorMessage"
           class="login-error"
           type="error"
@@ -140,6 +143,7 @@ async function onSubmit(): Promise<void> {
 
         <el-form-item>
           <el-button
+            data-tid="login-submit"
             type="primary"
             native-type="submit"
             class="login-submit"

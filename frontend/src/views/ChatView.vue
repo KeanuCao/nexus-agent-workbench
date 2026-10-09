@@ -249,7 +249,7 @@ function onInputKeydown(event: KeyboardEvent): void {
       <template #header>
         <div class="chat-toolbar">
           <span class="chat-toolbar-label">模型</span>
-          <el-select v-model="model" class="chat-model" :disabled="streaming">
+          <el-select data-tid="chat-model" v-model="model" class="chat-model" :disabled="streaming">
             <el-option
               v-for="item in modelOptions"
               :key="item.value"
@@ -294,6 +294,7 @@ function onInputKeydown(event: KeyboardEvent): void {
       />
 
       <el-input
+        data-tid="chat-input"
         v-model="input"
         type="textarea"
         :rows="3"
@@ -303,11 +304,11 @@ function onInputKeydown(event: KeyboardEvent): void {
       />
 
       <div class="chat-actions">
-        <el-button type="primary" :disabled="streaming" @click="onSend">
+        <el-button data-tid="chat-send" type="primary" :disabled="streaming" @click="onSend">
           {{ streaming ? '生成中…' : '发送' }}
         </el-button>
         <!-- 流式期间才出现「停止生成」：它同时是验收 2.3-2 的复现动作 -->
-        <el-button v-if="streaming" type="danger" plain @click="onStop">停止生成</el-button>
+        <el-button data-tid="chat-stop" v-if="streaming" type="danger" plain @click="onStop">停止生成</el-button>
       </div>
     </el-card>
   </div>
