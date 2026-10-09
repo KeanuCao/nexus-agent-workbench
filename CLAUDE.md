@@ -72,7 +72,9 @@ CLAUDE.md 是"宪法"：编码规范、技术选型、禁止事项以本文档�
                             #   E2E 待解禁后落 /qa/e2e，不放在本目录、也不与组件单测混放
 /docker-compose             # 环境依赖 (PostgreSQL+pgvector, Redis, Ollama, 构建容器)
 /db-patch                   # 数据库补丁 (命名规则见 db-patch 工作流章节)
-/scripts                    # 项目脚本（**生产链路**，会被 up.sh / 镜像构建 / db-patch 迁移消费）
+/scripts                    # devops 工具脚本（服务 **开发 / 测试 / 未来生产** 三个环境）：
+                            #   up.sh / 镜像构建 / db-patch 迁移消费其中的环境脚本；
+                            #   CI（测试环境）的部署与通知脚本也住这里 —— 一份脚本、三环境复用
  ├── py/deploy.py           #   一键部署（八步：拉代码→配置对账→db-patch 校验→打包→容器→health→冒烟）
  │                          #   流程真源见 .claude/skills/deploy/SKILL.md（skill 里只留文档，不留脚本）
  └── sh/                    #   环境脚本（WSL 内执行）
@@ -83,8 +85,8 @@ CLAUDE.md 是"宪法"：编码规范、技术选型、禁止事项以本文档�
                             #   ⚠️ probe.sh 的 NEXUS_REPO_ROOT 与 deploy.py 的仓库根定位都**对位置敏感**：
                             #      搬动 scripts/ 下的目录时务必复核（前者按 ../ 层数、后者按标记上溯）
 /qa                         # 测试资产：夹具 fixtures（探针补丁/种子 SQL）+ 用例辅助脚本 + E2E。
-                            #   不属于生产链路（up.sh / 镜像构建 / db-patch 迁移都不读它）；
-                            #   测试夹具禁止放 scripts/ db-patch/ docker-compose/（那些会被生产链路消费）。
+                            #   不被部署链路消费（up.sh / 镜像构建 / db-patch 迁移都不读它）；
+                            #   测试夹具禁止放 scripts/ db-patch/ docker-compose/（它们都会被 up.sh / 镜像构建 / db-patch 迁移消费）。
                             #   约定见 qa/README.md，纪律见 qa-engineer charter 的《Test Harmlessness》
 /docs/test-cases            # 每个阶段交付后的测试案例设计 (TC-00, TC-01, ...)
 ```
