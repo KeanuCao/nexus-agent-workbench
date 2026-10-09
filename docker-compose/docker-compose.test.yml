@@ -193,6 +193,11 @@ services:
       POSTGRES_PASSWORD: ${PG_PASSWORD:-nexus123}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # ── RAG 回答模型：测试档不配云端密钥（M4-③），必须指向本地 Ollama ──
+      # 开发档由 .env.local 经 env_file 直接喂；测试档不挂它，故在此显式透传（2026-10-09 补：
+      # 此前两处都缺 ⇒ /api/kb/ask 必回 503 + 20100）。默认写 OLLAMA：application.yml:226 的默认
+      # 是 DEEPSEEK —— 配置没进容器时会以「未配置 DEEPSEEK_API_KEY ⇒ 20100」现形，不是静默。
+      NEXUS_AI_RAG_ANSWER_MODEL_TYPE: ${NEXUS_AI_RAG_ANSWER_MODEL_TYPE:-OLLAMA}
     # ★ 测试档刻意**不挂** .env.local（M4-③：不依赖云端模型；workflow 无 DeepSeek secret）
     volumes:
       - build-artifacts:/artifacts:ro

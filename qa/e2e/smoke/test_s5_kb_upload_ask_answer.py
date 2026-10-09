@@ -33,15 +33,9 @@ ANSWER_KEYWORD = "客户成功部"
 # 引用卡片的标题形态：`文件名 · 第 N 段 · 相似度 x.xx`（chunkIndex 0 起 ⇒ 显示时 +1）
 CITATION_TITLE = re.compile(r"知识库说明\.txt · 第 \d+ 段 · 相似度 \d")
 
-# 环境前置不满足时（测试环境没把 RAG 回答模型指向本地）本用例记 SKIP 而不是 FAIL ——
-# 详见 `qa/e2e/README.md`「已知前置」与 `docs/test-cases/TC-05.md` §0 的说明。
-ENV_PRECONDITION_SKIP = (
-    "环境前置不满足：/api/kb/ask 回了 code=20100（上游回答模型不可达）——"
-    "测试环境按 M4-③ 不配云端密钥，而 nexus.ai.rag.answer-model-type 仍指向 DEEPSEEK。"
-    "修法（一行）：测试档把回答模型改成 OLLAMA（README「已知前置」给了两种落点）。"
-    "若要区分「环境没配」与「模型真挂了」，看后端日志：出现"
-    "「未配置 DEEPSEEK_API_KEY」= 环境未配；出现「上游不可达 / 超时」= 真失败，那时本用例该 FAIL 而不是 SKIP。"
-)
+# 环境前置（2026-10-09 已修复）：测试档把 RAG 回答模型指向本地 Ollama
+# （`.env.test` 的 NEXUS_AI_RAG_ANSWER_MODEL_TYPE + 测试 compose 的 backend environment 透传）。
+# 故 code=20100（上游回答模型不可达）不再是"环境没配"，**按失败处理**（记要见 qa/e2e/README.md）。
 
 
 @pytest.fixture
@@ -135,10 +129,11 @@ def test_s5_kb_upload_then_ask_shows_answer_with_citations(
 
     ask_response = ask_info.value
     ask_body = api.payload_of(ask_response) or {}
-    if ask_body.get("code") == 20100:
-        pytest.skip(ENV_PRECONDITION_SKIP)
     assert ask_body.get("code") == 0, (
-        f"问答失败：HTTP {ask_response.status} / body={str(ask_body)[:300]}"
+        f"问答失败：HTTP {ask_response.status} / body={str(ask_body)[:300]}；"
+        f"code=20100 = 上游回答模型不可达 —— 测试档应走本地 Ollama，检查 "
+        f"NEXUS_AI_RAG_ANSWER_MODEL_TYPE 是否透传进容器；"
+        f"后端日志分流：「未配置 DEEPSEEK_API_KEY」= 配置没进容器 /「上游超时或报错」= 本地模型真挂了"
     )
 
     answer = ask_body.get("data") or {}

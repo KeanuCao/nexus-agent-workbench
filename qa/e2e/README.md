@@ -127,7 +127,7 @@ JSON，UTF-8，**LF**，`indent=2`；一次运行一份。5.5 落库就读它。
 ```
 
 - **状态口径**：`failed` = 用例断言没过；`error` = 夹具或收尾出问题（含登录前置不成立）；
-  `skipped` = 环境前置不满足（见下节）—— 三者别混着看。
+  `skipped` = 环境前置不满足（**当前五条都没有 skip 分支** —— 原 S5 的 `20100` 分支已按失败处理，见下节）—— 三者别混着看。
 - **`cleanup`** 是**无害性自证**的落点：`ok` = 跑完环境回到原样并有观察为证；`warn` = 自证未达成
   （处置写在 `detail` 里，一般等 TTL 自净即可）；`none` = 本次没有产生需要清理的东西。
   **它不改变用例主结论** —— 主结论只由断言决定。
@@ -140,19 +140,17 @@ JSON，UTF-8，**LF**，`indent=2`；一次运行一份。5.5 落库就读它。
   （进 `run-results.json` 的 `message`），以及 Allure 报告里的同一条记录。
 - 失败发生在**夹具阶段**（例如登录拿不到 token）同样会留痕 —— 那时截图是登录页，正是要看的东西。
 
-## 已知前置：S5 需要把 RAG 回答模型指向本地（**开口项，需 devops 一行配置**）
+## 已修复（2026-10-09）：S5 的 RAG 回答模型已指向本地（原「已知前置」开口项，已关）
 
-`nexus.ai.rag.answer-model-type` 的默认值是 `DEEPSEEK`，而测试环境按 **M4-③ 不配云端密钥** ⇒
-`/api/kb/ask` 会以 **HTTP 503 + `code=20100`** 失败，S5 拿不到答案。
+**记要（修复前）**：`nexus.ai.rag.answer-model-type` 的默认值是 `DEEPSEEK`，而测试环境按 **M4-③ 不配云端密钥**
+⇒ `/api/kb/ask` 会以 **HTTP 503 + `code=20100`** 失败，S5 拿不到答案。
 
-- **本用例的处置**：S5 见 `code=20100` 即记 **SKIP**（环境前置不满足，不记失败 —— 沿用 TC-03 §0 的口径
-  "别把它记成本用例失败"），skip 理由里写清怎么分辨"环境没配"与"模型真挂了"。
-- **修法（任选一处，都在测试档，别碰开发环境）**：
-  - `.env.test` 加一行 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE=OLLAMA`，并让 `docker-compose.test.yml` 的
-    `nexus-backend.environment` 把 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE` 透传进容器（**两处都要**：
-    现在 compose 里没有这个键，光写 env 文件到不了容器里）；
-  - 或给测试环境配云端密钥 —— 与 M4-③ 冲突，**不推荐**。
-- 修好之后 S5 会真的跑起来（不再 SKIP）；届时若还见 20100，那就是**真的上游故障**，按失败处理。
+- **修法（两处缺一不可，2026-10-09 已落地）**：
+  - `docker-compose/.env.test` 加 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE=OLLAMA`；
+  - `docker-compose/docker-compose.test.yml` 的 `nexus-backend.environment` 把它透传进容器
+    （此前 compose 里没有这个键，光写 env 文件到不了容器里）。
+- **本用例的处置（已随之更新）**：S5 **不再**把 `code=20100` 记 SKIP —— **若再见 20100 即真故障，按失败处理**
+  （失败信息里给了分流：「未配置 DEEPSEEK_API_KEY」= 配置没进容器 /「上游超时或报错」= 本地模型真挂了）。
 - ⚠️ **反过来也别配**：给测试环境塞云端密钥（与 M4-③ 冲突）会让本条每次跑都真发一次**计费**调用，
   而且把"测试不依赖外部网络"这条判据破掉。
 
