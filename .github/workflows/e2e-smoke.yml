@@ -155,9 +155,9 @@ jobs:
           fi
 
       # ── 6 邮件通知（成功与失败都发）──────────────────────────────────────────────
-      # 只用 6 个 repository secrets（M5 交接物），不出现任何明文凭据；日志不打值。
-      # TLS 口径：端口 465 = 隐式 TLS（SMTP_SSL）；其余（如 587）= STARTTLS —— ⚠️ 由端口推断，
-      # 因为 M5 的 6 键里没有"是否 TLS"这一项（未实测，见 §7.1.7）。
+      # 实现 = scripts/py/notify-mail.py（2026-10-10 拍板：独立脚本，**可单独重放** ——
+      # 邮件没到/内容不对时不必重跑整条链路；用法与重放命令见该文件头 + 设计 05 §7.1.8-①）。
+      # 本步只做两件事：注入 env（6 个 repository secrets）+ 调脚本；**判据与拼正文都不在这里**。
       - name: 邮件通知（SMTP，成功与失败都发）
         if: always()
         env:
@@ -170,33 +170,5 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          python3 - <<'PY'
-          import json, os, smtplib
-          from email.message import EmailMessage
-
-          def load(p):
-              try: return json.load(open(p, encoding="utf-8"))
-              except Exception: return {}
-
-          dep = load(os.environ["DEPLOY_SUMMARY"])
-          res = load(os.environ["E2E_ARTIFACTS"] + "/run-results.json")
-          if res.get("run_id") != os.environ["E2E_RUN_ID"]: res = {}   # 旧产物护栏
-          rows = "\n".join(f'[{s["status"]}] {s["step"]} {s["summary"]}' for s in dep.get("steps", []) if s["status"] in ("FAIL", "WARN"))
-          tot = res.get("totals") or {}
-          smoke = f"通过 {tot.get('passed', '-')} / 失败 {tot.get('failed', '-')} / 跳过 {tot.get('skipped', '-')} / 错误 {tot.get('error', '-')}" if res else "本次没有结果文件（部署失败 / 没跑到冒烟）"
-          body = (f"PR #{os.environ['PR_NUMBER']}  结论：{os.environ['JOB_STATUS']}\n运行：{os.environ['RUN_URL']}\n\n"
-                  f"部署：{dep.get('conclusion', '无摘要')}  拉到的 SHA：{(dep.get('git') or {}).get('sha') or '?'}\n"
-                  f"冒烟：{smoke}\n\n"
-                  f"{rows or '(无 FAIL/WARN 行)'}")
-          msg = EmailMessage()
-          msg["Subject"], msg["From"], msg["To"] = \
-              f"[nexus-e2e] PR #{os.environ['PR_NUMBER']} {os.environ['JOB_STATUS']}", os.environ["MAIL_FROM"], os.environ["MAIL_TO"]
-          msg.set_content(body)
-          port = int(os.environ["SMTP_PORT"])
-          srv = smtplib.SMTP_SSL(os.environ["SMTP_HOST"], port) if port == 465 else smtplib.SMTP(os.environ["SMTP_HOST"], port)
-          with srv as s:
-              if port != 465: s.starttls()
-              s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-              s.send_message(msg)
-          print("邮件已发出")
-          PY
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/py/notify-mail.py

@@ -77,6 +77,8 @@ CLAUDE.md 是"宪法"：编码规范、技术选型、禁止事项以本文档�
                             #   CI（测试环境）的部署与通知脚本也住这里 —— 一份脚本、三环境复用
  ├── py/deploy.py           #   一键部署（八步：拉代码→配置对账→db-patch 校验→打包→容器→health→冒烟）
  │                          #   流程真源见 .claude/skills/deploy/SKILL.md（skill 里只留文档，不留脚本）
+ ├── py/deploy_test.py      #   测试档薄包装（CI 入口；只组装参数，判据全在 deploy.py）
+ ├── py/notify-mail.py      #   CI 通知邮件（**可单独重放**：一条命令重发一次，做法见文件头）
  └── sh/                    #   环境脚本（WSL 内执行）
      ├── up.sh              #     一键拉起（九步，含构建）
      ├── check-env.sh       #     启动前置门禁（FAIL ⇒ 中止 up.sh）
