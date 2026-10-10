@@ -1,0 +1,174 @@
+# =============================================================================
+# e2e-smoke.yml —— PR 触发的自动化冒烟（task.6 / 5.2 交付物；口径落 docs/design/05-自动化测试.md §7.1）
+#
+# 链路：拉 PR 代码 → 部署测试环境（deploy_test.py）→ pytest 冒烟（S1~S5）→ 收集结果 → 邮件。
+#
+# 三条硬约束（改这个文件之前先读）：
+#   ① runs-on 的自定义标签 nexus-test 与 M2 交接物**逐字一致**（差一个字符 = 永远排队）；
+#   ② 全文件零 marketplace action（判据：grep -n "uses" 只剩注释里的说明）—— 仓库 Actions
+#      权限只放行 KeanuCao 名下的 action，故 checkout 也用 git fetch 手写；
+#   ③ 失败即红 —— 不写 `|| true` 之类的吞码写法；邮件与结果收集用 `if: always()`，失败路径也留痕。
+#
+# 执行位置 = **测试发行版 nexus-agent-workbench-test 内**（runner 在那；独立 dockerd + nexus-test-* 一整套）。
+# 开发环境全程不参与（M4-⑤）。流程口径真源 = .claude/skills/deploy/SKILL.md「CI 档」+ 设计 05 §7.1。
+# =============================================================================
+name: e2e-smoke
+
+on:
+  pull_request:
+    branches: [main]
+
+# GITHUB_TOKEN 只读（M3-③）：本流程不往仓库写任何东西，也不需要写。
+permissions:
+  contents: read
+
+# 自托管 runner 的默认 shell 依平台而定；本文件的判据依赖 bash 语义（pipefail、heredoc）
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    name: e2e 冒烟（PR → 测试环境）
+    # 同仓守卫（M3-③ 的第二道防线）：fork 的 PR 不派到这个 job
+    # （"外部贡献者需批准"由仓库设置承担，两者互补：一个在平台侧拦，一个在这里拦）
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    # ⚠️ 与 M2 交接物逐字一致：self-hosted / Linux / X64 / nexus-test —— 这里只用后两个
+    runs-on: [self-hosted, nexus-test]
+    # ⚠️ 首跑冷缓存（镜像 + ≈6GB 模型 + Maven/npm 缓存全空）的耗时上界**未实测**；
+    #    180 分钟是防"单 runner 被一个悬挂 job 占死"（默认 6 小时）的安全网，实测后收紧。
+    timeout-minutes: 180
+    env:
+      # 一次运行的产物目录（已 gitignore；5.5 接报告卷时按 qa/e2e/README.md 的路径表取）
+      E2E_ARTIFACTS: ${{ github.workspace }}/qa/e2e/artifacts
+      # deploy.py --summary-json 的落点：与 run-results.json 同目录，一起交给 5.5
+      DEPLOY_SUMMARY: ${{ github.workspace }}/qa/e2e/artifacts/deploy-summary.json
+      # 本次运行的 ID：写进 run-results.json，同时当"旧产物护栏"的钥匙（对不上就当本次没有结果）
+      E2E_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      # PR 号：步骤 5（Step Summary）与步骤 6（邮件）都要用 ⇒ 放 job 级，**不在 step 里重复声明**
+      # （2026-10-10 订正：原先只写在步骤 6 的 env 里，步骤 5 一跑就 KeyError）
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      # ── 1 拉代码（手写 checkout，不用第三方 action）──────────────────────────
+      - name: 拉取 PR 代码（纯 shell）
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          git init -q .
+          # 匿名 HTTPS 直接 fetch PR 的隐藏 ref（公开仓库；M2 已实测该发行版能 git ls-remote）
+          git fetch --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/pull/${{ github.event.pull_request.number }}/head"
+          git checkout --force --detach FETCH_HEAD
+          # 清掉上一次检出的残留：工作区 = 恰好这份 PR 树（残留是"静默旧产物"的来源）
+          git clean -fdq
+          echo "PR head = $(git rev-parse HEAD)  $(git log -1 --format=%s)"
+
+      # ── 2 运行环境自检（门禁：不通过就不浪费一次部署）──────────────────────────
+      # 持久 venv 建在 $HOME（不放 checkout 里 —— 上面那步 git clean 会把它清掉）；
+      # 本步**只校验、不安装**：重装是人工的一次性动作，理由与代价见设计 05 §7.1.8-②。
+      - name: 运行环境自检（持久 venv + chromium）
+        run: |
+          set -euo pipefail
+          VENV="$HOME/nexus-e2e-venv"
+          cd "$GITHUB_WORKSPACE"
+          prep="python3 -m venv $VENV && $VENV/bin/pip install -r $PWD/qa/e2e/requirements.txt && $VENV/bin/python -m playwright install --with-deps chromium && sha256sum $PWD/qa/e2e/requirements.txt | cut -d' ' -f1 > $VENV/.requirements.sha256"
+          die() { echo "::error::$1"; echo "▸ 首次准备（在测试发行版内跑一次，见设计 05 §7.1.8-②）："; echo "   $prep"; exit 1; }
+          test -x "$VENV/bin/python" || die "持久 venv 不存在：$VENV"
+          test "$(sha256sum qa/e2e/requirements.txt | cut -d' ' -f1)" = "$(cat "$VENV/.requirements.sha256" 2>/dev/null || echo x)" \
+            || die "venv 与 qa/e2e/requirements.txt 不一致（依赖静默过期：PR 改了依赖，venv 还是旧的）"
+          "$VENV/bin/python" - <<'PY' || die "Playwright chromium 起不来（浏览器未装 / 系统库缺）"
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              print("chromium OK:", browser.version)
+              browser.close()
+          PY
+          echo "OK：venv + chromium 就绪（PR head $(git rev-parse --short HEAD)）"
+
+      # ── 3 部署（八步 + 非交互档；真源 scripts/py/deploy.py，判据只写那一份）──────
+      # --ref + --expect-sha 是固定组合：只拉不断言 = 发现不了"拉错 ref"；只断言不拉 = 拿不到 PR 代码。
+      - name: 部署测试环境（deploy_test.py --ci）
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/py/deploy_test.py --ci \
+            --summary-json "$DEPLOY_SUMMARY" \
+            --ref "refs/pull/${{ github.event.pull_request.number }}/head" \
+            --expect-sha "${{ github.event.pull_request.head.sha }}"
+
+      # ── 4 冒烟（S1~S5；被测环境 = 测试发行版宿主上的 12006）────────────────────
+      - name: 冒烟（pytest + Playwright，S1~S5）
+        env:
+          E2E_TRIGGER: ci
+          # pull_request 事件下 GITHUB_SHA 默认指向"合并提交"，不是被测的 PR head —— 覆写它，
+          # 让 run-results.json 的 revision 记的正是本次测的代码（与 --expect-sha 同源）
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/qa/e2e"
+          # ⚠️ pipefail 不可省：少了它 `| tee` 会把 pytest 的非 0 退出码吞掉（本项目踩过"| tail 吞退出码"）
+          "$HOME/nexus-e2e-venv/bin/python" -m pytest 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+
+      # ── 5 收集结果（成败都跑；只取证与呈现，不改变任何结论）────────────────────
+      - name: 收集结果（摘要 + 产物清单）
+        if: always()
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os
+          from pathlib import Path
+
+          def load(path):
+              try:
+                  return json.loads(Path(path).read_text(encoding="utf-8"))
+              except Exception:
+                  return {}
+
+          dep = load(os.environ["DEPLOY_SUMMARY"])
+          res = load(os.environ["E2E_ARTIFACTS"] + "/run-results.json")
+          if res.get("run_id") != os.environ["E2E_RUN_ID"]:
+              res = {}          # 旧产物护栏：上一次运行的 run-results.json 不能当成本次的结果
+
+          print(f'## e2e-smoke · PR #{os.environ["PR_NUMBER"]} · `{os.environ["E2E_RUN_ID"]}`')
+          print(f'- 部署：{dep.get("conclusion", "本次无摘要（没跑到写摘要那一步）")}'
+                f'  拉到的 SHA：{(dep.get("git") or {}).get("sha") or "?"}')
+          for step in dep.get("steps", []):
+              if step["status"] in ("FAIL", "WARN"):
+                  print(f'  - **[{step["status"]}] {step["step"]}** {step["summary"]}')
+          if res:
+              totals = res.get("totals", {})
+              print(f'- 冒烟：通过 {totals.get("passed")} / 失败 {totals.get("failed")} / '
+                    f'跳过 {totals.get("skipped")} / 错误 {totals.get("error")}')
+              for case in res.get("cases", []):
+                  if case.get("status") != "passed":
+                      print(f'  - [{case.get("status")}] {case.get("tc_id")} {case.get("title")}')
+          else:
+              print('- 冒烟：本次没有结果文件（部署失败 / 没跑到冒烟）')
+          PY
+          echo ""
+          echo "── 产物清单（落在工作区；卷 nexus-test-report 的接线归 5.5）──"
+          if [ -d "$E2E_ARTIFACTS" ]; then
+            find "$E2E_ARTIFACTS" -mindepth 1 -maxdepth 4 -printf '%10s  %p\n' | sort -k2
+          else
+            echo "  (目录不存在：本次没有产物)"
+          fi
+
+      # ── 6 邮件通知（成功与失败都发）──────────────────────────────────────────────
+      # 实现 = scripts/py/notify-mail.py（2026-10-10 拍板：独立脚本，**可单独重放** ——
+      # 邮件没到/内容不对时不必重跑整条链路；用法与重放命令见该文件头 + 设计 05 §7.1.8-①）。
+      # 本步只做两件事：注入 env（6 个 repository secrets）+ 调脚本；**判据与拼正文都不在这里**。
+      - name: 邮件通知（SMTP，成功与失败都发）
+        if: always()
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/py/notify-mail.py

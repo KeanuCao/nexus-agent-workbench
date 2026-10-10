@@ -1,6 +1,6 @@
 # task.6 自动化测试（E2E 冒烟）（阶段5）
 
-> 任务级别：L1 阶段级（跨模块、影响架构） ｜ 状态：🚧 进行中（M1~M4 ✅ 2026-10-08；5.1 / 5.3 / 5.4 已解锁）
+> 任务级别：L1 阶段级（跨模块、影响架构） ｜ 状态：🚧 进行中（M1~M5 ✅；**5.1~5.4 ✅ 全部交付**；5.5 待开工；首跑 + M5.5 + M6 / M7 待做）
 > ⚠️ **前置闸门（已推进）**：M1~M4 已完成（2026-10-08）—— **5.1 / 5.3 / 5.4 已解锁**；
 > 5.2 仍压在 M2/M3 的交接物（标签字符串、secret 键名）与 M5 上，5.5 压在 5.1 / 5.4 上。
 > 设计文档：`docs/design/05-自动化测试.md` ｜ 测试案例：`docs/test-cases/TC-05.md`
@@ -157,6 +157,29 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
   "值在哪个文件的哪个键"这句话能指着说清。
 - **完成判据**：AI 只要键名就能把 workflow / 邮件步骤写出来；跑起来时值能从真源取到（M7 一并验证）。
 
+### M5.5 准备 runner 侧运行环境（持久 venv + Chromium，一次性）
+
+- **为什么必须手工**：`playwright install --with-deps` 需要 **root/sudo**（装系统库），而 CI 非交互（输不了密码）；
+  要么人工装一次，要么给 runner 配免密 sudo（等于再让一份代码拥有 root，不做）。⇒ 这是**隐性人工前置**：
+  不写清"谁装、判据是什么"，CI 会在第一次 PR 上以"步骤 2 红"现形。
+- **前置条件**：M1（发行版）✅；发行版内 `python3` 可用；PyPI 与 Playwright CDN 可达（⚠️ 需实测）；sudo 可用。
+- **逐步操作**（在测试发行版内、任意一份 checkout 里跑；与设计 §7.1.8-② 的命令一字对齐）：
+
+  ```bash
+  python3 -m venv "$HOME/nexus-e2e-venv"
+  "$HOME/nexus-e2e-venv/bin/pip" install -r <checkout>/qa/e2e/requirements.txt
+  "$HOME/nexus-e2e-venv/bin/python" -m playwright install --with-deps chromium   # 要 sudo 装系统库
+  sha256sum <checkout>/qa/e2e/requirements.txt | cut -d' ' -f1 > "$HOME/nexus-e2e-venv/.requirements.sha256"
+  ```
+
+  ⚠️ **指纹行最后写**，且用**与 CI 同一份内容**的 `requirements.txt`（checkout 先 pull 到最新）——
+  指纹不一致时 workflow 会红，那正是"有人改了依赖、venv 该重装"的正确信号。
+- **交接物**：venv 路径 ｜ 发行版 `python3 -V` ｜ `playwright --version` 与 chromium 版本 ｜ 指纹文件已写入 ｜
+  PyPI / Playwright CDN 可达性 ｜ sudo 是免密还是需密码。
+- **完成判据**（不依赖 CI，发行版内直接验）：workflow 步骤 2 的等价三条全过 ——
+  ① `test -x "$HOME/nexus-e2e-venv/bin/python"`；② 指纹与 `qa/e2e/requirements.txt` 一致；
+  ③ `"$HOME/nexus-e2e-venv/bin/python" -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); print('chromium OK:', b.version); b.close(); p.stop()"` 打印版本号。
+
 ### M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 
 - **为什么必须手工**：浏览器操作 + 管理员账号口令，且"要看什么统计"是你的判断（草稿 15）。
@@ -210,6 +233,7 @@ graph LR
 
 - **不被任何 M 阻塞的只有 5.3**（前端加定位属性）—— 它是本阶段唯一可以在 M1 之前就开工的活。
 - 5.4 的**框架骨架**可先写，但**能不能真跑**取决于 M1/M4。
+- **M5.5**（runner 环境准备，2026-10-10 新增）—— 5.2 工作流步骤 2 与冒烟实跑的前置，已并入首跑清单。
 
 ---
 
@@ -386,7 +410,7 @@ graph LR
 | 3 | **定位属性名：`tid` 还是 `data-tid`** | 草稿 12 的示例写 `tid="password"`；同条又要求"pytest 脚本优先使用 Role 结合 tid 定位" | 草稿用 `tid`；但 `tid` 不是标准自定义属性前缀，且**未来可能撞上某个组件的同名 prop**（届时静默变成 prop、DOM 上什么都没有）| (a) **`data-tid`（推荐）**：HTML 规范内建的自定义数据属性，不会被任何组件当 prop 吃掉，`[data-tid=x]` 选择器稳定；代价是与草稿字面不一致（需在文档里记一句）<br>(b) 保留 `tid`：忠实草稿；代价是需自己保证不撞 prop，且语义上"这是个自定义属性"对外不自明<br>⚠️ **选定后只能在** 5.3 的约定表 + `TC-05` **各写一处**，禁止两种混用。✅ **已拍板（2026-10-09，用户）：(a) `data-tid`** |
 | 4 | **结果表与 SQL 视图的落位** | 草稿 5：「它应该有一个 postgrep 容器，用来保存测试结果作为查询使用」；草稿 15（Metabase 看统计）；`qa/README.md`：「`fixtures/sql/` 放种子/清理/取指纹的 SQL 片段，**不放表结构变更**（那些走 `db-patch`）」 | 结果表是**表结构**：放 `qa/fixtures/sql/` 违反 `qa/README.md`；放正式 `db-patch/` 则会被**开发库**一并建出来（测试基础设施表进开发库；将来有了生产库，同一条迁移链也会把它带过去）| (a) 走正式 `db-patch/`：单真源、复用现成迁移链路；代价是开发库多一张测试表（将来生产库同样会有）<br>(b) 归**测试环境自己的初始化目录**（落位随「待确认 1」的目录决定）：开发库保持干净；代价是多一条独立迁移路径，要自己保证幂等<br>(c) 由 Metabase/初始化脚本建：**不推荐**（schema 变更散在工具里）<br>⚠️ 本文件按"(b) 的落位待定、实现细节交设计文档"写 |
 | 5 | **PR 触发策略与 self-hosted runner 的安全面** | 草稿 2/3（runner 注册 + 能在 GitHub 看到）；草稿 17（PR 触发全链路）| **公开仓库 + self-hosted runner = 任何人开 PR 即可在你的机器上执行代码**；且 **fork PR 拿不到 repository secrets**（草稿 17 的邮件、云端 key 都会受影响）| (a) 仓库转私有（最干净，但要处理 builder 的拉码凭据 → M5-③）<br>(b) 保持公开 + 只允许**同仓分支**的 PR 触发（在 workflow 里判 `github.event.pull_request.head.repo.full_name == github.repository`）<br>(c) 保持公开 + 开启「外部贡献者需批准」<br>(d) 允许 fork PR：等于开放代码执行（**不推荐**）<br>⚠️ 无论哪条，**冒烟集合建议不依赖云端模型**（M4-③ 选 (b)），这样"fork 无 secret"不成为用例失败的原因 |
-| 6 | **邮件通知的落位** | 草稿 17：「最后邮件通知一下吧」 | 项目没有现成的通知脚本；`scripts/` 的定位是"生产链路（被 up.sh / 镜像构建 / db-patch 迁移消费）"，邮件步骤三者都不消费 | (a) 直接内联在 workflow 的 shell 步骤里（**推荐**，若 ≤ 20 行且只依赖 Python 标准库 `smtplib`）<br>(b) 落 `scripts/py/notify-mail.py`（与 `deploy.py` 同一个家；代价是要接受"`scripts/` 也会装 CI 用的脚本"这一口径扩展）<br>(c) 用 marketplace 的邮件 action（不推荐：多一个外部依赖，与"零 marketplace action"的建议相悖） |
+| 6 | ~~**邮件通知的落位**~~ **✅ 已拍板（2026-10-10，用户）：(b)** —— 落 `scripts/py/notify-mail.py`（`scripts/` 已重新定位为「devops 三环境工具箱」⇒ 原"口径扩展"代价消失；收益 = **可单独重放**）。以下为当时的选项记录： | 草稿 17：「最后邮件通知一下吧」 | 项目没有现成的通知脚本；`scripts/` 的定位是"生产链路（被 up.sh / 镜像构建 / db-patch 迁移消费）"，邮件步骤三者都不消费 | (a) 直接内联在 workflow 的 shell 步骤里（**推荐**，若 ≤ 20 行且只依赖 Python 标准库 `smtplib`）<br>(b) 落 `scripts/py/notify-mail.py`（与 `deploy.py` 同一个家；代价是要接受"`scripts/` 也会装 CI 用的脚本"这一口径扩展）<br>(c) 用 marketplace 的邮件 action（不推荐：多一个外部依赖，与"零 marketplace action"的建议相悖） |
 
 ## ✅ 已拍板（2026-10-08，用户：三处均按推荐）
 
@@ -399,6 +423,13 @@ graph LR
 | 待确认 #3 | 定位属性名 | **(a) `data-tid`**（禁止与 `tid` 混用；约定表与 TC-05 各写一处） | 设计文档 §7.2 |
 
 > 其余待确认（#4 结果表落位 / #5 PR 触发策略 / #6 邮件落位）**不阻塞 5.1**，分属 5.5 / 5.2。
+
+**⚠️ 待修缺口（2026-10-09，5.4 静态核实 + 主会话复核）**：测试档的 `nexus.ai.rag.answer-model-type` 未配置
+（`application.yml:226` 默认 `DEEPSEEK`）⇒ `/api/kb/ask` 必回 503 / `code=20100`，**S5 拿不到答案**。
+键名全集核对：`.env.local` 只有两键（`DEEPSEEK_API_KEY` / `NEXUS_AI_RAG_ANSWER_MODEL_TYPE`），
+后者是**唯一**缺口（前者按 M4-③ 本就不需要）。
+修法两处：`.env.test` 加 `NEXUS_AI_RAG_ANSWER_MODEL_TYPE=OLLAMA` **且** 测试 compose 的 backend `environment` 透传同名变量；
+修完 S5 的 20100 分支应从 SKIP 改回 **FAIL**（已派 devops，2026-10-09）。
 
 ## ⚠️ 需实测确认（高风险项清单，逐条配验证动作）
 
@@ -425,19 +456,25 @@ graph LR
 **用户手工任务（M）**
 
 - [x] M1 建测试用 WSL 发行版 `nexus-agent-workbench-test`（不挂本地盘）—— ✅ 判据与交接物已回填（独立引擎实测）
-- [x] M2 注册 GitHub Actions self-hosted runner（标签 / 可见性 / 能拉码）—— 用户确认完成；⚠️ **交接物（`runs-on` 标签精确字符串 / 可见性）待回传**（5.2 要用）
-- [x] M3 GitHub 仓库侧配置（Actions 权限 / secrets / 谁能触发）—— 用户确认完成；⚠️ **交接物（secret 键名清单 / 触发策略 / 真源）待回传**
+- [x] M2 注册 GitHub Actions self-hosted runner —— ✅ **交接物已回传（2026-10-09，含事后补加标签）**：名称 `nexus-tester`；标签 = **`self-hosted` / `Linux` / `X64` / `nexus-test`**（`nexus-test` 为用户事后补加）；状态 **Idle**（在线待命）；仓库级；常驻服务已实证（systemd active）⇒ **5.2 的 `runs-on` 定稿 = `[self-hosted, nexus-test]`**（自定义标签精确定位，避免将来多 runner 时误派）
+- [x] M3 GitHub 仓库侧配置 —— 用户确认完成；**交接物（2026-10-09 部分回传）**：
+  ① **触发策略 = 公开仓库 + 「外部贡献者需批准」**（设计选项 (c)）；5.2 的 workflow **建议再加同仓守卫**（`head.repo.full_name == github.repository`，双保险）；
+  ② **Actions 权限 = 仅 KeanuCao 名下 action** ⇒ 5.2 必须**零 `uses:`、纯 shell**（checkout 也用 `git fetch`）；
+  ③ **Workflow permissions = 只读**（够用：流程只读仓库，邮件走 SMTP 不需 token）；
+  ④ **密钥真源 = GitHub Repository secrets**（2026-10-09 拍板；理由：日志自动打码 + 值不落发行版磁盘）；**6 个键已建**：`SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `MAIL_FROM` / `MAIL_TO`（值由用户填，AI 不看）
 - [x] M4 测试环境资源与复用决策（含"是否复用开发环境"的拍板）
-- [ ] M5 凭据归集（SMTP / DeepSeek / git）
+- [x] M5 凭据归集 —— ✅ **闭环（2026-10-09）**：**SMTP** 6 键已入 GitHub secrets（真源唯一，见 M3-④）；**DeepSeek key 不需要**（M4-③ 不依赖云端）；**git 拉码凭据不需要**（公开仓库、匿名 clone）
+- [ ] M5.5 准备 runner 侧运行环境（持久 venv + Chromium）—— 一次性手工（2026-10-10 新增）；判据 = workflow 步骤 2 的等价三条全过
 - [ ] M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 - [ ] M7 首次链路验证（开 PR → 看 Actions → 收邮件 → 看报告）
 
 **AI 子任务**
 
-- [ ] 5.1 测试环境编排与部署链路复用 —— ✅ 已解锁；**设计已确认（D1/D2/D3 已拍），待开工**
+- [x] 5.1 测试环境编排与部署链路复用 —— ✅ 交付（PR #18 已合并）；**dev 回归 27s 全绿**；测试环境首跑（运行期验收）待做
 - [ ] 5.2 CI 触发与通知链路 —— 压在 M2 / M3 / M5 / 5.1 之后
 - [x] 5.3 前端定位契约（`data-tid` 收窄改造）—— ✅ 交付（2026-10-09）：16 值 / 5 文件 + 设计文档 §7.2（唯一真源）；静态判据全过（值唯一、无混用、type-check 0）；**浏览器实测 5 条归 5.4 / M7**
-- [ ] 5.4 pytest + Playwright 冒烟框架与用例 —— 骨架可先写，真跑压在 M1 / M4 之后
+- [x] 5.4 pytest + Playwright 冒烟框架与用例 —— ✅ 交付（2026-10-09）：`qa/e2e/` 工程 + S1~S5 + `TC-05.md`；`--collect-only` 5 条收齐（主会话独立复跑）；**真跑待 18:00 后首跑**（那时才可标「已验证」）
 - [ ] 5.5 报告与结果可视化链路 —— 压在 5.1 / 5.4 之后，验收含 M6
 
-> 📌 **解锁状态（2026-10-08）**：**5.1 设计已确认（D1/D2/D3 均按推荐）**；5.1 / 5.3 / 5.4 已解锁；5.2 待 M2/M3 的交接物（标签字符串、secret 键名）与 M5；5.5 待 5.1 / 5.4。
+> 📌 **解锁状态（2026-10-10）**：**5.1~5.4 ✅ 全部交付**（5.1 含 dev 回归、5.2 含 (b) 重构与 CI 档、5.3 已部署、5.4 框架已复核）；**只剩 5.5**（报告链路，待首跑验过 5.1 / 5.4 后开工）。
+> ⏳ **待做**：**测试环境首跑**（5.1 的运行期验收 + 5.4 的「已验证」）/ **M5.5**（runner 环境一次性准备）/ M6 / M7。

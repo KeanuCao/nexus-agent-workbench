@@ -15,7 +15,7 @@
 | `fixtures/sql/` | 种子 / 清理 / 取指纹的 SQL 片段 | 表结构变更（那些走 db-patch） |
 | `scripts/` | 用例的**辅助 shell**：多步机械动作（建沙箱 → 注入 → 跑 → 断言 → 清理）。现有：`tc01-*.sh`（认证 4 个）、`tc02-chat-stream.sh` + `tc02-pool-full.sh`（阶段2 流式对话/并发）、`tc03-kb.sh`（阶段3 知识库四个接口：list/upload/ask/delete） + `tc03-kb-sandbox.sh`（阶段3 表/索引/约束/级联的一次性沙箱探针） | 环境脚本（那些在 `/scripts`） |
 | `scripts/lib/` | 多个用例脚本**共用的机械动作库**。现有：`tc-common.sh`（TC-01/02/03 共用：路径/端口解析、JSON 取值、HTTP 动作（含可选的**目标基地址**参数 —— TC-03 要整条链路走 nginx）、Redis 只读指纹、日志抓取、退出路径的清理脚手架）、`tc02-stamp-lines.py`（TC-02 用：把响应字节流逐行打上到达时刻 + 机械统计，判"增量分片"就看它）。抽库的判据：重复的是**机械动作**就抽；一旦库里开始出现期望码、判定措辞或账号口令，就说明判据漏进去了，得搬回 TC 文档 | 判据、PASS/FAIL、期望码、账号口令 |
-| `e2e/` | Playwright（**待 `docs/design/01-多租户与认证.md` §D8 解禁后再落**） | — |
+| `e2e/` | **pytest + Playwright 冒烟集合 S1~S5**（阶段5 / 5.4 落地）：怎么跑与产物落点见 `qa/e2e/README.md`，用例与判据见 `docs/test-cases/TC-05.md`，**定位写法只认 `docs/design/05-自动化测试.md` §7.2**；运行产物落 `e2e/artifacts/`（**不入库**，该目录自带 `.gitignore`） | 会被生产链路读到的东西（`up.sh` / 镜像构建 / db-patch 迁移都不读 `qa/`） |
 
 **单测不在本目录**：后端 `backend/<module>/src/test/java`、前端 `frontend/src/**/__tests__` —— 位置由 Maven / Vitest 的约定决定，**没得选**，必须跟被测代码同模块。`qa/` 装的是「跨模块、可注入」的那类资产。
 
