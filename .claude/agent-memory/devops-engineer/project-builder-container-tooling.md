@@ -13,6 +13,10 @@ metadata:
   再 `grep -a -o '<中文文案>' 该文件` 即可断言标记串在不在。
   抽出来的 `.class` 的 **mtime = 打包时间**，可当"这是本次构建的产物"的旁证。
 - 同次实测可用的还有：`grep -a`、`sha256sum`、`psql`、`git`、`mvn`、`npm`、`ls -l --time-style=full-iso`。
+- **2026-10-10 补测：镜像里有完整 JDK 17**（`openjdk 17.0.20.1 Temurin`，`JAVA_HOME=/opt/java/openjdk`，java 在 PATH 上）
+  ＋ curl / psql / node / npm。⇒ **本机需要一次性 JVM 又不想装宿主**时的第一候选就是它：
+  `docker run --rm --entrypoint sh nexus-test-builder:dev -c '…'`（5.5 的 Allure 报告生成就是借它跑的，见 [[project-report-pipeline-delivery]]）。
+  注意镜像内**仍无 unzip**（见上），zip 类分发要另找解压途径（5.5 用了宿主 python3 的 `zipfile`）。
 
 **Why:** 本项目已确认「exit 0 ≠ 产物是新的」（见 [[project-builder-m2-persistent-volume-hazard]]），
 所以判据必须落在产物本身；而"验产物"就要求知道**用哪个工具能从 jar 里取内容** —— 不知道就会把
