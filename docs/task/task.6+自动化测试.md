@@ -174,8 +174,10 @@ PR 触发的一条龙自动化冒烟：**拉 PR 代码 → 打包 → 部署到�
 
   ⚠️ **指纹行最后写**，且用**与 CI 同一份内容**的 `requirements.txt`（checkout 先 pull 到最新）——
   指纹不一致时 workflow 会红，那正是"有人改了依赖、venv 该重装"的正确信号。
-- **交接物**：venv 路径 ｜ 发行版 `python3 -V` ｜ `playwright --version` 与 chromium 版本 ｜ 指纹文件已写入 ｜
-  PyPI / Playwright CDN 可达性 ｜ sudo 是免密还是需密码。
+- **交接物（已回填，2026-10-10）**：venv = `$HOME/nexus-e2e-venv` ｜ Python **3.12.3**（发行版自带；
+  与 Windows 面的 3.14.4 不是一回事，**CI 用的是这个**）｜ playwright **1.63.0** / chromium **153.0.8010.12**
+  ｜ 指纹已写入且与克隆一致（`c38594a6…` ⇒ CI 步骤 2 会过；PyPI / Playwright CDN 可达性亦被安装本身证明）
+  ｜ sudo：本次为交互输入（**CI 不需要** —— workflow 只校验、不安装）。
 - **完成判据**（不依赖 CI，发行版内直接验）：workflow 步骤 2 的等价三条全过 ——
   ① `test -x "$HOME/nexus-e2e-venv/bin/python"`；② 指纹与 `qa/e2e/requirements.txt` 一致；
   ③ `"$HOME/nexus-e2e-venv/bin/python" -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); print('chromium OK:', b.version); b.close(); p.stop()"` 打印版本号。
@@ -464,7 +466,7 @@ graph LR
   ④ **密钥真源 = GitHub Repository secrets**（2026-10-09 拍板；理由：日志自动打码 + 值不落发行版磁盘）；**6 个键已建**：`SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `MAIL_FROM` / `MAIL_TO`（值由用户填，AI 不看）
 - [x] M4 测试环境资源与复用决策（含"是否复用开发环境"的拍板）
 - [x] M5 凭据归集 —— ✅ **闭环（2026-10-09）**：**SMTP** 6 键已入 GitHub secrets（真源唯一，见 M3-④）；**DeepSeek key 不需要**（M4-③ 不依赖云端）；**git 拉码凭据不需要**（公开仓库、匿名 clone）
-- [ ] M5.5 准备 runner 侧运行环境（持久 venv + Chromium）—— 一次性手工（2026-10-10 新增）；判据 = workflow 步骤 2 的等价三条全过
+- [x] M5.5 准备 runner 侧运行环境（持久 venv + Chromium）—— ✅ **完成（2026-10-10，用户执行；主会话只读复核）**：判据三条全过（venv 可执行 / 指纹与克隆一致 / `chromium OK: 153.0.8010.12`）
 - [ ] M6 Metabase 首启管理台配置（建管理员 / 连库 / 看板）
 - [ ] M7 首次链路验证（开 PR → 看 Actions → 收邮件 → 看报告）
 
