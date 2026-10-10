@@ -109,7 +109,18 @@ jobs:
           # ⚠️ pipefail 不可省：少了它 `| tee` 会把 pytest 的非 0 退出码吞掉（本项目踩过"| tail 吞退出码"）
           "$HOME/nexus-e2e-venv/bin/python" -m pytest 2>&1 | tee "$RUNNER_TEMP/pytest.log"
 
-      # ── 5 收集结果（成败都跑；只取证与呈现，不改变任何结论）────────────────────
+      # ── 5 收尾（报告 + 落库）────────────────────────────────────────────────────
+      # 实现 = scripts/py/finalize-run.py（5.5 交付，可单独重放）：Allure HTML + trace/截图发布进
+      # 报告卷（Windows 侧 http://localhost:12008/ 可看）+ run-results.json 落结果库。
+      # `if: always()`：**冒烟红不红都要跑** —— 它做的是"把这次运行的结果放到该放的地方"，与用例
+      # 结论无关；反过来它自己失败即非 0（报告/落库没成就是没成）。E2E_RUN_ID 来自 job 级 env。
+      - name: 收尾（报告 + 落库）
+        if: always()
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/py/finalize-run.py --expect-run-id "$E2E_RUN_ID"
+
+      # ── 6 收集结果（成败都跑；只取证与呈现，不改变任何结论）────────────────────
       - name: 收集结果（摘要 + 产物清单）
         if: always()
         run: |
@@ -145,6 +156,7 @@ jobs:
                       print(f'  - [{case.get("status")}] {case.get("tc_id")} {case.get("title")}')
           else:
               print('- 冒烟：本次没有结果文件（部署失败 / 没跑到冒烟）')
+          print('- 收尾（报告 + 落库）：结论见上一步日志；报告页 http://localhost:12008/（端口真源 .env.test 的 REPORT_PORT）')
           PY
           echo ""
           echo "── 产物清单（落在工作区；卷 nexus-test-report 的接线归 5.5）──"
@@ -154,7 +166,7 @@ jobs:
             echo "  (目录不存在：本次没有产物)"
           fi
 
-      # ── 6 邮件通知（成功与失败都发）──────────────────────────────────────────────
+      # ── 7 邮件通知（成功与失败都发）──────────────────────────────────────────────
       # 实现 = scripts/py/notify-mail.py（2026-10-10 拍板：独立脚本，**可单独重放** ——
       # 邮件没到/内容不对时不必重跑整条链路；用法与重放命令见该文件头 + 设计 05 §7.1.8-①）。
       # 本步只做两件事：注入 env（6 个 repository secrets）+ 调脚本；**判据与拼正文都不在这里**。
