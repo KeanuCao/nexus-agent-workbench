@@ -35,9 +35,12 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     # ⚠️ 与 M2 交接物逐字一致：self-hosted / Linux / X64 / nexus-test —— 这里只用后两个
     runs-on: [self-hosted, nexus-test]
-    # ⚠️ 首跑冷缓存（镜像 + ≈6GB 模型 + Maven/npm 缓存全空）的耗时上界**未实测**；
-    #    180 分钟是防"单 runner 被一个悬挂 job 占死"（默认 6 小时）的安全网，实测后收紧。
-    timeout-minutes: 180
+    # job 级超时，防"单 runner 被一个悬挂 job 占死"（GitHub 默认 6 小时）：收紧到 15 分钟 =
+    # 实测 ≈4.5 分钟（2026-10-10 首跑：部署 192s + 冒烟 19.4s + 其余 ≈30~60s）的 ≈3 倍余量。
+    # ⚠️ 边界：超时由 **runner 侧执行** —— 它防的是"某一步真卡死"，**防不了"runner 掉线"**
+    #    （2026-10-11 实例：测试发行版被 WSL 关掉 ⇒ runner 消失 ⇒ 超时无人执行，job 在 GitHub 上挂到人工取消为止）。
+    #    防掉线的办法是让测试发行版**常驻**（开终端占住），不是砍超时。
+    timeout-minutes: 15
     env:
       # 一次运行的产物目录（已 gitignore；5.5 接报告卷时按 qa/e2e/README.md 的路径表取）
       E2E_ARTIFACTS: ${{ github.workspace }}/qa/e2e/artifacts
