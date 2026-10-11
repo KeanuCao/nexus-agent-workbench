@@ -35,9 +35,12 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     # ⚠️ 与 M2 交接物逐字一致：self-hosted / Linux / X64 / nexus-test —— 这里只用后两个
     runs-on: [self-hosted, nexus-test]
-    # ⚠️ 首跑冷缓存（镜像 + ≈6GB 模型 + Maven/npm 缓存全空）的耗时上界**未实测**；
-    #    180 分钟是防"单 runner 被一个悬挂 job 占死"（默认 6 小时）的安全网，实测后收紧。
-    timeout-minutes: 180
+    # job 级超时，防"单 runner 被一个悬挂 job 占死"（GitHub 默认 6 小时）：收紧到 15 分钟 =
+    # 实测 ≈4.5 分钟（2026-10-10 首跑：部署 192s + 冒烟 19.4s + 其余 ≈30~60s）的 ≈3 倍余量。
+    # ⚠️ 边界：超时由 **runner 侧执行** —— 它防的是"某一步真卡死"，**防不了"runner 掉线"**
+    #    （2026-10-11 实例：测试发行版被 WSL 关掉 ⇒ runner 消失 ⇒ 超时无人执行，job 在 GitHub 上挂到人工取消为止）。
+    #    防掉线的办法是让测试发行版**常驻**（开终端占住），不是砍超时。
+    timeout-minutes: 15
     env:
       # 一次运行的产物目录（已 gitignore；5.5 接报告卷时按 qa/e2e/README.md 的路径表取）
       E2E_ARTIFACTS: ${{ github.workspace }}/qa/e2e/artifacts
@@ -109,7 +112,18 @@ jobs:
           # ⚠️ pipefail 不可省：少了它 `| tee` 会把 pytest 的非 0 退出码吞掉（本项目踩过"| tail 吞退出码"）
           "$HOME/nexus-e2e-venv/bin/python" -m pytest 2>&1 | tee "$RUNNER_TEMP/pytest.log"
 
-      # ── 5 收集结果（成败都跑；只取证与呈现，不改变任何结论）────────────────────
+      # ── 5 收尾（报告 + 落库）────────────────────────────────────────────────────
+      # 实现 = scripts/py/finalize-run.py（5.5 交付，可单独重放）：Allure HTML + trace/截图发布进
+      # 报告卷（Windows 侧 http://localhost:12008/ 可看）+ run-results.json 落结果库。
+      # `if: always()`：**冒烟红不红都要跑** —— 它做的是"把这次运行的结果放到该放的地方"，与用例
+      # 结论无关；反过来它自己失败即非 0（报告/落库没成就是没成）。E2E_RUN_ID 来自 job 级 env。
+      - name: 收尾（报告 + 落库）
+        if: always()
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/py/finalize-run.py --expect-run-id "$E2E_RUN_ID"
+
+      # ── 6 收集结果（成败都跑；只取证与呈现，不改变任何结论）────────────────────
       - name: 收集结果（摘要 + 产物清单）
         if: always()
         run: |
@@ -145,6 +159,7 @@ jobs:
                       print(f'  - [{case.get("status")}] {case.get("tc_id")} {case.get("title")}')
           else:
               print('- 冒烟：本次没有结果文件（部署失败 / 没跑到冒烟）')
+          print('- 收尾（报告 + 落库）：结论见上一步日志；报告页 http://localhost:12008/（端口真源 .env.test 的 REPORT_PORT）')
           PY
           echo ""
           echo "── 产物清单（落在工作区；卷 nexus-test-report 的接线归 5.5）──"
@@ -154,7 +169,7 @@ jobs:
             echo "  (目录不存在：本次没有产物)"
           fi
 
-      # ── 6 邮件通知（成功与失败都发）──────────────────────────────────────────────
+      # ── 7 邮件通知（成功与失败都发）──────────────────────────────────────────────
       # 实现 = scripts/py/notify-mail.py（2026-10-10 拍板：独立脚本，**可单独重放** ——
       # 邮件没到/内容不对时不必重跑整条链路；用法与重放命令见该文件头 + 设计 05 §7.1.8-①）。
       # 本步只做两件事：注入 env（6 个 repository secrets）+ 调脚本；**判据与拼正文都不在这里**。

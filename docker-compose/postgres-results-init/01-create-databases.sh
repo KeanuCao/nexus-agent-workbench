@@ -35,4 +35,4 @@ create_db_if_missing() {
 create_db_if_missing "${RESULTS_PG_DB}"
 create_db_if_missing "${METABASE_APP_DB}"
 
-echo "[results-init] 完成：${RESULTS_PG_DB} / ${METABASE_APP_DB}（空库，表结构由 5.5 落）"
+echo "[results-init] 完成：${RESULTS_PG_DB} / ${METABASE_APP_DB}（空库；结果库的表/视图见同目录 02-results-schema.sql）"

@@ -21,7 +21,9 @@
 #   5. 镜像加速：image / Dockerfile FROM 一律 `docker.m.daocloud.io` 前缀（官方镜像走
 #      `/library/`；**Metabase 非官方命名空间，前缀后不加 `/library/`**）；禁止改 daemon.json。
 #   6. 结果库实例（postgres-results）用 `postgres-results-init/` 的 initdb 脚本预建**两个空库**
-#      （结果库 + Metabase 应用库）；**表结构留给 5.5**，本编排不建任何业务表。
+#      （结果库 + Metabase 应用库）；表结构/视图由同目录 02-results-schema.sql 落（5.5 交付）。
+#      ⚠️ initdb 只在**空数据目录**时跑一次 —— 存量卷（首跑已初始化）靠收尾脚本
+#      scripts/py/finalize-run.py 每次**重放**同一个 SQL 文件来收敛 schema（设计 05 §7.4.3）。
 #
 # 用法（仅在测试发行版内执行；本文件不在默认发现名里，开发环境不受影响）：
 #   docker compose -f docker-compose.test.yml --env-file .env.test up -d
@@ -52,7 +54,8 @@ services:
       - nexus-test-net
 
   # 结果库实例：结果库（pytest 写入）+ Metabase 应用库（M4-② 拍板：跟结果库同一个实例）
-  # 两个空库由 initdb 脚本预建（见同目录 postgres-results-init/）；表结构由 5.5 落。
+  # 两个空库由 initdb 脚本预建（见同目录 postgres-results-init/）；表/视图 = 同目录
+  # 02-results-schema.sql（initdb 首次 + 收尾脚本每次幂等重放，设计 05 §7.4.3）。
   postgres-results:
     image: docker.m.daocloud.io/pgvector/pgvector:pg16
     container_name: nexus-test-postgres-results
@@ -259,8 +262,14 @@ services:
     depends_on:
       postgres-results:
         condition: service_healthy
-    # ⚠️ 健康检查待实测（镜像内是否有 curl/wget 未验，设计 §2.1）——暂不写：
-    #   若写了一条跑不通的探针，会让"起得慢"伪装成"起不来"，误导排查。
+    healthcheck:
+      # 2026-10-10 实测：镜像内自带 curl + wget + bash；/api/health 起好后 200（~10ms）。
+      # start_period 给足（JVM 首启要跑自己的库迁移），避免"起得慢"伪装成"起不来"。
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
     networks:
       - nexus-test-net
 
@@ -271,10 +280,15 @@ services:
     ports:
       - "${REPORT_PORT:-12008}:80"         # Windows 浏览器看 Allure 报告
     volumes:
-      # 只读挂报告卷（写方 = 发行版宿主上的测试框架）；站点布局由 5.5 定，本阶段先复用镜像默认站点
+      # 只读挂报告卷（写方 = 收尾脚本 finalize-run.py 的一次性容器；整树替换 + chmod a+rX）
       - report:/usr/share/nginx/html:ro
+      # 站点目录指向（5.5，2026-10-10）：卷根 = 落地页 index.html → /allure-report/ 等子目录；
+      # 配置真源 = 同目录 report-nginx/default.conf（布局与取舍写在它的头注 + 设计 05 §7.4.2）
+      - ./report-nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- 127.0.0.1"]
+      # 探 /healthz：只看 nginx 本身，与"卷里有没有报告"解耦（卷空时也稳定 200，
+      # 不再把"内容还没发布"伪装成"容器 unhealthy"）
+      test: ["CMD-SHELL", "wget -qO- 127.0.0.1/healthz"]
       interval: 10s
       timeout: 5s
       retries: 6
