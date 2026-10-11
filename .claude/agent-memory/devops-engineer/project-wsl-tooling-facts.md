@@ -31,6 +31,18 @@ REMOTE
 
 ---
 
+**2026-10-11 补充（自测取证时踩到的同类新实例：`$?` 经 argv 层被外层吃掉）：**
+
+- 现象：`MSYS_NO_PATHCONV=1 wsl -d <distro> -- bash -lc 'false; echo RC=$?'` → 打印 **RC=0**（并非 1）；
+  连 python `sys.exit(1)` 也显示 0 —— 是**传参层**（Git Bash→wsl.exe argv→远端 bash）把 `$?`/变量在到达被测脚本前就展开/打乱了，
+  **不是被测脚本的缺陷**。差点据此误判"脚本'失败即非 0'的语义坏了"。
+- **可靠判据**：把探针脚本整体喂 stdin —— `MSYS_NO_PATHCONV=1 wsl -d <distro> -- bash -s <<'EOS' … EOS`，
+  脚本内的 `$?`/重定向/管道全部真实生效（实测同一脚本：GUARD_RC=1 / DRYRUN_RC=0 / PUBLISH_RC=0 全对）。
+  落盘再 `bash <路径>` 也行；**只要不把 `$?` 写在 wsl 的 argv 字符串里**。
+- 与"双引号被吞""`2>/dev/null` 被改写""`$(( ))` 被打乱"是同一族问题，处置同理：**落盘 / stdin，不经 argv 传 `$` 构造**。
+
+---
+
 **2026-09-22 补充（阶段3 验收实测出来的三条新姿势）：**
 
 1. **`python3` 是首选机械探针器**：3.12.3 + `urllib` 调 Ollama(`/api/embed`)、`subprocess` 调 `docker exec -i ... psql`，一次跑完"取向量 → 排序 → 算前缀一致性"，不需要 jq、不需要临时表。今天用它证明了「入库向量确实带 `search_document: ` 前缀」（`cos=1.000000`）与「答案块排名 27/587」——这类**要拿数字说话**的判定，别用 shell 拼。

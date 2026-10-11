@@ -93,14 +93,14 @@ cd <CHECKOUT>/qa/e2e && .venv/bin/python -m pytest --headed --tracing=on --scree
 
 | 本地产物 | 谁生成 | 卷内建议目标 | 说明 |
 | --- | --- | --- | --- |
-| `artifacts/allure-results/` | `allure-pytest` | `/allure-results/` | **原始 JSON**（每次运行前先清空）；`allure generate` 出 `/allure-report/index.html` —— 那是报告首页，由 5.5 生成 |
-| `artifacts/playwright/<用例目录>/trace.zip` | pytest-playwright | `/playwright/<用例目录>/` | **仅失败时保留**（`--tracing=retain-on-failure`） |
+| `artifacts/allure-results/` | `allure-pytest` | `runs/<run_id>/allure-results/` | **原始 JSON**（每次运行前先清空）；`allure generate` 出 `runs/<run_id>/allure-report/index.html` —— 那是该次报告首页，由 5.5 生成 |
+| `artifacts/playwright/<用例目录>/trace.zip` | pytest-playwright | `runs/<run_id>/playwright/<用例目录>/` | **仅失败时保留**（`--tracing=retain-on-failure`） |
 | `artifacts/playwright/<用例目录>/test-failed-1.png` | pytest-playwright | 同上 | **仅失败时保留**，整页截图（`--screenshot=only-on-failure --full-page-screenshot`） |
-| `artifacts/run-results.json` | `conftest.py` | `/run-results.json` | 最近一次运行的结构化结果 |
-| `artifacts/runs/<run_id>.json` | `conftest.py` | `/runs/<run_id>.json` | 同上的历史副本 |
+| `artifacts/run-results.json` | `conftest.py` | `runs/<run_id>/run-results.json` | 该次运行的结构化结果（另：卷根 `/run-results.json` 刷成**最新一次**；卷根 `/index.html` = 索引页） |
+| `artifacts/runs/<run_id>.json` | `conftest.py` | （并入上一行的同一落点） | 同上的历史副本；卷内不再单放 `<run_id>.json`（布局真源 = 设计 §7.4.2，2026-10-11 起按 run 并存） |
 
 - 卷 = 设计 §2.2 的 `nexus-test-report`（**宿主侧写、report-nginx 只读挂**）。"本地产物怎么进卷"（bind 挂载 / 拷贝）
-  由 **5.5** 定：本工程只负责**落点固定**，不管传输。
+  由 **5.5** 定：本工程只负责**落点固定**，不管传输。卷内路径以设计 §7.4.2 为真源 —— 上表 2026-10-11 已按其"按 run 并存"同步。
 - 报告卷要能被 `ls -lR` 出 `index.html` / `trace.zip` / `*.png`（设计 §5.5 的验收动作）—— 上面这张表就是它的来源。
 - `artifacts/` 下的东西**全部不入库**（目录里有一份 `.gitignore`）：阶段验收有一条
   「跑前跑后 `git status --porcelain` 一致」的无害性判据，产物出现在 git status 里会把它淹掉。

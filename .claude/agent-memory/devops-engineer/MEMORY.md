@@ -5,11 +5,11 @@
 - [compose 构建路径解析](project-compose-build-path-resolution.md) — dockerfile 相对 context 拼（config 不解析），静态预检用 `docker compose build --print` + 存在性检查
 - [本环境无外网](project-no-internet-verify-empirically.md) — 在线文档不可达，规则判断改走本机实测/--help，未验证的标注为推断；**末尾订正：无外网只对 WSL 宿主成立，容器经 Docker Desktop 能出网且会间歇性 DNS 抖动（先重试）**
 - [健康检查实测偏差](project-health-probe-findings.md) — 前端/ollama-init 两条已在 compose 修复（待 up -d 生效）；data.timestamp 用 `Z` 未闭环；0.3.3 探针决策
-- [WSL 内工具实况](project-wsl-tooling-facts.md) — **jq 缺失**（sed 兜底才是实际路径）、python3 是最佳机械探针、SQL 走文件、含 `docker exec -i` 的脚本必须落盘；`wsl -- bash -c '…'` 传 `2>/dev/null`/`$(( ))` 会被 Git Bash 打乱 → 落盘或用 `MSYS_NO_PATHCONV=1`；**行尾检查用 `tr -dc '\r'`（`grep $'\r'` 全行误报）**
+- [WSL 内工具实况](project-wsl-tooling-facts.md) — **jq 缺失**（sed 兜底才是实际路径）、python3 是最佳机械探针、SQL 走文件、含 `docker exec -i` 的脚本必须落盘；`wsl -- bash -c '…'` 传 `2>/dev/null`/`$(( ))`/**`$?`** 会被外层打乱 → 落盘或 **`bash -s` 喂 stdin**；行尾检查用 `tr -dc '\r'`
 - [builder-m2 持久卷隐患](project-builder-m2-persistent-volume-hazard.md) — 持久卷静默复用旧构件，把「配置没生效」伪装成构建成功；判据要落在产物本身
 - [builder 构建分支的真源](project-builder-git-sync-branch-source.md) — 真源是容器 env `NEXUS_REPO_BRANCH`（默认 main），**不是宿主当前分支**；push 功能分支 ≠ builder 能拿到
 - [RAG 检索召回缺陷](project-rag-retrieval-recall-defect.md) — 阶段3 验收未过：答案块排 27+/587、无关块 score 0.75 ⇒ 阈值标定救不了；已定修法=换 bge-m3，**重灌复测未做≠已修好**
 - [builder 容器工具实况](project-builder-container-tooling.md) — **无 unzip**（验 jar 内文件用 JDK `jar xf`）；**有完整 JDK 17**（需 JVM 又不想装宿主时的第一候选）；与 WSL 宿主工具清单分开看
 - [RAG 夹具上传耗时](project-rag-ingest-timing.md) — 587 块 ≈3.6s/批、总 130~132s（设计写的 80~90s 偏低）；前端超时 300s 余量仅 ~2.3×
 - [测试发行版宿主工具实况](project-test-distro-host-tooling.md) — **无 java/node/unzip**（有 curl/git/python3.12/uid 1004）；zip 走 python `zipfile`；**WSL 墙上时钟会倒退 ⇒ 计时用 monotonic**
-- [报告链路 5.5 已交付](project-report-pipeline-delivery.md) — `finalize-run.py`（生成→发布→落库，幂等可重放）；**workflow 未接线是挡住 M7 的缺口**；CLI 缓存已在测试宿主
+- [报告链路交付（含按 run 并存）](project-report-pipeline-delivery.md) — 卷内按 run_id 并存 + 卷根索引页；邮件/Step Summary 带报告地址；**自愈式旧布局迁移已实现（真卷首跑即自动清场）**；端口口径 = report_env.py 单一实现
