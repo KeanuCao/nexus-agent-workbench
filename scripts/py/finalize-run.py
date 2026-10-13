@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""finalize-run.py —— 冒烟运行的收尾：报告链路 + 结果链路（阶段5 / 5.5 交付，2026-10-10）
+"""finalize-run.py —— 冒烟运行的收尾：报告链路 + 结果链路（阶段5 / 5.5 交付，2026-10-10；
+                                                     报告按 run_id 并存，2026-10-11）
 
 一条命令做完四步（顺序即依赖）：
   1) 前置检查   ：docker / artifacts / run-results.json 格式 / run_id 断言（纯只读）
-  2) Allure 报告：由 qa/e2e/artifacts/allure-results/ 生成 HTML，落到 artifacts/publish/allure-report/
+  2) Allure 报告：由 qa/e2e/artifacts/allure-results/ 生成 HTML，落到 artifacts/publish/run/allure-report/
                   —— 借 **builder 镜像的 JDK 17**（宿主无 Java，实测见设计 05 §7.4.5）；
                      CLI 首次自动下载（阿里云 Maven 镜像）并缓存到 $HOME/.cache/nexus-e2e/allure/，带 sha256 校验
-  3) 发布到卷  ：把 artifacts/publish/ 整树发布进报告卷（默认 nexus-test-report）——
-                  report-nginx 只读挂它，Windows 侧看 http://localhost:12008/
+  3) 发布到卷  ：只把本次运行的整树发布进报告卷（默认 nexus-test-report）的 runs/<run_id>/ ——
+                  **其它 run 的目录一律不碰**（多次运行结果并存）；卷根刷新两样：索引页 index.html
+                  （扫描 runs/*/run-results.json 生成，最新在前）与 run-results.json（最新一次）。
+                  卷是**全新卷**（卷根还没有 runs/）或**旧布局**（runs/ 下没有 <run_id>/ 子目录，
+                  只有平铺文件）时先整树清空一次（自愈式迁移，2026-10-11 拍板）—— 首跑即自动迁到新布局。
+                  report-nginx 只读挂它，Windows 侧看 http://localhost:<REPORT_PORT>/
+                  （端口真源 = docker-compose/.env.test 的 REPORT_PORT；脚本里不写端口字面量）
   4) 结果落库  ：run-results.json → 结果库（nexus_test_results）的 t_e2e_run / t_e2e_case；
                   表与视图 DDL（docker-compose/postgres-results-init/02-results-schema.sql）**每次重放**，
                   以覆盖"initdb 只跑一次、存量卷加脚本不再执行"的缺口（设计 05 §7.4.3）
@@ -26,8 +32,8 @@
     python3 scripts/py/finalize-run.py --volume nexus-test-report-selftest   # 发到别的卷（预演，不动真卷）
     python3 scripts/py/finalize-run.py --dry-run           # 只打印计划，不做任何写操作/网络
 
-★ 手工重放：本脚本整体幂等（同 run_id 覆盖式落库、发布为整树替换），失败后**原样再跑一遍**即可，
-  不必重跑 pytest；只想看计划就用 --dry-run。
+★ 手工重放：本脚本整体幂等 —— 同 run_id 即「该 run 的目录整体替换（先删后拷）+ 结果行覆盖写」，
+  **不叠加、不重复**；失败后原样再跑一遍即可，不必重跑 pytest；只想看计划就用 --dry-run。
 
 判据单一真源：本脚本不含"该不该红"的判断 —— 那是 pytest（用例）与 deploy.py（部署）的事；
 它只做"把这次运行的结果放到该放的地方"。输出形态沿用 deploy.py 的 [PASS]/[FAIL]/[WARN] 表。
@@ -36,6 +42,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -49,6 +56,8 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from report_env import env_file_port   # 同目录共享模块：报告端口口径（见 report_env.py 头注）
 
 # ── 常量（真源与落点）────────────────────────────────────────────────────────
 # Allure CLI：宿主没有 java/unzip（2026-10-10 实测），所以下载 + 解压（zipfile）都自己来；
@@ -67,7 +76,15 @@ REPORT_NGINX_CONTAINER = "nexus-test-report-nginx"     # … 里 report-nginx �
 REPORT_VOLUME = "nexus-test-report"                    # … 里 report 卷的 name:
 SCHEMA_SQL_REL = "docker-compose/postgres-results-init/02-results-schema.sql"
 STAGING_DIRNAME = "publish"
-RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,80}$")   # 进 SQL/路径前先收口，防脏值
+# staging（artifacts/publish/）的形状 = 卷内布局的镜像（真源见设计 05 §7.4.2）：
+#   staging/run/            → 卷内 runs/<run_id>/（本次运行的整棵树）
+#   staging/index.html      → 卷内 /index.html（索引页；发布前由 render_index_page 生成）
+#   staging/run-results.json → 卷内 /run-results.json（最新一次的结构化结果）
+RUN_TREE_DIRNAME = "run"
+# 进 SQL/路径前先收口，防脏值；`.`/`..` 明确拒掉（负向前瞻）—— 它们会让 `rm -rf /dst/runs/<id>`
+# 指向 runs/ 自身或其父目录，虽然 busybox 实测会拒绝删除（发布干净地 FAIL、卷无损），
+# 但仍属"不该放行"的值（2026-10-11 拍板加固）。
+RUN_ID_PATTERN = re.compile(r"^(?!\.{1,2}$)[A-Za-z0-9._-]{1,80}$")
 
 
 # ── 结果收集与输出（形态同 deploy.py）────────────────────────────────────────
@@ -133,7 +150,7 @@ def load_run_results(artifacts: Path, expect_run_id: str | None) -> tuple[dict |
         return None, f"run-results.json 的 schema 不认识：{doc.get('schema')!r}（格式漂移？先对齐 conftest）"
     run_id = str(doc.get("run_id") or "")
     if not RUN_ID_PATTERN.match(run_id):
-        return None, f"run_id 不合规（期望 [A-Za-z0-9._-]{{1,80}}）：{run_id!r}"
+        return None, f"run_id 不合规（期望 [A-Za-z0-9._-]{{1,80}}，且不得为 . 或 ..）：{run_id!r}"
     if expect_run_id and run_id != expect_run_id:
         return None, (f"旧产物护栏命中：run-results.json 是 run_id={run_id}，期望 {expect_run_id} "
                       f"⇒ 本次没有新结果，不发布（同 5.2 的旧产物护栏）")
@@ -223,35 +240,35 @@ def _executor_json(run_doc: dict) -> str:
 
 
 def build_staging(artifacts: Path, staging: Path, run_doc: dict) -> list[str]:
-    """把本次要发布的整树摆到 artifacts/publish/（原始产物只读复制）。返回警告列表。"""
+    """把本次要发布的整树摆到 artifacts/publish/（原始产物只读复制）。返回警告列表。
+
+    形状见文件头常量处的注释（staging/run/ = 卷内 runs/<run_id>/ 的镜像）；
+    历史副本 runs/<run_id>.json 不再单放 —— 卷内该 run 的 run-results.json 就是它（布局真源 §7.4.2）。
+    """
     warnings: list[str] = []
     if staging.exists():
         shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    shutil.copytree(artifacts / "allure-results", staging / "allure-results")
-    (staging / "allure-results" / "environment.properties").write_text(
+    run_tree = staging / RUN_TREE_DIRNAME
+    run_tree.mkdir(parents=True)
+    shutil.copytree(artifacts / "allure-results", run_tree / "allure-results")
+    (run_tree / "allure-results" / "environment.properties").write_text(
         _env_properties(run_doc), encoding="utf-8", newline="\n")
-    (staging / "allure-results" / "executor.json").write_text(
+    (run_tree / "allure-results" / "executor.json").write_text(
         _executor_json(run_doc), encoding="utf-8", newline="\n")
-    shutil.copy2(artifacts / "run-results.json", staging / "run-results.json")
-    (staging / "runs").mkdir()
-    run_copy = artifacts / "runs" / f"{run_doc['run_id']}.json"
-    if run_copy.exists():
-        shutil.copy2(run_copy, staging / "runs" / run_copy.name)
-    else:
-        warnings.append(f"runs/{run_copy.name} 不在（conftest 应同时写两份）——历史副本缺失")
+    shutil.copy2(artifacts / "run-results.json", run_tree / "run-results.json")
+    shutil.copy2(artifacts / "run-results.json", staging / "run-results.json")   # 卷根"最新一次"的默认值
     deploy_summary = artifacts / "deploy-summary.json"
     if deploy_summary.exists():
-        shutil.copy2(deploy_summary, staging / "deploy-summary.json")
+        shutil.copy2(deploy_summary, run_tree / "deploy-summary.json")
     else:
         warnings.append("deploy-summary.json 不在（本次不是从 --summary-json 的部署链路来的？）")
     if (artifacts / "playwright").is_dir():
-        shutil.copytree(artifacts / "playwright", staging / "playwright")
+        shutil.copytree(artifacts / "playwright", run_tree / "playwright")
     return warnings
 
 
-def generate_allure(staging: Path) -> tuple[bool, str]:
-    """借 builder 镜像的 JDK 17 跑 CLI（宿主无 Java）；生成到 staging/allure-report/。"""
+def generate_allure(run_tree: Path) -> tuple[bool, str]:
+    """借 builder 镜像的 JDK 17 跑 CLI（宿主无 Java）；生成到 run_tree/allure-report/。"""
     rc, out = docker("image", "inspect", BUILDER_IMAGE, timeout=60)
     if rc != 0:
         return False, (f"builder 镜像不存在：{BUILDER_IMAGE}（先跑一次部署把镜像建出来）\n"
@@ -262,18 +279,18 @@ def generate_allure(staging: Path) -> tuple[bool, str]:
         # 默认 root 写出来的是 root 文件，会卡住下一次清理）
         cmd += ["--user", f"{os.getuid()}:{os.getgid()}"]
     cmd += [
-        "-v", f"{staging / 'allure-results'}:/in:ro",
-        "-v", f"{staging}:/out",
+        "-v", f"{run_tree / 'allure-results'}:/in:ro",
+        "-v", f"{run_tree}:/out",
         "-v", f"{ALLURE_HOME}:/opt/allure:ro",
         BUILDER_IMAGE,
         "-c", "sh /opt/allure/bin/allure generate /in -o /out/allure-report --clean",
     ]
     rc, out = run(cmd, timeout=300)
-    report_index = staging / "allure-report" / "index.html"
+    report_index = run_tree / "allure-report" / "index.html"
     if rc != 0 or not report_index.exists():
         return False, f"allure generate 失败（rc={rc}）\n{out.strip()[-800:]}"
-    n_files = sum(1 for p in (staging / "allure-report").rglob("*") if p.is_file())
-    size_mb = sum(p.stat().st_size for p in (staging / "allure-report").rglob("*") if p.is_file()) / 1e6
+    n_files = sum(1 for p in (run_tree / "allure-report").rglob("*") if p.is_file())
+    size_mb = sum(p.stat().st_size for p in (run_tree / "allure-report").rglob("*") if p.is_file()) / 1e6
     return True, f"allure-report/：{n_files} 个文件 / {size_mb:.1f}MB（CLI {ALLURE_VERSION} + builder 镜像的 JDK 17）"
 
 
@@ -288,21 +305,68 @@ def volume_rel(path: str) -> str:
     return "./" + p[idx + len(marker):]
 
 
-def render_hub(run_doc: dict, staging: Path) -> str:
-    """本次运行的落地页（站点根 index.html）——为什么不是报告首页，见 report-nginx/default.conf 头注。"""
+PAGE_CSS = """
+:root { color-scheme: light dark; }
+body { font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 2rem auto;
+       max-width: 64rem; padding: 0 1rem; line-height: 1.55; }
+h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 1.8rem; }
+code { background: rgba(127,127,127,.15); padding: .1em .3em; border-radius: 4px; }
+.verdict { font-size: 1.6rem; font-weight: 700; }
+.verdict.pass { color: #1a7f37; } .verdict.fail { color: #c11; }
+ul.facts { list-style: none; padding-left: 0; } ul.facts li { margin: .2rem 0; }
+table { border-collapse: collapse; width: 100%; } th, td { border-bottom: 1px solid rgba(127,127,127,.35);
+        padding: .35rem .5rem; text-align: left; vertical-align: top; }
+.s-passed { color: #1a7f37; } .s-failed, .s-error { color: #c11; font-weight: 600; } .s-skipped, .s-unknown { color: #888; }
+pre { white-space: pre-wrap; background: rgba(127,127,127,.12); padding: .6rem; border-radius: 6px; overflow-x: auto; }
+footer { margin-top: 2.5rem; color: #888; font-size: .85rem; }
+.miss { color: #c11; }
+"""
+
+
+def _html_page(title: str, inner: str) -> str:
+    """两页共用的外壳（运行落地页 / 卷根索引页）——样式只写一份。"""
+    return "\n".join([
+        "<!doctype html>", '<html lang="zh-CN">', "<head>", '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f"<title>{html.escape(title)}</title>", f"<style>{PAGE_CSS}</style>", "</head>",
+        "<body><main>", inner, "</main></body></html>", "",
+    ])
+
+
+def conclusion_of(run_doc: dict) -> str:
+    """一次运行的结论口径（pass/fail）—— 落地页 / 索引页 / 落库三处共用，只写这一份。"""
+    totals = run_doc.get("totals", {}) or {}
+    ok = (run_doc.get("exit_code") == 0
+          and int(totals.get("failed", 0) or 0) == 0
+          and int(totals.get("error", 0) or 0) == 0
+          and int(totals.get("unknown", 0) or 0) == 0
+          and int(totals.get("total", 0) or 0) > 0)
+    return "pass" if ok else "fail"
+
+
+def pass_rate_text(totals: dict) -> str:
+    """通过率文案（索引页列表用）：`5/5（100%）`；total<=0 给 `—`。"""
+    total = int(totals.get("total", 0) or 0)
+    if total <= 0:
+        return "—"
+    passed = int(totals.get("passed", 0) or 0)
+    return f"{passed}/{total}（{round(passed * 100 / total)}%）"
+
+
+def render_run_page(run_doc: dict, run_tree: Path) -> str:
+    """本次运行的落地页（卷内 runs/<run_id>/index.html）。
+
+    内容与"站点根落地页"时期的一致：结论 + 打开入口 + 用例明细 + 失败留痕；
+    相对链接以**该 run 的目录**为基准（如 ./allure-report/），2026-10-11 起每个 run 一份。
+    """
     run_id = html.escape(str(run_doc.get("run_id", "")))
     totals = run_doc.get("totals", {}) or {}
     env = run_doc.get("environment", {}) or {}
     revision = run_doc.get("revision", {}) or {}
     trigger = run_doc.get("trigger", {}) or {}
     cases = run_doc.get("cases", []) or []
-    concluded_pass = (run_doc.get("exit_code") == 0
-                      and int(totals.get("failed", 0)) == 0
-                      and int(totals.get("error", 0)) == 0
-                      and int(totals.get("unknown", 0)) == 0
-                      and int(totals.get("total", 0)) > 0)
-    verdict = "PASS" if concluded_pass else "FAIL"
-    verdict_cls = "pass" if concluded_pass else "fail"
+    verdict = "PASS" if conclusion_of(run_doc) == "pass" else "FAIL"
+    verdict_cls = "pass" if verdict == "PASS" else "fail"
     run_url = str(trigger.get("run_url", "") or "")
 
     facts = [
@@ -317,15 +381,13 @@ def render_hub(run_doc: dict, staging: Path) -> str:
     if run_url:
         facts.append(f"CI 运行：<a href=\"{html.escape(run_url)}\">{html.escape(run_url)}</a>")
 
-    links = []
-    if (staging / "allure-report" / "index.html").exists():
+    links = ['<li><a href="../../">← 运行索引</a> —— 全部历史运行（最新在前）</li>']
+    if (run_tree / "allure-report" / "index.html").exists():
         links.append('<li><a href="./allure-report/">Allure 报告（本次）</a> —— 用例状态 / 失败原文 / 时间线</li>')
     else:
         links.append('<li class="miss">Allure 报告未生成（本次生成步骤失败，看收尾脚本输出）</li>')
     links.append('<li><a href="./run-results.json">run-results.json</a> —— 结构化结果（落库的同一份）</li>')
-    if (staging / "runs" / f"{run_doc.get('run_id')}.json").exists():
-        links.append(f'<li><a href="./runs/{run_id}.json">runs/{run_id}.json</a> —— 历史副本</li>')
-    if (staging / "deploy-summary.json").exists():
+    if (run_tree / "deploy-summary.json").exists():
         links.append('<li><a href="./deploy-summary.json">deploy-summary.json</a> —— 部署八步摘要</li>')
     links.append('<li><a href="./allure-results/">allure-results/</a> —— 原始 JSON（报告由它生成）</li>')
 
@@ -357,26 +419,7 @@ def render_hub(run_doc: dict, staging: Path) -> str:
         "<p>本次没有失败/错误用例（trace 与截图 <b>仅失败保留</b>，见 qa/e2e/pytest.ini）。</p>")
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    css = """
-:root { color-scheme: light dark; }
-body { font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 2rem auto;
-       max-width: 64rem; padding: 0 1rem; line-height: 1.55; }
-h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 1.8rem; }
-code { background: rgba(127,127,127,.15); padding: .1em .3em; border-radius: 4px; }
-.verdict { font-size: 1.6rem; font-weight: 700; }
-.verdict.pass { color: #1a7f37; } .verdict.fail { color: #c11; }
-ul.facts { list-style: none; padding-left: 0; } ul.facts li { margin: .2rem 0; }
-table { border-collapse: collapse; width: 100%; } th, td { border-bottom: 1px solid rgba(127,127,127,.35);
-        padding: .35rem .5rem; text-align: left; vertical-align: top; }
-.s-passed { color: #1a7f37; } .s-failed, .s-error { color: #c11; font-weight: 600; } .s-skipped, .s-unknown { color: #888; }
-pre { white-space: pre-wrap; background: rgba(127,127,127,.12); padding: .6rem; border-radius: 6px; overflow-x: auto; }
-footer { margin-top: 2.5rem; color: #888; font-size: .85rem; }
-.miss { color: #c11; }
-"""
-    parts = [
-        "<!doctype html>", '<html lang="zh-CN">', "<head>", '<meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        f"<title>E2E 冒烟 · {run_id}</title>", f"<style>{css}</style>", "</head>", "<body><main>",
+    body = "\n".join([
         f"<h1>E2E 冒烟运行 <code>{run_id}</code></h1>",
         f'<p class="verdict {verdict_cls}">{verdict}</p>',
         '<ul class="facts">' + "".join(f"<li>{fact}</li>" for fact in facts) + "</ul>",
@@ -386,40 +429,228 @@ footer { margin-top: 2.5rem; color: #888; font-size: .85rem; }
         + "".join(rows) + "</tbody></table>",
         "<h2>失败留痕</h2>", failure_html,
         "<p>trace.zip 用 <code>playwright show-trace &lt;trace.zip&gt;</code> 打开；截图即整页 png。"
-        "两者都落在报告卷的 <code>/playwright/</code> 下（仅失败保留）。</p>",
+        "两者都落在报告卷的 <code>runs/&lt;run_id&gt;/playwright/</code> 下（仅失败保留）。</p>",
         f"<footer>生成：{generated_at}（UTC） · 由 scripts/py/finalize-run.py 发布；"
         f"布局真源 = docs/design/05-自动化测试.md §7.4.2</footer>",
-        "</main></body></html>", "",
+    ])
+    return _html_page(f"E2E 冒烟 · {run_doc.get('run_id', '')}", body)
+
+
+def merge_entries(prior: list[dict], current: dict) -> list[dict]:
+    """按 run_id 合并（本次运行**覆盖**同 run_id 的卷内旧条目 —— 重放不产生重复），返回"最新在前"。
+
+    排序键 = (started_at, run_id) 倒序：按运行开始时间排，而不是发布顺序
+    （重放一个旧运行、或修复式重发时，列表顺序依然正确）。
+    """
+    by_id: dict[str, dict] = {str(entry["run_id"]): entry for entry in prior}
+    by_id[str(current["run_id"])] = current
+
+    def sort_key(entry: dict) -> tuple[str, str]:
+        doc = entry.get("doc") or {}
+        return (str(doc.get("started_at") or ""), str(entry["run_id"]))
+
+    return sorted(by_id.values(), key=sort_key, reverse=True)
+
+
+def render_index_page(entries: list[dict]) -> str:
+    """卷根索引页：最近一次运行的结论摘要 + 历史运行列表（最新在前）。
+
+    每条链到该 run 的落地页（runs/<run_id>/）与该 run 的 Allure 报告（…/allure-report/，
+    没生成就标 `—`）。entries 由调用方保证已排序、已去重（读坏的文件在读取侧就已剔除）。
+    """
+    def cell_run(entry: dict) -> str:
+        href = html.escape("runs/" + str(entry["dir"]) + "/")
+        return f'<a href="{href}">{html.escape(str(entry["run_id"]))}</a>'
+
+    def cell_verdict(doc: dict) -> str:
+        ok = conclusion_of(doc) == "pass"
+        cls = "s-passed" if ok else "s-failed"
+        return f'<span class="{cls}">{"PASS" if ok else "FAIL"}</span>'
+
+    def cell_window(doc: dict) -> str:
+        start = html.escape(str(doc.get("started_at", "") or "—"))
+        end = html.escape(str(doc.get("finished_at", "") or "—"))
+        return f"{start} → {end}"
+
+    def cell_trigger(doc: dict) -> str:
+        trigger = doc.get("trigger", {}) or {}
+        kind = html.escape(str(trigger.get("kind", "") or "?"))
+        url = str(trigger.get("run_url", "") or "")
+        if url:
+            return f'{kind}（<a href="{html.escape(url)}">运行页</a>）'
+        return kind
+
+    def cell_revision(doc: dict) -> str:
+        revision = doc.get("revision", {}) or {}
+        return html.escape(str(revision.get("sha", "") or "?"))
+
+    def cell_allure(entry: dict) -> str:
+        if not entry.get("has_allure"):
+            return '<span class="s-unknown">—</span>'
+        href = html.escape("runs/" + str(entry["dir"]) + "/allure-report/")
+        return f'<a href="{href}">Allure</a>'
+
+    rows = "".join(
+        "<tr>"
+        f"<td>{cell_run(entry)}</td>"
+        f"<td>{cell_verdict(entry.get('doc') or {})}</td>"
+        f"<td>{pass_rate_text((entry.get('doc') or {}).get('totals', {}) or {})}</td>"
+        f"<td>{cell_window(entry.get('doc') or {})}</td>"
+        f"<td>{cell_trigger(entry.get('doc') or {})}</td>"
+        f"<td>{cell_revision(entry.get('doc') or {})}</td>"
+        f"<td>{cell_allure(entry)}</td>"
+        "</tr>"
+        for entry in entries)
+    latest = entries[0]
+    latest_doc = latest.get("doc") or {}
+    ok = conclusion_of(latest_doc) == "pass"
+    verdict, verdict_cls = ("PASS", "pass") if ok else ("FAIL", "fail")
+    latest_href = html.escape("runs/" + str(latest["dir"]) + "/")
+    latest_facts = [
+        f'运行：<a href="{latest_href}">{html.escape(str(latest["run_id"]))}</a>',
+        f"通过率：{pass_rate_text(latest_doc.get('totals', {}) or {})} · 起止：{cell_window(latest_doc)}",
+        f"触发：{cell_trigger(latest_doc)} · 代码：{cell_revision(latest_doc)}",
+        f"共 {len(entries)} 次运行记录（下表，最新在前）",
     ]
-    return "\n".join(parts)
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    body = "\n".join([
+        "<h1>E2E 冒烟 · 运行索引</h1>",
+        f'<p class="verdict {verdict_cls}">{verdict}</p>',
+        "<p>最近一次运行：</p>",
+        '<ul class="facts">' + "".join(f"<li>{fact}</li>" for fact in latest_facts) + "</ul>",
+        "<h2>历史运行（最新在前）</h2>",
+        "<table><thead><tr><th>运行</th><th>结论</th><th>通过率</th><th>起止（UTC）</th>"
+        "<th>触发</th><th>代码</th><th>Allure</th></tr></thead><tbody>"
+        + rows + "</tbody></table>",
+        "<p>每次运行的落地页（含失败留痕直链与用例明细）在各自的 <code>runs/&lt;run_id&gt;/</code> 下"
+        "（点上表第一列的 run_id）。</p>",
+        f"<footer>生成：{generated_at}（UTC） · 由 scripts/py/finalize-run.py 发布；"
+        f"布局真源 = docs/design/05-自动化测试.md §7.4.2</footer>",
+    ])
+    return _html_page("E2E 冒烟 · 运行索引", body)
 
 
-def publish(staging: Path, volume: str) -> tuple[bool, str]:
+def report_nginx_image() -> tuple[str | None, str]:
+    """取 report-nginx 的运行时镜像名（读卷/发布的一次性容器复用它 —— 一定有、且版本一致）。"""
+    rc, out = docker("inspect", "-f", "{{.Config.Image}}", REPORT_NGINX_CONTAINER, timeout=60)
+    if rc != 0:
+        return None, (f"取不到 {REPORT_NGINX_CONTAINER} 的镜像（容器没起？）—— "
+                      f"发布容器要复用 report-nginx 的镜像（一定有、且版本一致）")
+    image = out.strip().splitlines()[0].strip() if out.strip() else ""
+    if not image:
+        return None, f"{REPORT_NGINX_CONTAINER} 的镜像名为空（docker inspect 输出异常？）"
+    return image, ""
+
+
+def read_volume_runs(volume: str, image: str) -> tuple[list[dict], str]:
+    """读卷内既有 runs/*/run-results.json（索引页的数据源；**只读挂载**，不写卷）。
+
+    返回 (entries, note)：note 总是有内容（正常 = 读了几条；异常 = 这次没读全，索引页会少历史条目，
+    但发布照常进行、旧条目仍在卷里）。entries 每项 = {run_id, dir, doc, raw, has_allure, origin}。
+    文件内容用 **base64** 转运：容器里（nginx alpine / busybox）没有 jq/python，base64 一定有、
+    且不会把 JSON 里的引号换行搅坏。dir 名/文件内容都可能是旧运行留下的脏值 —— 解析失败就跳过并计数。
+    """
+    rc, out = docker(
+        "run", "--rm", "--entrypoint", "sh",
+        "-v", f"{volume}:/vol:ro", image, "-c",
+        "for f in /vol/runs/*/run-results.json; do\n"
+        "  [ -f \"$f\" ] || continue\n"
+        "  d=$(dirname \"$f\")\n"
+        "  if [ -f \"$d/allure-report/index.html\" ]; then a=1; else a=0; fi\n"
+        "  echo \"__RUN__ $a $(basename \"$d\")\"\n"
+        "  base64 \"$f\"\n"
+        "  echo \"__RUN_END__\"\n"
+        "done",
+        timeout=120,
+    )
+    if rc != 0:
+        return [], f"读卷内既有 runs/ 失败（索引页这次只含本次运行；原条目仍在卷里）：{out.strip()[-300:]}"
+    entries: list[dict] = []
+    skipped = 0
+    dirname: str | None = None
+    has_allure = False
+    buf: list[str] = []
+    for line in out.splitlines():
+        if line.startswith("__RUN__ "):
+            parts = line.split(" ", 2)
+            has_allure = len(parts) > 1 and parts[1] == "1"
+            dirname = parts[2].strip() if len(parts) > 2 else ""
+            buf = []
+        elif line == "__RUN_END__" and dirname is not None:
+            doc: object = None
+            try:
+                doc = json.loads(base64.b64decode("".join(buf)).decode("utf-8"))
+            except Exception:  # noqa: BLE001 —— 坏文件不该拖垮整个索引
+                doc = None
+            if isinstance(doc, dict) and doc.get("run_id"):
+                entries.append({
+                    "run_id": str(doc.get("run_id")), "dir": dirname, "doc": doc,
+                    "raw": base64.b64decode("".join(buf)), "has_allure": has_allure,
+                    "origin": "volume",
+                })
+            else:
+                skipped += 1
+            dirname = None
+        elif dirname is not None:
+            buf.append(line.strip())
+    note = f"索引页：卷内既有 {len(entries)} 条历史已读入"
+    if skipped:
+        note += f"；{skipped} 条 run-results.json 读不出（已跳过，原文件仍在卷里）"
+    return entries, note
+
+
+def publish(staging: Path, volume: str, run_id: str) -> tuple[bool, str]:
+    """把 staging 发布进卷：**只替换本次的 runs/<run_id>/**，卷根刷新索引页 + 最新结果。
+
+    · 其它 run 的目录一律不碰（多次运行结果并存；布局真源 = 设计 05 §7.4.2）；
+    · **自愈式首清（2026-10-11 拍板）**：卷根没有 runs/（全新卷）**或** runs/ 下没有任何 <run_id>/ 子目录
+      （只有平铺文件 = 旧布局）⇒ 整树清空一次（清掉 nginx 欢迎页 / 旧布局残留 —— 首跑新脚本即自动
+      迁到新布局）；此后只动本次的 runs/<run_id>/；
+    · chmod a+rX 只对本次新拷入的内容做（一个容器写、另一个容器读 —— nginx worker 是 uid 101，见设计 05 §6-3）；
+    · run_id 进命令前已过 RUN_ID_PATTERN（[A-Za-z0-9._-]{1,80}，`.`/`..` 已拒），不会引入 shell 元字符。
+    """
     rc, out = docker("volume", "inspect", volume, timeout=60)
     if rc != 0:
         return False, f"卷不存在：{volume}（compose 起过吗？卷由 docker-compose.test.yml 声明）"
-    rc, out = docker("inspect", "-f", "{{.Config.Image}}", REPORT_NGINX_CONTAINER, timeout=60)
-    if rc != 0:
-        return False, (f"取不到 {REPORT_NGINX_CONTAINER} 的镜像（容器没起？）—— "
-                       f"发布容器要复用 report-nginx 的镜像（一定有、且版本一致）")
-    image = out.strip().splitlines()[0].strip()
+    image, error = report_nginx_image()
+    if image is None:
+        return False, error
     rc, out = docker(
         "run", "--rm", "--entrypoint", "sh",
         "-v", f"{staging}:/src:ro",
         "-v", f"{volume}:/dst",
         image, "-c",
-        # 整树替换（清掉卷根旧内容，含 Docker 首次挂载时从镜像拷进来的 nginx 欢迎页）+
-        # chmod a+rX 收口权限（"一个容器写、另一个容器读"——nginx worker 是 uid 101，见设计 05 §6-3）
-        "set -e; find /dst -mindepth 1 -maxdepth 1 -exec rm -rf {} +; "
-        "cp -a /src/. /dst/; chmod -R a+rX /dst; "
-        "echo __VOLUME_ROOT__; ls -1 /dst",
+        "set -e; "
+        # 首清判据（2026-10-11 拍板）：全新卷（无 runs/）或旧布局（runs/ 下没有任何 <run_id>/ 子目录，
+        # 只有平铺文件）⇒ 整树清空一次。判目录用 shell 通配 `/dst/runs/*/`（尾斜杠只匹配目录；
+        # 空目录 / 只有文件时通配不展开，has_dir 保持 0）—— 此写法不依赖 find 的 -quit。
+        "cleanse=0; why=''; "
+        "if [ ! -d /dst/runs ]; then cleanse=1; why='全新卷（卷根还没有 runs/）'; "
+        "else has_dir=0; for d in /dst/runs/*/; do if [ -d \"$d\" ]; then has_dir=1; break; fi; done; "
+        "if [ \"$has_dir\" = 0 ]; then cleanse=1; why='旧布局迁移（runs/ 下没有 <run_id>/ 子目录）'; fi; fi; "
+        "if [ \"$cleanse\" = 1 ]; then echo \"__FIRST_CLEANSE__ $why\"; "
+        "find /dst -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi; "
+        "mkdir -p /dst/runs; "
+        f"rm -rf /dst/runs/{run_id}; "
+        f"cp -a /src/run /dst/runs/{run_id}; "
+        "cp -a /src/index.html /dst/index.html; "
+        "cp -a /src/run-results.json /dst/run-results.json; "
+        f"chmod -R a+rX /dst/runs/{run_id} /dst/index.html /dst/run-results.json; "
+        "echo __VOLUME_ROOT__; ls -1 /dst; echo __VOLUME_RUNS__; ls -1 /dst/runs",
         timeout=300,
     )
     if rc != 0:
         return False, f"发布失败（rc={rc}）\n{out.strip()[-800:]}"
-    listing = out.split("__VOLUME_ROOT__")[-1].strip().splitlines()
-    items = [x for x in (line.strip() for line in listing) if x]
-    return True, f"{volume}：根目录 {len(items)} 项（{'、'.join(items)}）"
+    tail = out.split("__VOLUME_ROOT__")[-1]
+    root_part, _, runs_part = tail.partition("__VOLUME_RUNS__")
+    root_items = [x for x in (line.strip() for line in root_part.splitlines()) if x]
+    run_items = [x for x in (line.strip() for line in runs_part.splitlines()) if x]
+    cleanse_note = ""
+    if "__FIRST_CLEANSE__" in out:
+        reason = out.split("__FIRST_CLEANSE__", 1)[1].splitlines()[0].strip()
+        cleanse_note = f"；首清：{reason}"
+    return True, (f"{volume}：根 {len(root_items)} 项（{'、'.join(root_items)}）；"
+                  f"runs/ {len(run_items)} 个（{'、'.join(run_items)}）{cleanse_note}")
 
 
 # ── 步骤 4：结果落库 ─────────────────────────────────────────────────────────
@@ -446,11 +677,7 @@ def build_dml(run_doc: dict) -> str:
     revision = run_doc.get("revision", {}) or {}
     trigger = run_doc.get("trigger", {}) or {}
     environment = run_doc.get("environment", {}) or {}
-    conclusion = "pass" if (run_doc.get("exit_code") == 0
-                            and int(totals.get("failed", 0)) == 0
-                            and int(totals.get("error", 0)) == 0
-                            and int(totals.get("unknown", 0)) == 0
-                            and int(totals.get("total", 0)) > 0) else "fail"
+    conclusion = conclusion_of(run_doc)   # 口径与落地页/索引页共用一份实现
 
     def q(value: object) -> str:
         return f"$run${value}$run$"
@@ -569,9 +796,11 @@ def main(argv: list[str] | None = None) -> int:
         schema_state = "在" if schema_sql.exists() else "**缺失**"
         print(f"[dry-run] run_id={run_id} artifacts={artifacts} 卷={args.volume}", flush=True)
         print("  计划（不检查 docker / 不写任何东西）：", flush=True)
-        print(f"    1) Allure 生成：{artifacts / 'allure-results'} → {staging / 'allure-report'}"
+        print(f"    1) Allure 生成：{artifacts / 'allure-results'} → {staging / RUN_TREE_DIRNAME / 'allure-report'}"
               f"（借 {BUILDER_IMAGE} 的 JDK 17；CLI 缓存 {ALLURE_HOME}）", flush=True)
-        print(f"    2) 发布：{staging} → 卷 {args.volume}（整树替换 + chmod a+rX）", flush=True)
+        print(f"    2) 发布：{staging} → 卷 {args.volume}（只替换 runs/{run_id}/，其它 run 不碰；"
+              f"卷根刷新索引页 index.html + run-results.json=最新一次；"
+              f"全新卷（卷根无 runs/）或旧布局（runs/ 下无子目录）时先整树清一次）", flush=True)
         print(f"    3) 落库：{RESULTS_DB_CONTAINER} 的 nexus_test_results"
               f"（DDL 每次重放，schema 文件{schema_state}：{schema_sql}）", flush=True)
         print("  dry-run 结束（退出码 0；以下步骤均未执行）。", flush=True)
@@ -602,25 +831,54 @@ def main(argv: list[str] | None = None) -> int:
             R.add("2/4 Allure 报告生成", "FAIL", "Allure CLI 不可用", note)
         else:
             print(f"        {note}", flush=True)
-            ok, note = generate_allure(staging)
+            ok, note = generate_allure(staging / RUN_TREE_DIRNAME)
             if ok:
                 R.add("2/4 Allure 报告生成", "PASS", note,
                       "\n".join(warnings) if warnings else "")
             else:
                 R.add("2/4 Allure 报告生成", "FAIL", "生成失败（落地页仍会发布，只是没有报告入口）", note)
 
-    # ── 3: 发布 ──
+    # ── 3: 发布（本次 run 目录 + 卷根索引页/最新结果）──
     if not staging_ready:
         R.add("3/4 发布到报告卷", "SKIP", "staging 未就绪，没有可发布的内容")
     else:
-        hub_text = render_hub(run_doc, staging)
-        (staging / "index.html").write_text(hub_text, encoding="utf-8", newline="\n")
-        ok, note = publish(staging, args.volume)
-        if ok:
-            R.add("3/4 发布到报告卷", "PASS",
-                  f"{note}（Windows: http://localhost:12008/ —— 端口真源 .env.test 的 REPORT_PORT）")
+        run_tree = staging / RUN_TREE_DIRNAME
+        (run_tree / "index.html").write_text(render_run_page(run_doc, run_tree),
+                                             encoding="utf-8", newline="\n")
+        rc, _ = docker("volume", "inspect", args.volume, timeout=60)
+        if rc != 0:
+            R.add("3/4 发布到报告卷", "FAIL", "发布失败",
+                  f"卷不存在：{args.volume}（compose 起过吗？卷由 docker-compose.test.yml 声明）")
         else:
-            R.add("3/4 发布到报告卷", "FAIL", "发布失败", note)
+            notes: list[str] = []
+            image, image_error = report_nginx_image()
+            if image is None:
+                prior, read_note = [], image_error
+            else:
+                prior, read_note = read_volume_runs(args.volume, image)
+            notes.append(read_note)
+            current_entry = {
+                "run_id": run_id, "dir": run_id, "doc": run_doc, "raw": None,
+                "has_allure": (run_tree / "allure-report" / "index.html").exists(),
+                "origin": "current",
+            }
+            entries = merge_entries(prior, current_entry)   # 同 run_id 覆盖 ⇒ 重放不产生重复条目
+            (staging / "index.html").write_text(render_index_page(entries),
+                                                encoding="utf-8", newline="\n")
+            if entries[0]["origin"] != "current":
+                # 根 run-results.json 保持"最新一次"口径 —— 本次若是重放旧运行，别把它顶上去
+                (staging / "run-results.json").write_bytes(entries[0]["raw"])
+                notes.append(f"本次 run_id 不是最新一次（最新 = {entries[0]['run_id']}）："
+                             f"卷根 run-results.json 仍指向最新一次")
+            ok, note = publish(staging, args.volume, run_id)
+            port = env_file_port()
+            site_hint = (f"http://localhost:{port}/" if port
+                         else "<报告站点：docker-compose/.env.test 的 REPORT_PORT 没读到>")
+            if ok:
+                R.add("3/4 发布到报告卷", "PASS",
+                      f"{note}（Windows: {site_hint} 索引 → /runs/{run_id}/ 本次）", "\n".join(notes))
+            else:
+                R.add("3/4 发布到报告卷", "FAIL", "发布失败", "\n".join([note, *notes]))
 
     # ── 4: 落库 ──
     try:

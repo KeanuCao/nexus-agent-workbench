@@ -14,7 +14,7 @@
 
 | 路径 | 是什么 |
 | --- | --- |
-| `conftest.py` | 环境读取、登录/收尾夹具、失败留痕与结果文件的装配（**不放判据**） |
+| `conftest.py` | 环境读取、登录/收尾夹具、留痕（用例前后截图 + 失败现场）与结果文件的装配（**不放判据**） |
 | `lib/` | 机械动作库：`ui.py`（定位值 + 登录/登出）、`api.py`（发请求）、`kb.py`（列表指纹/删文档）、`results.py`（结果记账） |
 | `smoke/` | S1~S5，一条用例一个文件；文件名与 TC-05 的编号一一对应 |
 | `pytest.ini` | `testpaths` / 标记 / 失败留痕的两个开关（trace、截图） |
@@ -93,14 +93,14 @@ cd <CHECKOUT>/qa/e2e && .venv/bin/python -m pytest --headed --tracing=on --scree
 
 | 本地产物 | 谁生成 | 卷内建议目标 | 说明 |
 | --- | --- | --- | --- |
-| `artifacts/allure-results/` | `allure-pytest` | `/allure-results/` | **原始 JSON**（每次运行前先清空）；`allure generate` 出 `/allure-report/index.html` —— 那是报告首页，由 5.5 生成 |
-| `artifacts/playwright/<用例目录>/trace.zip` | pytest-playwright | `/playwright/<用例目录>/` | **仅失败时保留**（`--tracing=retain-on-failure`） |
+| `artifacts/allure-results/` | `allure-pytest` | `runs/<run_id>/allure-results/` | **原始 JSON**（每次运行前先清空），**另含每条用例的两张前后截图附件**（`<uuid>-attachment.png`，Allure HTML 里直接可见）；`allure generate` 出 `runs/<run_id>/allure-report/index.html` —— 那是该次报告首页，由 5.5 生成 |
+| `artifacts/playwright/<用例目录>/trace.zip` | pytest-playwright | `runs/<run_id>/playwright/<用例目录>/` | **仅失败时保留**（`--tracing=retain-on-failure`） |
 | `artifacts/playwright/<用例目录>/test-failed-1.png` | pytest-playwright | 同上 | **仅失败时保留**，整页截图（`--screenshot=only-on-failure --full-page-screenshot`） |
-| `artifacts/run-results.json` | `conftest.py` | `/run-results.json` | 最近一次运行的结构化结果 |
-| `artifacts/runs/<run_id>.json` | `conftest.py` | `/runs/<run_id>.json` | 同上的历史副本 |
+| `artifacts/run-results.json` | `conftest.py` | `runs/<run_id>/run-results.json` | 该次运行的结构化结果（另：卷根 `/run-results.json` 刷成**最新一次**；卷根 `/index.html` = 索引页） |
+| `artifacts/runs/<run_id>.json` | `conftest.py` | （并入上一行的同一落点） | 同上的历史副本；卷内不再单放 `<run_id>.json`（布局真源 = 设计 §7.4.2，2026-10-11 起按 run 并存） |
 
 - 卷 = 设计 §2.2 的 `nexus-test-report`（**宿主侧写、report-nginx 只读挂**）。"本地产物怎么进卷"（bind 挂载 / 拷贝）
-  由 **5.5** 定：本工程只负责**落点固定**，不管传输。
+  由 **5.5** 定：本工程只负责**落点固定**，不管传输。卷内路径以设计 §7.4.2 为真源 —— 上表 2026-10-11 已按其"按 run 并存"同步。
 - 报告卷要能被 `ls -lR` 出 `index.html` / `trace.zip` / `*.png`（设计 §5.5 的验收动作）—— 上面这张表就是它的来源。
 - `artifacts/` 下的东西**全部不入库**（目录里有一份 `.gitignore`）：阶段验收有一条
   「跑前跑后 `git status --porcelain` 一致」的无害性判据，产物出现在 git status 里会把它淹掉。
@@ -142,13 +142,30 @@ JSON，UTF-8，**LF**，`indent=2`；一次运行一份。5.5 落库就读它。
   （处置写在 `detail` 里，一般等 TTL 自净即可）；`none` = 本次没有产生需要清理的东西。
   **它不改变用例主结论** —— 主结论只由断言决定。
 
-## 失败留痕策略
+## 留痕策略（两套并存）
+
+### ① 失败留痕（trace + 整页图，仅失败）
 
 - **只留失败的**：`pytest.ini` 里 `--tracing=retain-on-failure --screenshot=only-on-failure`（+ 整页截图）。
   成功的用例不留 trace/截图（省体积、省时间）；要留就临时加 `--tracing=on --screenshot=on`。
 - 失败时同时有：**trace.zip**（可用 `playwright show-trace <file>` 打开）、**整页截图**、pytest 的失败原文
   （进 `run-results.json` 的 `message`），以及 Allure 报告里的同一条记录。
 - 失败发生在**夹具阶段**（例如登录拿不到 token）同样会留痕 —— 那时截图是登录页，正是要看的东西。
+
+### ② 用例前后截图（每次都有，进 Allure）
+
+`conftest.py` 的 `pytest_runtest_call` 钩子给**每条用例**拍两张**视口**截图（1440×900，
+即 `browser_context_args` 给的视口，**不是**整页），以 **Allure 附件**落进 `artifacts/allure-results/`
+（`<uuid>-attachment.png`），`allure generate` 出的报告 HTML 里直接可见：
+
+| 附件名 | 时机 | 画面里是什么 |
+| --- | --- | --- |
+| `执行前` | call 阶段开始：**夹具已就绪、用例体尚未执行** | S1~S3 的前图是 `about:blank`（它们要到用例体内才 `goto`）—— **属预期，不是 bug**；S4/S5 的 `logged_in` 在夹具阶段就登录了，前图是登录后的页面 |
+| `执行后` | 用例体结束（**无论通过还是失败**）、收尾夹具（登出 / 删文档）**尚未开始** | 用例跑完那一刻的页面 —— 失败时恰恰最需要它 |
+
+- **没有开关**：这两张恒定产生（与 `--tracing` / `--screenshot` 无关）；上一条的失败留痕照旧。
+- **不影响用例结论**：取 page / 截图 / attach 的任何异常一律吞掉（用例没用页面夹具、page 已关、
+  allure-pytest 没装 ⇒ 静默跳过）—— 它既不改变用例结论，也不会顶掉用例体抛出的原始异常。
 
 ## 已修复（2026-10-09）：S5 的 RAG 回答模型已指向本地（原「已知前置」开口项，已关）
 
