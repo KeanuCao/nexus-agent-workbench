@@ -1,12 +1,13 @@
-"""pytest 工程配置（qa/e2e）：环境读取、夹具、失败留痕、结果落盘。
+"""pytest 工程配置（qa/e2e）：环境读取、夹具、留痕（前后截图 + 失败现场）、结果落盘。
 
 三件事的归属（别混）：
 - **定位写法**的唯一真源 = `docs/design/05-自动化测试.md` §7.2 —— 本文件与用例只引用、不复制；
 - **判据**（"该不该通过"）写在用例的 assert 里，与 `docs/test-cases/TC-05.md` 的「预期」栏逐条对应；
-- 本文件只放：读环境、登录/收尾夹具、失败留痕与结果文件的装配。
+- 本文件只放：读环境、登录/收尾夹具、留痕（用例前后截图 / 失败现场）与结果文件的装配。
 
 产物路径（交给 5.5 挂卷，见 README「产物路径」）：
     artifacts/allure-results/      allure-pytest 写的原始 JSON（本次运行前会先清空）
+                                   —— 另含每用例两张前后截图附件（<uuid>-attachment.png）
     artifacts/playwright/<用例>/   失败留痕：trace.zip + test-failed-1.png（仅失败时保留）
     artifacts/run-results.json     最近一次运行的结构化结果（run_id + 用例级结论）
     artifacts/runs/<run_id>.json   同上的历史副本
@@ -49,6 +50,9 @@ DEFAULT_UI_TIMEOUT_MS = 15_000
 # ⚠️ 上界待首次实跑确定（RAG 那条最慢）——**别照抄别的项目的数字**，跑一次再收紧
 DEFAULT_LLM_TIMEOUT_MS = 180_000
 DEFAULT_EXPECT_CHAT_MODEL = "qwen2.5:7b"
+# 用例前后截图（Allure 附件，见 `pytest_runtest_call`）的单张上限：显式小超时，
+# 别拿 `page` 默认的 15s（那是给判据的）去拖用例
+SCREENSHOT_TIMEOUT_MS = 5_000
 
 
 @dataclass(frozen=True)
@@ -220,6 +224,53 @@ def pytest_collection_modifyitems(session, config, items) -> None:
         )
 
 
+def _attach_case_screenshot(item: pytest.Item, name: str) -> None:
+    """给当前用例 attach 一张**视口**截图（附件名 = `执行前` / `执行后`）。
+
+    「什么时候拍」由下面的 `pytest_runtest_call` 决定，本函数只管「怎么拍、拍不到怎么办」：
+    取 page / 截图（显式 `SCREENSHOT_TIMEOUT_MS` 上限）/ attach 的**任何异常一律吞掉** ——
+    报告附件是锦上添花，绝不允许 ① 改变用例结论 ② 掩盖用例体抛出的原始异常
+    ③ 让失败时的「执行后」那张反而不拍（失败时恰恰最需要它）。
+    """
+    try:
+        import allure
+    except ImportError:  # allure-pytest 没装时照常跑，只是报告里少附件（同 `_per_test_setup`）
+        return
+    try:
+        page = getattr(item, "funcargs", {}).get("page")
+        if page is None or page.is_closed():  # 用例没用页面夹具 / 页面已关 ⇒ 静默跳过
+            return
+        # 仅视口（1440×900，来自 `browser_context_args`）—— 刻意不用 full_page=True
+        png = page.screenshot(timeout=SCREENSHOT_TIMEOUT_MS)
+        allure.attach(png, name=name, attachment_type=allure.attachment_type.PNG)
+    except Exception:  # noqa: BLE001 —— 见 docstring：附件失败不许触碰用例的结论与异常
+        return
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item: pytest.Item):
+    """每条用例在 Allure 报告里带两张视口截图：「执行前」与「执行后」（每次都有，无开关）。
+
+    时机（**这就是本钩子存在的全部理由**，别随手挪）：
+    - 「执行前」= **call 阶段开始** —— 夹具已就绪、**用例体尚未执行**。S1~S3 是在用例体内才
+      `page.goto()` 的，此刻页面还是 `about:blank`（**拍到空白页属预期、不是 bug**）；
+      S4/S5 的 `logged_in` 在夹具阶段就登录了，前图是登录后的页面。
+    - 「执行后」= **用例体结束**（**无论通过还是失败**）、收尾夹具（`cleanup_login` 登出 /
+      `kb_doc_registry` 删文档）**尚未开始**。
+
+    **为什么不用 autouse 夹具**：同 scope 下 autouse 夹具会排在 `logged_in` **之前**建立
+    ⇒ 会在登录前就拍，「执行前」的时机就不对了。
+
+    只用 `finally` 兜底、不捕获异常：用例体抛出的原始异常原样往外抛（`_attach_case_screenshot`
+    自己吞掉自己的一切失败，不会顶掉它）。
+    """
+    _attach_case_screenshot(item, "执行前")
+    try:
+        return (yield)
+    finally:
+        _attach_case_screenshot(item, "执行后")
+
+
 def pytest_runtest_logreport(report) -> None:
     _recorder().note_report(report)
 
@@ -243,6 +294,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:
     reporter.write_line(f"历史副本    : {RUNS_DIR / (recorder.run_id + '.json')}")
     reporter.write_line(f"Allure 原始 : {ALLURE_DIR}")
     reporter.write_line(f"失败留痕    : {PW_OUTPUT_DIR}/<用例目录>/（trace.zip + test-failed-1.png，仅失败保留）")
+    reporter.write_line("用例截图    : Allure 附件「执行前 / 执行后」（每条 2 张，随报告 HTML 展示）")
     reporter.write_line(
         f"用例        : {len(cases)} 条 —— 通过 {tally['passed']} / 失败 {tally['failed']} / "
         f"跳过 {tally['skipped']} / 错误 {tally['error']}"
